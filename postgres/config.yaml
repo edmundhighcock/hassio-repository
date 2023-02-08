@@ -1,0 +1,7 @@
+name: "Hassio Addon for Postgres"
+description: "An add for Postgres configured to support taiga"
+version: "13.9"
+slug: "postgres"
+init: false
+arch:
+  - amd64
