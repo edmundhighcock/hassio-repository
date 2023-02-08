@@ -1,0 +1,37 @@
+{
+    "api": "https://host_to_be_replaced/api/v1/",
+    "eventsUrl": "wss://host_to_be_replaced/events",
+    "baseHref": "base_url_to_be_replaced",
+    "eventsMaxMissedHeartbeats": 5,
+    "eventsHeartbeatIntervalTime": 60000,
+    "eventsReconnectTryInterval": 10000,
+    "debug": false,
+    "debugInfo": false,
+    "defaultLanguage": "en",
+    "themes": [
+        "taiga"
+    ],
+    "defaultTheme": "taiga",
+    "defaultLoginEnabled": true,
+    "publicRegisterEnabled": true,
+    "feedbackEnabled": true,
+    "supportUrl": "https://community.taiga.io/",
+    "privacyPolicyUrl": null,
+    "termsOfServiceUrl": null,
+    "maxUploadFileSize": null,
+    "contribPlugins": [],
+    "tagManager": {
+        "accountId": null
+    },
+    "tribeHost": null,
+    "enableAsanaImporter": false,
+    "enableGithubImporter": false,
+    "enableJiraImporter": false,
+    "enableTrelloImporter": false,
+    "gravatar": false,
+    "rtlLanguages": [
+        "ar",
+        "fa",
+        "he"
+    ]
+}

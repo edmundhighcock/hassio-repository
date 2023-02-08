@@ -1,0 +1,15 @@
+name: "Taiga Project Manager"
+description: "Taiga Agile Project Manager"
+version: "6.0.10"
+slug: "hass_taiga"
+init: false
+arch:
+  - amd64
+options:
+  taiga_secret_key: "pleasechange"
+schema:
+  taiga_secret_key: "str"
+ingress: 8099
+ingress_port: 8099
+ingress_entry: "/discover"
+hassio_api: true
