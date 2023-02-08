@@ -17,7 +17,7 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 Installation requires the Home Assistant OS, i.e. you are not using
 hass in a container.
 
-# Add the repository
+### Add the repository
 
 1. Go to Settings -> Addons -> Addon Store -> Kebab (3 dots) menu -> Add Repository
 2. Add this repository: https://github.com/edmundhighcock/hassio-repository
@@ -28,16 +28,16 @@ You should now see the repository which should  include these 3 addons:
 
 1. Hass Addon for RabbitMQ
 2. Hass Addon for Postgres
-2. Hass Addon for Taiga
+2. Taiga Project Manager
 
-# Install services
+### Install services
 
 1. Install the `Addon for RabbitMQ`
 2. Ensure "Start on Boot" and "Watchdog" are checked.
 3. Install the `Addon for Postgres`
 4. Ensure "Start on Boot" and "Watchdog" are checked.
 
-# Install Taiga
+### Install Taiga
 
 1. Install Taiga
 2. **Important**. Go to the configuration page and set the taiga secret key to a secure random passphrase. It is really important to do this before starting Taiga
