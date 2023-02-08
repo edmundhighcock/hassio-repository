@@ -1,4 +1,4 @@
-# hass-postgres
+# taiga-postgres
 
 A postgres database addon for home assistant
 
