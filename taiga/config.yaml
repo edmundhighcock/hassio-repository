@@ -1,16 +1,18 @@
 name: "Taiga Project Manager"
 description: "Taiga Agile Project Manager"
 version: "6.0.10"
-slug: "hass_taiga"
+slug: "taiga"
 init: false
 arch:
   - amd64
 options:
   taiga_secret_key: "pleasechange"
   rabbitmq_password: "pleasechange"
+  postgres_password: "pleasechange"
 schema:
   taiga_secret_key: "password"
   rabbitmq_password: "password"
+  postgres_password: "password"
 ingress: 8099
 ingress_port: 8099
 ingress_entry: "/discover"
