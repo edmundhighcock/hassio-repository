@@ -68,3 +68,13 @@ _Important Note: You can change the RabbitMQ password at any time if you restart
 5. Start Taiga
 6. **Important**. Now go to the Taiga web ui, where you will already be logged in as `taiga_admin` (with password "pleasechangeme"). Immediately go to the Taiga settings (click the logo in the top right corner) and change the password to secure your installation.
 
+## Administration
+
+When you install Taiga there is one superuser account created. It is probably not ideal to use that for your day-to-day work. You can create an ordinary user account, as well as carry out other admin tasks, in the admin section.
+
+Taiga does not include a link to the admin section in the frontend. So this is how you get to it.
+
+1. In the Taiga application, right-click on any link and selection "Open in New Tab" (or equivalent on your browser)
+2. The new tab will have a URL that begins like: `https://<your hass server>/api/hassio_ingress/<longkey>/`, where the `<longkey>` is a random sequence of numbers and letters.
+3. Modify the URL to look like this (note the trailing slash):  `https://<your hass server>/api/hassio_ingress/<longkey>/admin/`
+4. You should now see the 
