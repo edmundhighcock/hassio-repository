@@ -5,12 +5,15 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 
 - Full Taiga 6 installation with events
 - Visible in the web ui which can be added to the Home Assistant sidebar.
-- Data persistance
+- Data persistence
+- Manual backups
 
 ## What still needs to be done
 
 - Integration with Home Assistant, e.g. a hass card with events in todo
+- Integration with Home Assistant user accounts
 - Allow use of a 3rd-party postgres server
+- Automatic backups
 
 ## Installation
 
@@ -19,7 +22,7 @@ hass in a container.
 
 ### Add the repository
 
-1. Go to Settings -> Addons -> Addon Store -> Kebab (3 dots) menu -> Add Repository
+1. Go to Settings -> Addons -> Addon Store -> Kebab (3 dots) menu -> Repositories
 2. Add this repository: https://github.com/edmundhighcock/hassio-repository
 3. Go to Settings -> Addons -> Addon Store -> Kebab (3 dots) menu -> Check for Updates
 4. Refresh the page

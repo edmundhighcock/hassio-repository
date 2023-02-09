@@ -7,8 +7,10 @@ arch:
   - amd64
 options:
   taiga_secret_key: "pleasechange"
+  rabbitmq_password: "pleasechange"
 schema:
-  taiga_secret_key: "str"
+  taiga_secret_key: "password"
+  rabbitmq_password: "password"
 ingress: 8099
 ingress_port: 8099
 ingress_entry: "/discover"
