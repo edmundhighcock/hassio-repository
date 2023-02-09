@@ -5,3 +5,7 @@ slug: "rabbitmq"
 init: false
 arch:
   - amd64
+options:
+  password: "pleasechange"
+schema:
+  password: "password"
