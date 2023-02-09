@@ -18,7 +18,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'taiga',
         'USER': 'taiga',
-        'PASSWORD': 'taiga',
+        'PASSWORD': os.environ['POSTGRES_PASSWORD'],
         'HOST': '9547a9e0-taiga-postgres',
         'PORT': '5432',
     }

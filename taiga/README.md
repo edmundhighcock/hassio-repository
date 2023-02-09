@@ -16,6 +16,17 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 - Allow use of a 3rd-party postgres server
 - Automatic backups
 - Architecture: `arm` (i.e. Raspberry Pi). Contributions welcome!
+- Use Home Assistant ubuntu base images + `bashio`
+- Shrink addon installation size (currently 2GB)
+
+## System requirements
+
+Taiga is a big application so needs a bit of power behind it.
+
+- Around 3GB disk space.
+- Around 400MB RAM
+- Architecture=`amd64` (extending to ARM is a high priority)
+
 
 ## Installation
 
@@ -44,7 +55,7 @@ You should now see the repository which should  include these 3 addons:
 
 ### Install Taiga
 
-1. Install Taiga
+1. Install Taiga. This will take some time (depending on your internet speed) as it is a 2GB image (this will be optimised further in the future, but even so Taiga is a big application).
 2. **Important**. Go to the configuration page and set the taiga secret key to a secure random passphrase. It is really important to do this before starting Taiga
 3. Select "Show in Sidebar" if desired.
 3. Start Taiga

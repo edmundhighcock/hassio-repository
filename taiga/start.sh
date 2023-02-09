@@ -26,6 +26,7 @@ fi
 
 export TAIGA_SECRET_KEY=$(cat /data/options.json | jq -r .taiga_secret_key) 
 export RABBITMQ_DEFAULT_PASS=$(cat /data/options.json | jq -r .rabbitmq_password) 
+export POSTGRES_PASSWORD=$(cat /data/options.json | jq -r .postgres_password) 
 
 SLUG=$(echo $HOSTNAME | sed -e 's/-/_/g')
 ADDON_INFO=$(curl  -H "Authorization: Bearer $SUPERVISOR_TOKEN" supervisor/addons/$SLUG/info)
@@ -36,9 +37,9 @@ sed -i "s base_url_to_be_replaced $INGRESS_ENTRY/ " /home/taiga/taiga-front-dist
 sed -i 's,base href="/",base href="'"$INGRESS_ENTRY"'/",' /home/taiga/taiga-front-dist/dist/index.html
 
 # ENVIRONMENT="INGRESS_ENTRY='$INGRESS_ENTRY' TAIGA_SECRET_KEY=$TAIGA_SECRET_KEY RABBITMQ_DEFAULT_PASS='$RABBITMQ_DEFAULT_PASS'"
-
+VARIABLES="TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS,POSTGRES_PASSWORD"
 # Carry out db migrations
-su -w TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS - taiga -c "$ENVIRONMENT bash -l /migrate.sh"
+su -w $VARIABLES  - taiga -c "bash -l /migrate.sh"
 
 # Start the proxy server
 nginx
@@ -54,7 +55,7 @@ tail -f /var/log/nginx/error.log | sed -e 's/^/nginx.root:: /' &
 
 
 # Launch Taiga
-su -w TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS - taiga -c "$ENVIRONMENT bash -l /run.sh"
+su -w $VARIABLES - taiga -c "bash -l /run.sh"
 
 wait
 
