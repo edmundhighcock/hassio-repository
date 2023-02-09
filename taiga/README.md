@@ -50,14 +50,21 @@ You should now see the repository which should  include these 3 addons:
 
 1. Install the `Addon for RabbitMQ`
 2. Ensure "Start on Boot" and "Watchdog" are checked.
-3. Install the `Addon for Postgres`
-4. Ensure "Start on Boot" and "Watchdog" are checked.
+3. Go to the configuration section and choose a password.
+4. Start the addon.
+5. Install the `Addon for Postgres`
+6. Ensure "Start on Boot" and "Watchdog" are checked.
+7. Go to the configuration section and choose a password.
+8. Start the addon.
+
+_Important Note: You can change the RabbitMQ password at any time if you restart the addon. However, once you set the initial Postgres password, you need to use the command line to change it (instructions will be added to the Postgres addon soon)._
 
 ### Install Taiga
 
 1. Install Taiga. This will take some time (depending on your internet speed) as it is a 2GB image (this will be optimised further in the future, but even so Taiga is a big application).
 2. **Important**. Go to the configuration page and set the taiga secret key to a secure random passphrase. It is really important to do this before starting Taiga
-3. Select "Show in Sidebar" if desired.
-3. Start Taiga
-4. **Important**. Now go to the Taiga web ui, and log in as `taiga_admin` with password "pleasechangeme". Immediately go to the Taiga settings (click the logo in the top right corner) and change the password to secure your installation.
+3. Add the passwords for RabbitMQ and Postgres that you set earlier.
+4. Select "Show in Sidebar" if desired.
+5. Start Taiga
+6. **Important**. Now go to the Taiga web ui, and log in as `taiga_admin` with password "pleasechangeme". Immediately go to the Taiga settings (click the logo in the top right corner) and change the password to secure your installation.
 
