@@ -1,6 +1,4 @@
 echo INGRESS_ENTRY is $INGRESS_ENTRY
-env
-sleep 1
 cd /home/taiga/taiga-back
 source .venv/bin/activate
 bash /init_postgres.sh
