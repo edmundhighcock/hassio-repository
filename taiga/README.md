@@ -66,5 +66,5 @@ _Important Note: You can change the RabbitMQ password at any time if you restart
 3. Add the passwords for RabbitMQ and Postgres that you set earlier.
 4. Select "Show in Sidebar" if desired.
 5. Start Taiga
-6. **Important**. Now go to the Taiga web ui, and log in as `taiga_admin` with password "pleasechangeme". Immediately go to the Taiga settings (click the logo in the top right corner) and change the password to secure your installation.
+6. **Important**. Now go to the Taiga web ui, where you will already be logged in as `taiga_admin` (with password "pleasechangeme"). Immediately go to the Taiga settings (click the logo in the top right corner) and change the password to secure your installation.
 
