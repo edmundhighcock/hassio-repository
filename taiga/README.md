@@ -74,7 +74,7 @@ When you install Taiga there is one superuser account created. It is probably no
 
 Taiga does not include a link to the admin section in the frontend. So this is how you get to it.
 
-1. In the Taiga application, right-click on any link and selection "Open in New Tab" (or equivalent on your browser)
-2. The new tab will have a URL that begins like: `https://<your hass server>/api/hassio_ingress/<longkey>/`, where the `<longkey>` is a random sequence of numbers and letters.
+1. In the Taiga application, right-click on any link and select "Open in New Tab" (or equivalent on your browser)
+2. The new tab will have a URL that begins like this: `https://<your hass server>/api/hassio_ingress/<longkey>/`, where the `<longkey>` is a random sequence of numbers and letters.
 3. Modify the URL to look like this (note the trailing slash):  `https://<your hass server>/api/hassio_ingress/<longkey>/admin/`
-4. You should now see the 
+4. You should now see the Django admin page
