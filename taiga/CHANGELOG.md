@@ -1,8 +1,14 @@
 # Changelog
 
+## [6.0.10-p2] - 2023-02-10
+
+### Fixed
+
+- Panel icon
+
 ## [6.0.10-p1] - 2023-02-10
 
-## Added
+### Added
 
 - Panel icon
 
