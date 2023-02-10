@@ -17,3 +17,4 @@ ingress: 8099
 ingress_port: 8099
 ingress_entry: "/discover"
 hassio_api: true
+panel_icon: "mdi:octogram"
