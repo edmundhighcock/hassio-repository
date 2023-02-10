@@ -18,6 +18,7 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 - Architecture: `arm` (i.e. Raspberry Pi). Contributions welcome!
 - Use Home Assistant ubuntu base images + `bashio`
 - Shrink addon installation size (currently 2GB)
+- Configuring email notifications
 
 ## System requirements
 
