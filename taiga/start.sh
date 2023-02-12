@@ -31,6 +31,7 @@ export POSTGRES_HOST=$(cat /data/options.json | jq -r .postgres_advanced_options
 export POSTGRES_USER=$(cat /data/options.json | jq -r .postgres_advanced_options.user) 
 export POSTGRES_DB=$(cat /data/options.json | jq -r .postgres_advanced_options.database) 
 export RABBITMQ_VHOST=$(cat /data/options.json | jq -r .rabbitmq_advanced_options.virtual_host) 
+export MINUTES_BETWEEN_BACKUPS=$(cat /data/options.json | jq -r .minutes_between_backups) 
 
 SLUG=$(echo $HOSTNAME | sed -e 's/-/_/g')
 ADDON_INFO=$(curl  -H "Authorization: Bearer $SUPERVISOR_TOKEN" supervisor/addons/$SLUG/info)
@@ -41,7 +42,7 @@ sed -i "s base_url_to_be_replaced $INGRESS_ENTRY/ " /home/taiga/taiga-front-dist
 sed -i 's,base href="/",base href="'"$INGRESS_ENTRY"'/",' /home/taiga/taiga-front-dist/dist/index.html
 
 # ENVIRONMENT="INGRESS_ENTRY='$INGRESS_ENTRY' TAIGA_SECRET_KEY=$TAIGA_SECRET_KEY RABBITMQ_DEFAULT_PASS='$RABBITMQ_DEFAULT_PASS'"
-VARIABLES="TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS,POSTGRES_PASSWORD,POSTGRES_HOST,POSTGRES_USER,POSTGRES_DB,RABBITMQ_VHOST"
+VARIABLES="TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS,POSTGRES_PASSWORD,POSTGRES_HOST,POSTGRES_USER,POSTGRES_DB,RABBITMQ_VHOST,MINUTES_BETWEEN_BACKUPS"
 # Carry out db migrations
 su -w $VARIABLES  - taiga -c "bash -l /migrate.sh"
 
@@ -57,6 +58,10 @@ tail -f /home/taiga/logs/nginx.error.log | sed -e 's/^/nginx:: /' &
 # tail -f  /var/log/nginx/access.log |  sed -e 's/^/nginx.root:: /' &
 tail -f /var/log/nginx/error.log | sed -e 's/^/nginx.root:: /' &
 
+# Start backup script
+mkdir -p /share/$HOSTNAME
+chown taiga /share/$HOSTNAME
+su -w $VARIABLES - taiga -c "bash -l /backup.sh" &
 
 # Launch Taiga
 su -w $VARIABLES - taiga -c "bash -l /run.sh"

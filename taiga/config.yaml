@@ -1,6 +1,6 @@
 name: "Taiga Project Manager"
 description: "Taiga Agile Project Manager"
-version: "6.0.10-p3"
+version: "6.0.10-p4"
 slug: "taiga"
 init: false
 arch:
@@ -9,6 +9,7 @@ options:
   taiga_secret_key: "pleasechange"
   rabbitmq_password: "pleasechange"
   postgres_password: "pleasechange"
+  minutes_between_backups: 61
   rabbitmq_advanced_options:
     virtual_host: "taiga"
   postgres_advanced_options:
@@ -19,6 +20,7 @@ schema:
   taiga_secret_key: "password"
   rabbitmq_password: "password"
   postgres_password: "password"
+  minutes_between_backups: "float"
   rabbitmq_advanced_options:
     virtual_host: "str"
   postgres_advanced_options: 

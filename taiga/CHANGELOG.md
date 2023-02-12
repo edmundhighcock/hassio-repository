@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.0.10-p4] - 2023-02-12
+
+### Added
+
+- Automatic backup of all projects to the Home Assistant 'share' folder
+
 ## [6.0.10-p3] - 2023-02-12
 
 ### Added
