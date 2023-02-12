@@ -16,10 +16,10 @@ DEBUG = False
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'taiga',
-        'USER': 'taiga',
+        'NAME': os.environ['POSTGRES_DB'],
+        'USER': os.environ['POSTGRES_USER'],
         'PASSWORD': os.environ['POSTGRES_PASSWORD'],
-        'HOST': '9547a9e0-taiga-postgres',
+        'HOST': os.environ['POSTGRES_HOST'],
         'PORT': '5432',
     }
 }
@@ -68,6 +68,7 @@ EMAIL_HOST_USER = 'user'
 EMAIL_HOST_PASSWORD = 'password'
 
 RABBITMQ_PASSWORD=os.environ['RABBITMQ_DEFAULT_PASS']
+RABBITMQ_VHOST=os.environ['RABBITMQ_VHOST']
 
 #########################################
 ## EVENTS
@@ -75,7 +76,7 @@ RABBITMQ_PASSWORD=os.environ['RABBITMQ_DEFAULT_PASS']
 EVENTS_PUSH_BACKEND = "taiga.events.backends.rabbitmq.EventsPushBackend"
 EVENTS_PUSH_BACKEND_OPTIONS = {
     # "url": "amqp://taiga:rabbitmqpassword@rabbitmqhost:5672/taiga"
-    "url": "amqp://taiga:" + RABBITMQ_PASSWORD + "@9547a9e0-rabbitmq:5672/taiga"
+    "url": "amqp://taiga:" + RABBITMQ_PASSWORD + "@9547a9e0-rabbitmq:5672/" + RABBITMQ_VHOST
 }
 
 
@@ -86,7 +87,7 @@ CELERY_ENABLED = os.getenv('CELERY_ENABLED', 'True') == 'True'
 
 from kombu import Queue  # noqa
 
-CELERY_BROKER_URL = "amqp://taiga:" + RABBITMQ_PASSWORD + "@9547a9e0-rabbitmq:5672/taiga"
+CELERY_BROKER_URL = "amqp://taiga:" + RABBITMQ_PASSWORD + "@9547a9e0-rabbitmq:5672/" + RABBITMQ_VHOST
 CELERY_RESULT_BACKEND = None # for a general installation, we don't need to store the results
 CELERY_ACCEPT_CONTENT = ['pickle', ]  # Values are 'pickle', 'json', 'msgpack' and 'yaml'
 CELERY_TASK_SERIALIZER = "pickle"

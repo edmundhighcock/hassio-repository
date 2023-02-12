@@ -1,6 +1,6 @@
 name: "Taiga Project Manager"
 description: "Taiga Agile Project Manager"
-version: "6.0.10-p2"
+version: "6.0.10-p3"
 slug: "taiga"
 init: false
 arch:
@@ -9,12 +9,26 @@ options:
   taiga_secret_key: "pleasechange"
   rabbitmq_password: "pleasechange"
   postgres_password: "pleasechange"
+  rabbitmq_advanced_options:
+    virtual_host: "taiga"
+  postgres_advanced_options:
+    host: '9547a9e0-taiga-postgres'
+    user: 'taiga'
+    database: 'taiga'
 schema:
   taiga_secret_key: "password"
   rabbitmq_password: "password"
   postgres_password: "password"
+  rabbitmq_advanced_options:
+    virtual_host: "str"
+  postgres_advanced_options: 
+    host: 'str'
+    user: 'str'
+    database: 'str'
 ingress: 8099
 ingress_port: 8099
 ingress_entry: "/discover"
 hassio_api: true
 panel_icon: "mdi:octagram"
+map:
+  - "share:rw"
