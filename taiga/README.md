@@ -8,14 +8,13 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 - Data persistence
 - Architecture: `amd64` (i.e. most modern Intel and AMD chips)
 - Allow use of a 3rd-party postgres server (must be <= 13.9)
+- Automatic backups
 
 
 ## What still needs to be done
 
 - Integration with Home Assistant, e.g. a hass card with events in todo
 - Integration with Home Assistant user accounts
-- Automatic backups
-- Manual backups
 - Architecture: `arm` (i.e. Raspberry Pi). Contributions welcome!
 - Use Home Assistant ubuntu base images + `bashio`
 - Shrink addon installation size (currently 2GB)
@@ -80,3 +79,23 @@ Taiga does not include a link to the admin section in the frontend. So this is h
 2. The new tab will have a URL that begins like this: `https://<your hass server>/api/hassio_ingress/<longkey>/`, where the `<longkey>` is a random sequence of numbers and letters.
 3. Modify the URL to look like this (note the trailing slash):  `https://<your hass server>/api/hassio_ingress/<longkey>/admin/`
 4. You should now see the Django admin page
+
+### Backup and Restore
+
+The addon regularly exports all projects into the home assistant `shared` folder. This means that when you do a full backup of Home Assistant (which includes the `shared` foler) you will save a snapshot of all your projects at that time. 
+
+Each project is exported as a giant json file. 
+
+If the worst happens and you need to restore the addon from scratch, you can 
+
+1. download your home assistant backup,
+2. open up the tarball,
+3. find the shared folder tarball, and
+4. open the tarball and find the `9547a9e0-taiga` folder.
+5. For each project json file, you can create a new project in taiga, and select the "Import Project" option, then upload the json file to recreate your project.
+
+#### Changing the update frequency
+
+You can change the time between project exports by changing the parameter `minutes_between_backups` in the project configuration.
+
+
