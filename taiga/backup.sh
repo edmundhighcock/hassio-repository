@@ -5,7 +5,7 @@ source .venv/bin/activate
 
 while true
 do
-  PGPASSWORD="$POSTGRES_PASSWORD" psql "$POSTGRES_DB" -U "$POSTGRES_USER" -h "$POSTGRES_HOST" -c 'select json_agg(slug) from projects_project;' | grep '\[' | jq -r '. | join(",")' | DJANGO_SETTINGS_MODULE=settings.config xargs python manage.py dump_project -d /share/$HOSTNAME/.
+  PGPASSWORD="$POSTGRES_PASSWORD" psql "$POSTGRES_DB" -U "$POSTGRES_USER" -h "$POSTGRES_HOST" -c 'select json_agg(slug) from projects_project;' | grep '\[' | jq -r '. | join(" ")' | DJANGO_SETTINGS_MODULE=settings.config xargs python manage.py dump_project -d /share/$HOSTNAME/.
   echo "Backup complete, sleeping for $MINUTES_BETWEEN_BACKUPS minutes."
   sleep "$MINUTES_BETWEEN_BACKUPS"m
 done
