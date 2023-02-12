@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.0.10-p5] - 2023-02-12
+
+### Fixed
+
+- Automatic backup of multiple projects
+
 ## [6.0.10-p4] - 2023-02-12
 
 ### Added
