@@ -1,6 +1,6 @@
 name: "Hass Addon for RabbitMQ"
 description: "A home assistant addon for the RabbitMQ message broker"
-version: "3.11.7"
+version: "3.11.7-p1"
 slug: "rabbitmq"
 init: false
 arch:
