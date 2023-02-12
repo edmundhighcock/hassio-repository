@@ -7,12 +7,13 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 - Visible in the web ui which can be added to the Home Assistant sidebar.
 - Data persistence
 - Architecture: `amd64` (i.e. most modern Intel and AMD chips)
+- Allow use of a 3rd-party postgres server (must be <= 13.9)
+
 
 ## What still needs to be done
 
 - Integration with Home Assistant, e.g. a hass card with events in todo
 - Integration with Home Assistant user accounts
-- Allow use of a 3rd-party postgres server
 - Automatic backups
 - Manual backups
 - Architecture: `arm` (i.e. Raspberry Pi). Contributions welcome!
