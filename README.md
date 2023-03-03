@@ -1,7 +1,7 @@
 # hassio-repository
 A repository for Home Assistant Addons
 
-Home Assistant is a smart home operating system that allows you to control and automate your house. It can be extended via community addons to carry out many different tasks, allowing you to automate and accelerate all parts of your work and home tasks.
+[Home Assistant](https://www.home-assistant.io/) is a smart home operating system that allows you to control and automate your house. It can be extended via community addons to carry out many different tasks, allowing you to automate and accelerate all parts of your work and home tasks.
 
 This repository is a collection of add-ons which have been created to fill current holes in the community collection.
 
@@ -17,9 +17,9 @@ To add this repository, you need to be running Home Assistant as an operating sy
 
 ## Add-ons In this Repository
 
-### Taiga
+### [Taiga Addon](https://github.com/edmundhighcock/hassio-repository/tree/main/taiga)
 
-Taiga is an open-source agile project manager which is great for managing both your personal and work activities.
+[Taiga](https://www.taiga.io/) is an open-source agile project manager which is great for managing both your personal and work activities.
 
 #### Addon for RabbitMQ (Supplemental)
 
