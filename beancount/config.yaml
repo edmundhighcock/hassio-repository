@@ -1,6 +1,6 @@
 name: "Beancount Accounting"
 description: "Beancount Double-Entry Accounting Software (v2)"
-version: "2.3.5-p7"
+version: "2.3.5-p11"
 slug: "beancount_2"
 init: false
 arch:
@@ -9,8 +9,10 @@ arch:
   - armhf
   - armv7
   - i386
-options: {}
-schema: {}
+options:
+  beancount_file: "example.beancount"
+schema:
+  beancount_file: "str"
 ingress: 5001
 ingress_port: 5001
 # ingress_entry: ""

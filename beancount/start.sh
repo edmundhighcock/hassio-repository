@@ -32,4 +32,21 @@ tail -f /var/nginx.error.log | sed -e 's/^/nginx::err:: /' &
 # tail -f  /var/log/nginx/access.log |  sed -e 's/^/nginx.root:: /' &
 # tail -f /var/nginx.error.log | sed -e 's/^/nginx.root:: /' &
 
-fava --prefix  "$INGRESS_ENTRY"  -d /tmp/example.beancount
+
+BEANCOUNT_FOLDER=/share/beancount
+BEANCOUNT_FILE=$BEANCOUNT_FOLDER/`bashio::config beancount_file`
+
+if ! test -f $BEANCOUNT_FOLDER
+then
+	mkdir $BEANCOUNT_FOLDER
+fi
+
+if ! test -f $BEANCOUNT_FOLDER/example.beancount
+then
+	cp /tmp/example.beancount $BEANCOUNT_FOLDER/example.beancount
+	chmod a+r $BEANCOUNT_FOLDER/example.beancount
+fi
+
+
+
+fava --prefix  "$INGRESS_ENTRY"  -d $BEANCOUNT_FILE
