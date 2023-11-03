@@ -12,7 +12,7 @@ RUN apk add --update --no-cache python3 py3-pip nginx
 COPY --from=builder /install /usr/local
 COPY --from=builder /tmp/example.beancount /tmp/example.beancount
 
-COPY nginx.conf /etc/nginx/conf.d/taiga.conf
+COPY nginx.conf /etc/nginx/http.d/fava.conf
 COPY start.sh /start.sh
 RUN chmod u+x /start.sh
 
