@@ -8,13 +8,16 @@ RUN cd /tmp && curl -O https://raw.githubusercontent.com/beancount/beancount/mas
 
 FROM $BUILD_FROM
 
-RUN apk add --update --no-cache python3 py3-pip 
+RUN apk add --update --no-cache python3 py3-pip nginx 
 COPY --from=builder /install /usr/local
 COPY --from=builder /tmp/example.beancount /tmp/example.beancount
 
+COPY nginx.conf /etc/nginx/conf.d/taiga.conf
+COPY start.sh /start.sh
+RUN chmod u+x /start.sh
 
 ENV FAVA_HOST "0.0.0.0"
 ENV PYTHONPATH /usr/local/lib/python3.11/site-packages
-EXPOSE 5000
-CMD PYTHONPATH=/usr/local/lib/python3.11/site-packages fava /tmp/example.beancount
+CMD /start.sh
+# EXPOSE 5000
 

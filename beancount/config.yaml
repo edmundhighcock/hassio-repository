@@ -1,7 +1,7 @@
 name: "Beancount Accounting"
 description: "Beancount Double-Entry Accounting Software (v2)"
-version: "2.3.5"
-slug: "beancount-2"
+version: "2.3.5-p7"
+slug: "beancount_2"
 init: false
 arch:
   - aarch64
@@ -11,10 +11,11 @@ arch:
   - i386
 options: {}
 schema: {}
-ingress: 5000
-ingress_port: 5000
-# ingress_entry: "/discover"
+ingress: 5001
+ingress_port: 5001
+# ingress_entry: ""
 hassio_api: true
 panel_icon: "mdi:octagram"
+# webui: "http://[HOST]:[PORT:5000]/api/hassio_ingress/-aNgOt2o_Jv1G7MdsgLgvP2vnOt7rby8e786GN_ARvM/"
 map:
   - "share:rw"
