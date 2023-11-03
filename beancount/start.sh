@@ -1,11 +1,18 @@
 #!usr/bin/with-contenv bashio
 
-echo SUPERVISOR_TOKEN $SUPERVISOR_TOKEN
-SLUG=$(echo $HOSTNAME | sed -e 's/-/_/g')
-echo SLUG $SLUG
-ADDON_INFO=$(curl -sSL -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons/$SLUG/info)
-echo ADDON_INFO $ADDON_INFO
-export INGRESS_ENTRY=$(echo $ADDON_INFO | jq -r '.data.ingress_entry')
+set +u
+
+if [[ "$SUPERVISOR_TOKEN" == "" ]]
+then
+  export INGRESS_ENTRY="/test/ingress"
+else
+  echo SUPERVISOR_TOKEN $SUPERVISOR_TOKEN
+  SLUG=$(echo $HOSTNAME | sed -e 's/-/_/g')
+  echo SLUG $SLUG
+  ADDON_INFO=$(curl -sSL -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons/$SLUG/info)
+  echo ADDON_INFO $ADDON_INFO
+  export INGRESS_ENTRY=$(echo $ADDON_INFO | jq -r '.data.ingress_entry')
+fi
 export FAVA_HOST="0.0.0.0"
 export PYTHONPATH=/usr/local/lib/python3.11/site-packages
 
