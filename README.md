@@ -17,6 +17,10 @@ To add this repository, you need to be running Home Assistant as an operating sy
 
 ## Add-ons In this Repository
 
+## Fava + Beancount Personal Accounting Software
+
+Beancount is well-established python tool for carrying out double-entry accounting.
+
 ### [Taiga Addon](https://github.com/edmundhighcock/hassio-repository/tree/main/taiga)
 
 [Taiga](https://www.taiga.io/) is an open-source agile project manager which is great for managing both your personal and work activities.

@@ -36,7 +36,7 @@ tail -f /var/nginx.error.log | sed -e 's/^/nginx::err:: /' &
 BEANCOUNT_FOLDER=/share/beancount
 BEANCOUNT_FILE=$BEANCOUNT_FOLDER/`bashio::config beancount_file`
 
-if ! test -f $BEANCOUNT_FOLDER
+if ! test -d $BEANCOUNT_FOLDER
 then
 	mkdir $BEANCOUNT_FOLDER
 fi
