@@ -9,6 +9,7 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 - Architecture: `amd64` (i.e. most modern Intel and AMD chips)
 - Allow use of a 3rd-party postgres server (must be <= 13.9)
 - Automatic backups
+- Access the WebUI via the nabucasa remote URL (`https://<uid>.ui.nabu.casa/...`)
 
 
 ## What still needs to be done
@@ -19,6 +20,7 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 - Use Home Assistant ubuntu base images + `bashio`
 - Shrink addon installation size (currently 2GB)
 - Configuring email notifications
+- Accessing the WebUI via the local URL (`https://homeassistant.local/...`)
 
 ## System requirements
 
