@@ -6,7 +6,7 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 - Full Taiga 6 installation with events
 - Visible in the web ui which can be added to the Home Assistant sidebar.
 - Data persistence
-- Architecture: `amd64` (i.e. most modern Intel and AMD chips)
+- Architecture: `amd64` (i.e. most modern Intel and AMD chips) and `aarch64` (Raspberry PI)
 - Allow use of a 3rd-party postgres server (must be <= 13.9)
 - Automatic backups
 - Access the WebUI via the nabucasa remote URL (`https://<uid>.ui.nabu.casa/...`)
@@ -16,7 +16,6 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 
 - Integration with Home Assistant, e.g. a hass card with events in todo
 - Integration with Home Assistant user accounts
-- Architecture: `arm` (i.e. Raspberry Pi). Contributions welcome!
 - Use Home Assistant ubuntu base images + `bashio`
 - Shrink addon installation size (currently 2GB)
 - Configuring email notifications
