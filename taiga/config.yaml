@@ -1,6 +1,6 @@
 name: "Taiga Project Manager"
 description: "Taiga Agile Project Manager"
-version: "6.0.10-p6"
+version: "6.0.10-p7"
 slug: "taiga"
 init: false
 arch:
