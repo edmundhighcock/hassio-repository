@@ -71,8 +71,6 @@ RUN cd ~/taiga-protected && \
 
 COPY protected.env /home/taiga/taiga-protected/.env 
 
-COPY backend_config.py /home/taiga/taiga-back/settings/config.py
-COPY frontend-conf.json /home/taiga/taiga-front-dist/dist/conf.json
 
 USER root
 
@@ -86,7 +84,7 @@ RUN apt-get -y autoremove && apt-get -y clean && apt-get -y autoclean
 
 RUN rm /etc/nginx/sites-enabled/default
 
-COPY nginx.conf /etc/nginx/conf.d/taiga.conf
+# COPY nginx.conf /etc/nginx/conf.d/taiga.conf
 
 
 #FROM scratch

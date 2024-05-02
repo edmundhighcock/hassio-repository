@@ -1,10 +1,11 @@
 name: "Taiga Project Manager"
 description: "Taiga Agile Project Manager"
-version: "6.0.10-p5"
+version: "6.0.10-p6"
 slug: "taiga"
 init: false
 arch:
   - amd64
+  - armv7
 options:
   taiga_secret_key: "pleasechange"
   rabbitmq_password: "pleasechange"

@@ -1,0 +1,3 @@
+build_from:
+  amd64: edmundhighcock/hass-taiga:withjq
+  armv7: edmundhighcock/hass-taiga:latest-armv7 

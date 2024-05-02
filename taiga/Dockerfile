@@ -1,6 +1,7 @@
 # See the repository edmundhighcock/hass-taiga
 # in the folder build to see what is in this image
-FROM edmundhighcock/hass-taiga:withjq
+ARG BUILD_FROM
+FROM $BUILD_FROM
 
 USER root
 
