@@ -14,7 +14,7 @@ else
   export INGRESS_ENTRY=$(echo $ADDON_INFO | jq -r '.data.ingress_entry')
 fi
 export FAVA_HOST="0.0.0.0"
-export PYTHONPATH=/usr/local/lib/python3.11/site-packages
+export PYTHONPATH=/usr/local/lib/`ls /usr/local/lib/ | grep python | head -1`/site-packages
 
 sed -i "s path_to_be_replaced $INGRESS_ENTRY " /etc/nginx/http.d/fava.conf
 cat /etc/nginx/http.d/fava.conf
