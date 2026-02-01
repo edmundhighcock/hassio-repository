@@ -12,14 +12,14 @@ options:
   mcp_port: 3000
   logging_level: "INFO"
 schema:
-  firefly_base_url: str
-  firefly_token: password
-  mcp_port: port
+  firefly_base_url: "url"
+  firefly_token: "password"
+  mcp_port: "port"
   logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?"
 ports:
-  3000/tcp: 3000
+  "3000/tcp": 3000
 ports_description:
-  3000/tcp: "Model Context Protocol HTTP server"
+  "3000/tcp": "Model Context Protocol HTTP server"
 hassio_api: false
-webui: "http://[HOST]:3000"
+webui: "http://[HOST]:[PORT:3000]"
 panel_icon: "mdi:cash-multiple"
