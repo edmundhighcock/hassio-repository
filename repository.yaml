@@ -1,3 +1,24 @@
 name: Edmund HH's  Home Assistant Repository
 url: https://github.com/edmundhighcock/hassio-repository
 maintainer: edmundhighcock@sourceforge.net
+addons:
+  taiga:
+    name: "Taiga Project Manager"
+    description: "Taiga Agile Project Management platform"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/taiga
+  postgres:
+    name: "PostgreSQL"
+    description: "PostgreSQL database server"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/postgres
+  rabbitmq:
+    name: "RabbitMQ"
+    description: "RabbitMQ message broker"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/rabbitmq
+  beancount:
+    name: "Fava/Beancount"
+    description: "Personal accounting software based on double-entry bookkeeping"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/beancount
+  fireflyiii-mcp:
+    name: "FireflyIII MCP Server"
+    description: "Model Context Protocol server for FireflyIII personal finance automation"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/fireflyiii-mcp
