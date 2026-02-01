@@ -10,9 +10,9 @@ RUN apk add --no-cache \
     musl-dev \
     python3-dev
 
-# Install LamPyrid directly from GitHub source with pip
+# Install LamPyrid from custom fork with rules management feature
 RUN pip3 install --no-cache-dir \
-    git+https://github.com/RadCod3/LamPyrid.git
+    git+https://github.com/edmundhighcock/LamPyrid.git@feat/add-rules-management
 
 # Copy start script
 COPY start.sh /
