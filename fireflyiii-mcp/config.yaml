@@ -12,27 +12,10 @@ options:
   mcp_port: 3000
   logging_level: "INFO"
 schema:
-  firefly_base_url:
-    description: "Base URL of your FireflyIII instance"
-    example: "http://192.168.1.100:8080"
-    type: url
-  firefly_token:
-    description: "Personal access token from FireflyIII (Settings → OAuth → Personal Access Tokens)"
-    type: password
-  mcp_port:
-    description: "Port for the MCP server"
-    type: port
-    default: 3000
-  logging_level:
-    description: "Log level for the MCP server"
-    type: list
-    options:
-      - DEBUG
-      - INFO
-      - WARNING
-      - ERROR
-      - CRITICAL
-    default: INFO
+  firefly_base_url: "str"
+  firefly_token: "password"
+  mcp_port: "int"
+  logging_level: "str"
 ports:
   3000/tcp: 3000
 hassio_api: false
