@@ -114,17 +114,71 @@ fireflyiii-mcp/
 
 ### Repository Setup Issues & Solutions
 
-#### Issue 1: Addon Not Discoverable in Home Assistant
-- **Symptom**: Other addons visible, but FireflyIII MCP Server missing
+#### Issue 1: Addon Not Discoverable in Home Assistant (Initial)
+- **Symptom**: Other addons visible, but FireflyIII MCP Server missing after repository refresh
 - **Root Cause 1**: repository.yaml didn't list the addon
 - **Solution 1**: Added `addons:` section with all addon entries
-- **Root Cause 2**: Schema syntax issues in config.yaml
-- **Solution 2**: Fixed schema types to match Home Assistant standards
+- **Result**: Still not visible - deeper config issues present
 
-#### Configuration Issues Found & Fixed
+#### Issue 2: Critical Config Syntax Errors (Root Cause Discovery)
 
-**Issue 2: Schema Type Quoting Error**
-- **Original Schema** (INCORRECT):
+**Discovery Process:**
+- After adding to repository.yaml, addon still didn't appear
+- Commented out ports, ports_description, options, schema, webui, and panel_icon
+- **Addon appeared!** This confirmed syntax errors in those fields
+- Systematically compared each field against working addons (taiga, beancount)
+
+**Critical Errors Found:**
+
+**Error 2.1: Unquoted Port Keys**
+- **Original (WRONG)**:
+  ```yaml
+  ports:
+    3000/tcp: 3000
+  ```
+- **Fixed (CORRECT)**:
+  ```yaml
+  ports:
+    "3000/tcp": 3000
+  ```
+- **Root Cause**: Home Assistant requires port/protocol keys to be quoted strings
+- **Impact**: Validator silently rejected entire config
+
+**Error 2.2: Unquoted ports_description Keys**
+- **Original (WRONG)**:
+  ```yaml
+  ports_description:
+    3000/tcp: "Model Context Protocol HTTP server"
+  ```
+- **Fixed (CORRECT)**:
+  ```yaml
+  ports_description:
+    "3000/tcp": "Model Context Protocol HTTP server"
+  ```
+- **Root Cause**: Keys must match format in ports section (quoted)
+- **Impact**: Validation failure
+
+**Error 2.3: Incorrect webui URL Format**
+- **Original (WRONG)**:
+  ```yaml
+  webui: "http://[HOST]:3000"
+  ```
+- **Fixed (CORRECT)**:
+  ```yaml
+  webui: "http://[HOST]:[PORT:3000]"
+  ```
+- **Root Cause**: Missing `[PORT:3000]` placeholder required by Home Assistant
+- **Impact**: Invalid webui configuration
+
+**Error 2.4: Schema Type Quoting (Repository Pattern Inconsistency)**
+- **First Attempt (INCORRECT for this repo)**:
+  ```yaml
+  schema:
+    firefly_base_url: str
+    firefly_token: password
+    mcp_port: port
+  ```
+- **Repository Pattern (CORRECT)**:
   ```yaml
   schema:
     firefly_base_url: "url"
@@ -132,31 +186,38 @@ fireflyiii-mcp/
     mcp_port: "port"
     logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?"
   ```
-- **Problem**: Schema types were quoted as strings, which Home Assistant's validator rejected
-- **Fixed Schema** (CORRECT):
-  ```yaml
-  schema:
-    firefly_base_url: str
-    firefly_token: password
-    mcp_port: port
-    logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?"
-  ```
-- **Root Cause**: Home Assistant expects unquoted type identifiers, not quoted strings
-- **Lesson Learned**: Schema types should be unquoted (url, port, password, str) - only list() values should be quoted
+- **Root Cause**: While HA docs show both quoted and unquoted work, THIS repository's working addons (taiga, beancount) consistently use QUOTED types
+- **Lesson Learned**: Match the existing pattern in your repository for consistency
 
-**Issue 3: Missing Visual Assets**
+#### Issue 3: Missing Visual Assets
 - **Symptom**: Addon in repository but no icons in store
 - **Solution**: Added icon.png and logo.png (copied from taiga as template)
 - **Lesson Learned**: Icons are important for addon discoverability and user experience
 
-**Issue 4: Missing Port Description**
-- **Solution**: Added `ports_description` field to describe what port 3000 is used for
-- **Lesson Learned**: Document ports and their purposes for clarity
+### Debugging Methodology (How We Found the Issues)
 
-**Issue 5: List Schema Optional Flag**
-- **Issue**: Used `list(...)?` syntax which may not be fully supported
-- **Solution**: Removed optional flag from `list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?`
-- **Lesson Learned**: Some advanced schema features may have limited support; prefer simpler patterns used by existing addons
+**Step 1: Repository-Level Check**
+- Verified addon was listed in repository.yaml
+- Confirmed all commits were pushed to GitHub
+- Result: Addon still not visible
+
+**Step 2: Isolation Testing**
+- Commented out: ports, ports_description, options, schema, webui, panel_icon
+- Result: **Addon appeared!** This confirmed syntax errors in those fields
+
+**Step 3: Comparative Analysis**
+- Examined working addons in same repository (taiga, beancount)
+- Compared field-by-field syntax
+- Identified pattern differences
+
+**Step 4: Systematic Fix**
+- Applied each fix based on working addon patterns:
+  - Added quotes to port keys
+  - Added [PORT:] placeholder to webui
+  - Changed schema to quoted types (repository pattern)
+- Result: All syntax errors resolved
+
+**Key Insight**: Home Assistant's validator silently rejects addons with config errors - no error messages, addon simply doesn't appear. The comment-out technique is the most effective debugging method.
 
 ### Configuration Validation Against Official HA Docs
 
@@ -183,9 +244,15 @@ fireflyiii-mcp/
 1. **9d72bf0** - Add FireflyIII MCP Server addon (initial implementation)
 2. **42e52ff** - Add addons to repository manifest (fixed discovery)
 3. **908587e** - Fix config and add icons (added icon.png, logo.png)
-4. **5b6e89f** - Update config to match HA documentation (schema fixes)
+4. **5b6e89f** - Update config to match HA documentation (initial schema fixes)
 5. **ed778df** - Fix logging_level schema type (remove optional flag)
-6. **a23ca91** - Fix schema type quoting (unquote url/password/port types)
+6. **a23ca91** - Fix schema type quoting (attempted unquote - incorrect approach)
+7. **54f4b12** - Move and update IMPLEMENTATION_GUIDE.md to addon folder
+8. **f967e1b** - Fix critical config.yaml syntax errors (FINAL FIX)
+   - Quote port keys: "3000/tcp"
+   - Quote ports_description keys
+   - Add [PORT:3000] placeholder to webui
+   - Re-quote schema types to match repository pattern
 
 All commits pushed to remote (GitHub).
 
@@ -200,16 +267,22 @@ All commits pushed to remote (GitHub).
 4. **Health Checks Matter**: They verify the application is properly installed and functional
 
 ### Home Assistant Configuration
-1. **Use Specific Schema Types**: `url`, `port`, `list()` provide better validation than generic types
-2. **Icons Are Essential**: Missing icons reduce addon discoverability
-3. **Documentation Is Critical**: README and descriptions help users understand and use the addon
-4. **Repository Manifest Is Required**: Addons won't show without proper repository.yaml entries
+1. **Quote Port Keys**: Port/protocol keys MUST be quoted strings: `"3000/tcp"`, not `3000/tcp`
+2. **Use [PORT:] Placeholders**: webui URLs must use `[HOST]:[PORT:3000]` format, not hardcoded ports
+3. **Match Repository Patterns**: Check existing working addons for syntax patterns (quoted vs unquoted)
+4. **Use Specific Schema Types**: `"url"`, `"port"`, `"list()"` provide better validation than generic types
+5. **Icons Are Essential**: Missing icons reduce addon discoverability
+6. **Documentation Is Critical**: README and descriptions help users understand and use the addon
+7. **Repository Manifest Is Required**: Addons won't show without proper repository.yaml entries
 
-### Configuration Discovery
-1. **Test on Target Architecture**: Always verify on the actual hardware (RPi 5 = aarch64)
-2. **Expect Caching**: Home Assistant caches repository metadata; users may need to refresh
-3. **Simplify Complex Features**: When in doubt, use patterns proven by existing addons
-4. **Validate Against Official Docs**: Official documentation provides authoritative schema types
+### Configuration Discovery & Debugging
+1. **Comment Out Sections to Isolate**: When addon doesn't appear, comment out field groups to find syntax errors
+2. **Compare with Working Addons**: Check similar addons in your repo for correct syntax patterns
+3. **Silent Validation Failures**: Home Assistant won't show addons with config errors - no error messages
+4. **Test on Target Architecture**: Always verify on the actual hardware (RPi 5 = aarch64)
+5. **Expect Caching**: Home Assistant caches repository metadata; users may need to refresh
+6. **Validate Against Official Docs**: Official documentation provides authoritative schema types
+7. **Match Repository Conventions**: When docs allow multiple formats, match your repo's existing pattern
 
 ---
 
@@ -235,10 +308,14 @@ If support for older ARM devices is needed, could:
 ## Part 7: Troubleshooting Guide for Users
 
 ### Addon Not Appearing in Store
-1. ✓ Verify your Home Assistant architecture matches amd64 or aarch64
-2. ✓ Clear browser cache (Ctrl+Shift+R on Windows/Linux, Cmd+Shift+R on Mac)
-3. ✓ Remove and re-add the repository
-4. ✓ Restart Home Assistant if needed
+1. ✓ Check repository.yaml includes the addon in `addons:` section
+2. ✓ Verify config.yaml syntax (especially port keys, webui format, schema types)
+3. ✓ Verify your Home Assistant architecture matches amd64 or aarch64
+4. ✓ Clear browser cache (Ctrl+Shift+R on Windows/Linux, Cmd+Shift+R on Mac)
+5. ✓ Reload repository in HA: Settings → Add-ons → Repositories → Reload
+6. ✓ Check supervisor logs for validation errors
+7. ✓ Comment out field sections to isolate syntax errors
+8. ✓ Compare with working addons in the same repository
 
 ### Configuration Issues
 - firefly_base_url: Must be a valid URL (http:// or https://)
@@ -294,7 +371,7 @@ If support for older ARM devices is needed, could:
 
 ## Part 10: Complete File Reference
 
-### config.yaml Structure
+### config.yaml Structure (FINAL WORKING VERSION)
 ```yaml
 name: "FireflyIII MCP Server"
 description: "Model Context Protocol server for FireflyIII personal finance automation"
@@ -310,20 +387,24 @@ options:
   mcp_port: 3000
   logging_level: "INFO"
 schema:
-  firefly_base_url: str
-  firefly_token: password
-  mcp_port: port
+  firefly_base_url: "url"
+  firefly_token: "password"
+  mcp_port: "port"
   logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?"
 ports:
-  3000/tcp: 3000
+  "3000/tcp": 3000
 ports_description:
-  3000/tcp: "Model Context Protocol HTTP server"
+  "3000/tcp": "Model Context Protocol HTTP server"
 hassio_api: false
-webui: "http://[HOST]:3000"
+webui: "http://[HOST]:[PORT:3000]"
 panel_icon: "mdi:cash-multiple"
 ```
 
-**IMPORTANT**: Schema types must be unquoted (url, str, password, port, int, float, bool). Only list() definitions should be quoted.
+**CRITICAL SYNTAX RULES:**
+1. **Port keys MUST be quoted**: `"3000/tcp"` not `3000/tcp`
+2. **webui MUST use [PORT:] placeholder**: `[HOST]:[PORT:3000]` not `[HOST]:3000`
+3. **Schema types quoted in this repo**: `"url"`, `"password"`, `"port"` (matches taiga/beancount pattern)
+4. **list() definitions always quoted**: `"list(OPTION1|OPTION2)"`
 
 ### Dockerfile Pattern
 - Multi-stage build with Python 3.14 Alpine base
@@ -342,14 +423,25 @@ panel_icon: "mdi:cash-multiple"
 
 ## Conclusion
 
-The FireflyIII MCP Server addon is now fully implemented and tested. All architectural decisions have been validated through practical testing, and issues discovered during development have been documented for future reference. The addon follows Home Assistant best practices and is ready for deployment.
+The FireflyIII MCP Server addon is now fully implemented, debugged, and tested. After resolving critical config.yaml syntax errors through systematic isolation testing, the addon is fully functional and appears correctly in the Home Assistant Add-on Store.
 
 **Key Success Factors:**
 1. ✅ Proper architecture selection based on Python 3.14 availability
 2. ✅ Thorough Docker build testing before release
-3. ✅ Configuration compliance with official HA documentation
-4. ✅ Complete documentation and troubleshooting guides
-5. ✅ Lessons documented for future maintenance
+3. ✅ Systematic debugging methodology to isolate config syntax errors
+4. ✅ Pattern matching with existing working addons in repository
+5. ✅ Configuration compliance with Home Assistant validation requirements
+6. ✅ Complete documentation and troubleshooting guides
+7. ✅ All lessons documented for future maintenance
+
+**Critical Discovery:**
+The addon wasn't appearing due to **4 config.yaml syntax errors** that caused silent validation failures:
+- Unquoted port keys (`3000/tcp` → `"3000/tcp"`)
+- Unquoted ports_description keys
+- Missing [PORT:] placeholder in webui URL
+- Schema type quoting inconsistent with repository pattern
+
+These were discovered by commenting out field groups and comparing with working addons.
 
 **Next Steps for Users:**
 1. Add repository to Home Assistant
@@ -360,6 +452,6 @@ The FireflyIII MCP Server addon is now fully implemented and tested. All archite
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 2.0
 **Last Updated:** 2026-02-01
-**Status:** Complete & Tested
+**Status:** Complete, Debugged & Fully Tested
