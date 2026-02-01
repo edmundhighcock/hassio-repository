@@ -123,20 +123,26 @@ fireflyiii-mcp/
 
 #### Configuration Issues Found & Fixed
 
-**Issue 2: Invalid Schema Types**
-- **Original Schema**:
-  - firefly_base_url: "str"
-  - mcp_port: "int"
-  - logging_level: "str"
-- **Problems**:
-  - No URL validation
-  - No port-specific validation
-  - String field instead of dropdown for logging level
-- **Fixed Schema**:
-  - firefly_base_url: "url" (proper URL format validation)
-  - mcp_port: "port" (port-specific validation)
-  - logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)" (dropdown selector)
-- **Lesson Learned**: Use specific schema types (url, port, list) instead of generic (str, int) for better validation and UX
+**Issue 2: Schema Type Quoting Error**
+- **Original Schema** (INCORRECT):
+  ```yaml
+  schema:
+    firefly_base_url: "url"
+    firefly_token: "password"
+    mcp_port: "port"
+    logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?"
+  ```
+- **Problem**: Schema types were quoted as strings, which Home Assistant's validator rejected
+- **Fixed Schema** (CORRECT):
+  ```yaml
+  schema:
+    firefly_base_url: str
+    firefly_token: password
+    mcp_port: port
+    logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?"
+  ```
+- **Root Cause**: Home Assistant expects unquoted type identifiers, not quoted strings
+- **Lesson Learned**: Schema types should be unquoted (url, port, password, str) - only list() values should be quoted
 
 **Issue 3: Missing Visual Assets**
 - **Symptom**: Addon in repository but no icons in store
@@ -179,8 +185,9 @@ fireflyiii-mcp/
 3. **908587e** - Fix config and add icons (added icon.png, logo.png)
 4. **5b6e89f** - Update config to match HA documentation (schema fixes)
 5. **ed778df** - Fix logging_level schema type (remove optional flag)
+6. **a23ca91** - Fix schema type quoting (unquote url/password/port types)
 
-All commits pushed to remote (GitHub SSH).
+All commits pushed to remote (GitHub).
 
 ---
 
@@ -303,10 +310,10 @@ options:
   mcp_port: 3000
   logging_level: "INFO"
 schema:
-  firefly_base_url: "url"
-  firefly_token: "password"
-  mcp_port: "port"
-  logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)"
+  firefly_base_url: str
+  firefly_token: password
+  mcp_port: port
+  logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?"
 ports:
   3000/tcp: 3000
 ports_description:
@@ -315,6 +322,8 @@ hassio_api: false
 webui: "http://[HOST]:3000"
 panel_icon: "mdi:cash-multiple"
 ```
+
+**IMPORTANT**: Schema types must be unquoted (url, str, password, port, int, float, bool). Only list() definitions should be quoted.
 
 ### Dockerfile Pattern
 - Multi-stage build with Python 3.14 Alpine base
