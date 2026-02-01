@@ -12,10 +12,10 @@ options:
   mcp_port: 3000
   logging_level: "INFO"
 schema:
-  firefly_base_url: "url"
-  firefly_token: "password"
-  mcp_port: "port"
-  logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)"
+  firefly_base_url: str
+  firefly_token: password
+  mcp_port: port
+  logging_level: "list(DEBUG|INFO|WARNING|ERROR|CRITICAL)?"
 ports:
   3000/tcp: 3000
 ports_description:
