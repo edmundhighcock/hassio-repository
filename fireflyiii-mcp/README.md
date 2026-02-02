@@ -59,7 +59,7 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "firefly": {
-      "url": "http://homeassistant.local:3000"
+      "url": "http://homeassistant.local:3000/mcp"
     }
   }
 }
@@ -69,7 +69,13 @@ Then restart Claude Desktop. The MCP server tools should appear in Claude's avai
 
 ### Claude Code
 
-Configure the MCP connector with: `http://homeassistant.local:3000`
+Add the MCP server using Claude Code on your laptop:
+
+```bash
+claude mcp add --transport http firefly http://homeassistant.local:3000/mcp
+```
+
+Replace `homeassistant.local` with your Home Assistant hostname or IP address if needed.
 
 ## Security Notes
 
@@ -102,12 +108,33 @@ Check the addon logs for configuration errors:
 ### Can't connect from Claude
 
 1. Verify the addon is running (green "Started" button in addon page)
-2. Check port 3000 is accessible:
+2. Check the MCP endpoint is accessible:
    ```bash
-   curl http://homeassistant.local:3000
+   curl http://homeassistant.local:3000/mcp
    ```
 3. Ensure you're on the same network as Home Assistant
 4. If using a hostname, verify it resolves correctly
+
+### 406 Not Acceptable Error
+
+If Claude Code shows "406 Not Acceptable" errors:
+
+1. **Check endpoint path**: Must include `/mcp` at the end
+   - ✅ Correct: `http://homeassistant.local:3000/mcp`
+   - ❌ Wrong: `http://homeassistant.local:3000`
+
+2. **Verify transport mode**: Must use `--transport http`
+   ```bash
+   claude mcp add --transport http firefly http://HOST:3000/mcp
+   ```
+
+3. **Test endpoint**: Verify the MCP endpoint responds
+   ```bash
+   curl -X POST http://homeassistant.local:3000/mcp \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     -d '{"jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1}'
+   ```
 
 ### FireflyIII API errors in logs
 

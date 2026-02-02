@@ -29,6 +29,9 @@ bashio::log.info "Configuration validated successfully"
 bashio::log.info "FireflyIII URL: ${FIREFLY_BASE_URL}"
 bashio::log.info "MCP Server Port: ${MCP_PORT}"
 bashio::log.info "Log Level: ${LOGGING_LEVEL}"
+bashio::log.info "MCP Endpoint: http://<HOME_ASSISTANT_HOST>:${MCP_PORT}/mcp"
+bashio::log.info "Connect from Claude Code on your laptop:"
+bashio::log.info "  claude mcp add --transport http firefly http://homeassistant.local:${MCP_PORT}/mcp"
 bashio::log.info "Starting LamPyrid MCP server..."
 
 # Run LamPyrid

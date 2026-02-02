@@ -443,15 +443,44 @@ The addon wasn't appearing due to **4 config.yaml syntax errors** that caused si
 
 These were discovered by commenting out field groups and comparing with working addons.
 
+#### Issue 4: Missing /mcp Endpoint Path in Documentation
+
+**Discovery**: Users connecting to `http://host:3000` instead of `http://host:3000/mcp` received 406 Not Acceptable errors
+
+**Root Cause**:
+- LamPyrid uses FastMCP's default `/mcp` endpoint (hardcoded, not configurable)
+- README.md omitted the `/mcp` path, showing only the root URL
+- Users connecting to the root path (`/`) don't reach the MCP endpoint
+- Requests to `/` trigger 406 errors due to missing Accept headers for MCP protocol
+
+**Solution**:
+1. Updated README.md "Using with Claude" section with correct URLs including `/mcp`
+2. Added Claude Code connection instructions with full `claude mcp add` command
+3. Added new troubleshooting section for 406 Not Acceptable errors
+4. Enhanced start.sh logging to display the complete endpoint URL on startup
+5. Updated IMPLEMENTATION_GUIDE.md with this lesson learned
+
+**Lesson Learned**:
+- Always document the complete endpoint URL including path
+- MCP servers using FastMCP default to `/mcp` endpoint (not configurable)
+- Test documentation with actual users before release
+- When users report connection errors, verify the correct URL format
+
+**References**:
+- LamPyrid source: Uses FastMCP's default `/mcp` endpoint
+- MCP Spec: Single `/mcp` POST/GET endpoint supporting `application/json` and `text/event-stream`
+
+---
+
 **Next Steps for Users:**
 1. Add repository to Home Assistant
 2. Install addon from Add-on Store
 3. Configure FireflyIII credentials
 4. Start addon and verify it runs
-5. Configure Claude Desktop to use MCP server
+5. Configure Claude Desktop or Claude Code to use MCP server with `/mcp` endpoint
 
 ---
 
-**Document Version:** 2.0
-**Last Updated:** 2026-02-01
+**Document Version:** 2.1
+**Last Updated:** 2026-02-02
 **Status:** Complete, Debugged & Fully Tested
