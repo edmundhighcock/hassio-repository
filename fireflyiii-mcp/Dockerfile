@@ -10,6 +10,8 @@ RUN apk add --no-cache \
     musl-dev \
     python3-dev
 
+# Declaring BUILD_VERSION before pip install ensures version bumps bust the Docker cache
+ARG BUILD_VERSION
 # Install LamPyrid from custom fork with rules management feature
 RUN pip3 install --no-cache-dir \
     git+https://github.com/edmundhighcock/LamPyrid.git@feat/add-rules-management
