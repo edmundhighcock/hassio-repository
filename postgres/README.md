@@ -6,10 +6,22 @@ It is configured to have a single database and user with no UI. It is also not t
 
 If you would like an up-to-date postgres addon, consider [this timescaledb addon](https://github.com/Expaso/hassos-addons/tree/master/timescaledb) which includes postgres and a UI for managing it.
 
-## Setting the initial password
+## Setting the password
 
-Before starting for the first time, it is essential to set the initial password in the configuration. The addon will abort until you do.
+Before starting for the first time, it is essential to set the password in the configuration. The addon will abort until you do.
 
 ## Changing the password
 
-This is not currently supported from the configuration. It is necessary to use the terminal (i.e. the core ssh addon) and install `psql`. Instructions will be posted here soon.
+To change the postgres password:
+
+1. Go to the addon configuration in the Home Assistant UI
+2. Change the `password` field to the new password
+3. Restart the postgres addon
+4. Update the `postgres_password` field in the Taiga addon configuration to match
+5. Restart the Taiga addon
+
+The password is synchronized to the database on every addon restart.
+
+## Upgrading from a previous version
+
+If you are upgrading from a version that used `initial_password`, the addon will continue to read that field if the new `password` field is not set. However, it is recommended to update your configuration to use the `password` field.

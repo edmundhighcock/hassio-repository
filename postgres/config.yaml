@@ -1,12 +1,12 @@
 name: "Hassio Addon for Postgres"
 description: "An add for Postgres configured to support taiga"
-version: "13.9-p3"
+version: "13.9-p4"
 slug: "taiga_postgres"
 init: false
 arch:
   - amd64
   - aarch64
 options:
-  initial_password: "pleasechange"
+  password: "pleasechange"
 schema:
-  initial_password: "password"
+  password: "password"

@@ -59,7 +59,7 @@ You should now see the repository which should  include these 3 addons:
 7. Go to the configuration section and choose a password.
 8. Start the addon.
 
-_Important Note: You can change the RabbitMQ password at any time if you restart the addon. However, once you set the initial Postgres password, you need to use the command line to change it (instructions will be added to the Postgres addon soon)._
+_Important Note: You can change the RabbitMQ and Postgres passwords at any time from the addon configuration. After changing the Postgres password, remember to update it in the Taiga addon configuration as well, then restart both addons._
 
 ### Install Taiga
 
