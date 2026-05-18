@@ -14,7 +14,7 @@ RUN apk add --no-cache \
 ARG BUILD_VERSION
 # Install LamPyrid from custom fork with rules management feature
 RUN pip3 install --no-cache-dir \
-    git+https://github.com/edmundhighcock/LamPyrid.git@feat/add-rules-management
+    git+https://github.com/edmundhighcock/LamPyrid.git@feat/post-pr-work
 
 # Copy start script
 COPY start.sh /
