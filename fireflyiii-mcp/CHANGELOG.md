@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8-pAccounts-dev] - 2026-06-01
+
+### Added
+- **Account management MCP tools**: new `create_account` and `update_account` tools
+  exposed by LamPyrid. The latter is the primary motivation — it allows setting
+  `opening_balance` and `opening_balance_date` on existing accounts via PUT
+  `/api/v1/accounts/{id}`, which was previously a UI-only operation. Use case:
+  journalling the opening principal of a loan that was set up in Firefly without
+  one.
+- Pinned to LamPyrid `feat/post-pr-work` commit `eb71c7f` or later.
+
 ## [0.1.1-pRules-dev] - 2026-02-02
 
 ### Fixed
