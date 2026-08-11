@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9-pRuleGroups-dev] - 2026-08-11
+
+### Added
+- **Rule-group management MCP tools**: `list_rule_groups`, `create_rule_group`,
+  `update_rule_group`. Rule groups run in ascending order at store-journal time,
+  so these tools allow placing budget-assignment rules in a group that runs
+  after all category-assignment rules (fixes budget tagging missing for
+  transactions categorised by later rules).
+- Simplified `Rule` responses now include `rule_group_id` / `rule_group_title`.
+
 ## [0.1.8-pAccounts-dev] - 2026-06-01
 
 ### Added
