@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11-pCurrency-dev] - 2026-09-26
+
+### Added
+- `update_transaction` (and `bulk_update_transactions`) accept `currency_code`,
+  the currency of the transaction's own `amount` (LamPyrid 22c3325). Needed to
+  move a transaction onto a source account of a different currency, and to
+  correct legs a bank feed stored in the wrong currency.
+
 ## [0.1.9-pRuleGroups-dev] - 2026-08-11
 
 ### Added

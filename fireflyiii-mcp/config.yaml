@@ -1,6 +1,6 @@
 name: "FireflyIII MCP Server"
 description: "Model Context Protocol server for FireflyIII personal finance automation"
-version: "0.1.10-pRuleTrigger-dev"
+version: "0.1.11-pCurrency-dev"
 slug: "fireflyiii-mcp"
 init: false
 arch:
