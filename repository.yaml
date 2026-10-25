@@ -22,3 +22,7 @@ addons:
     name: "FireflyIII MCP Server"
     description: "Model Context Protocol server for FireflyIII personal finance automation"
     url: https://github.com/edmundhighcock/hassio-repository/tree/main/fireflyiii-mcp
+  static_sites:
+    name: "Static Sites"
+    description: "Household static sites, served through Ingress only"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/static_sites
