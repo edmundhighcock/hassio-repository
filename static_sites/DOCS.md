@@ -45,8 +45,20 @@ and other paths return 404. Pruning old releases is the publisher's job.
 
 Ingress serves the panel under a per-session path prefix, so **every URL in
 a site must be relative** (`data/summary.json`, never `/data/summary.json`).
-A site is at `<name>/`; the front page lists the sites, or opens the only
-one. Going straight to a site's URL bypasses that.
+A site is at `<name>/`. Link back to the site list with `../`.
+
+## The front page
+
+The panel opens on a browser of all sites: one card each, published sites
+first. A card's title and description come from an optional `site.json`
+published beside the site's `index.html`:
+
+```json
+{"title": "Finances", "description": "Income, spending and trends"}
+```
+
+Without it the card shows the directory name. A site with no release is
+listed as "Not published yet".
 
 ## Shared chart library
 

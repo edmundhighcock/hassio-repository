@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- The front page is now always a site browser: one card per site, titled
+  from the site's optional `site.json` (`title`, `description`), with
+  unpublished sites labelled. It no longer jumps into a lone site.
+
 ## 0.1.0
 
 - First release: nginx serving `sites/<name>/current` from the add-on's

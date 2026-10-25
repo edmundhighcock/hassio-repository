@@ -5,37 +5,78 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sites</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 24px 16px; background: #fafafa; color: #333; }
-  @media (prefers-color-scheme: dark) { body { background: #111; color: #ddd; } a { color: #8ab4f8; } }
-  h1 { font-size: 1.4rem; font-weight: 600; }
-  ul { list-style: none; padding: 0; }
-  li { margin: 0 0 12px; font-size: 1.1rem; }
+  :root { --bg: #f6f7f9; --card: #fff; --fg: #1f2328; --muted: #656d76; --line: #d8dee4; --accent: #0969da; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --card: #161b22; --fg: #e6edf3; --muted: #8d96a0; --line: #30363d; --accent: #4493f8; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: var(--bg); color: var(--fg); }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+  a.card { display: block; background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+           padding: 16px; color: inherit; text-decoration: none; min-height: 96px; }
+  a.card:hover, a.card:focus-visible { border-color: var(--accent); outline: none; }
+  .title { font-size: 1.1rem; font-weight: 600; margin: 0 0 6px; color: var(--accent); }
+  .desc { color: var(--muted); margin: 0; line-height: 1.4; }
+  .tag { display: inline-block; margin-top: 10px; font-size: .8rem; color: var(--muted);
+         border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+  .empty { color: var(--muted); }
 </style>
 </head>
 <body>
-<h1>Sites</h1>
-<ul id="sites"><li>Loading…</li></ul>
+<main>
+  <h1>Sites</h1>
+  <p class="sub">Household sites, visible to everyone who can log in to Home Assistant.</p>
+  <div class="grid" id="sites"><p class="empty">Loading…</p></div>
+</main>
 <script>
 // Relative URLs only: Ingress serves this page under a per-session prefix.
+// Each site may publish site.json beside its index.html:
+//   {"title": "Finances", "description": "Income, spending and trends"}
+const grid = document.getElementById("sites");
+const pretty = n => n.replace(/[-_]+/g, " ").replace(/^./, c => c.toUpperCase());
+
+async function describe(name) {
+  const site = { name, title: pretty(name), description: "", published: false };
+  try {
+    const page = await fetch(name + "/index.html", { method: "HEAD", cache: "no-cache" });
+    site.published = page.ok;
+    if (site.published) {
+      const meta = await fetch(name + "/site.json", { cache: "no-cache" });
+      if (meta.ok) {
+        const j = await meta.json();
+        if (typeof j.title === "string" && j.title.trim()) site.title = j.title.trim();
+        if (typeof j.description === "string") site.description = j.description.trim();
+      }
+    }
+  } catch (e) { /* leave the defaults */ }
+  return site;
+}
+
+function card(s) {
+  const a = document.createElement("a");
+  a.className = "card";
+  a.href = s.name + "/";
+  const t = document.createElement("p"); t.className = "title"; t.textContent = s.title; a.appendChild(t);
+  if (s.description) { const d = document.createElement("p"); d.className = "desc"; d.textContent = s.description; a.appendChild(d); }
+  if (!s.published) { const g = document.createElement("span"); g.className = "tag"; g.textContent = "Not published yet"; a.appendChild(g); }
+  return a;
+}
+
 fetch("__sites.json", { cache: "no-cache" })
   .then(r => r.json())
-  .then(entries => {
-    const names = entries.filter(e => e.type === "directory" && /^[a-z0-9][a-z0-9_-]*$/.test(e.name))
-                         .map(e => e.name).sort();
-    if (names.length === 1) { location.replace(names[0] + "/"); return; }
-    const ul = document.getElementById("sites");
-    ul.textContent = "";
-    if (!names.length) { ul.innerHTML = "<li>Nothing has been published yet.</li>"; return; }
-    for (const n of names) {
-      const a = document.createElement("a");
-      a.href = n + "/";
-      a.textContent = n.replace(/[-_]/g, " ").replace(/^./, c => c.toUpperCase());
-      const li = document.createElement("li");
-      li.appendChild(a);
-      ul.appendChild(li);
-    }
+  .then(entries => Promise.all(
+    entries.filter(e => e.type === "directory" && /^[a-z0-9][a-z0-9_-]*$/.test(e.name))
+           .map(e => describe(e.name))))
+  .then(sites => {
+    grid.textContent = "";
+    if (!sites.length) { grid.innerHTML = '<p class="empty">Nothing has been published yet.</p>'; return; }
+    sites.sort((a, b) => (b.published - a.published) || a.title.localeCompare(b.title));
+    for (const s of sites) grid.appendChild(card(s));
   })
-  .catch(() => { document.getElementById("sites").innerHTML = "<li>Could not list the sites.</li>"; });
+  .catch(() => { grid.innerHTML = '<p class="empty">Could not list the sites.</p>'; });
 </script>
 </body>
 </html>

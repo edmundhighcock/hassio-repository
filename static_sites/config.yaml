@@ -1,6 +1,6 @@
 name: "Static Sites"
 description: "Household static sites (e.g. the finance analysis), served through Ingress only"
-version: "0.1.0"
+version: "0.2.0"
 slug: "static_sites"
 init: false
 startup: application
