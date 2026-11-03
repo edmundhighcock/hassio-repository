@@ -2,7 +2,13 @@
 
 InfluxDB 2.7 OSS, for storing Home Assistant's full state-change history
 forever on a memory-tight Raspberry Pi. Written to by HA Core's own
-`influxdb` integration (`api_version: 2`); no InfluxDB UI, no host port.
+`influxdb` integration (`api_version: 2`); no InfluxDB UI.
+
+Published on the LAN at port 8086 (see "Network" below) so a backup job
+on another LAN machine can pull `influx backup` over HTTP - **this port
+must never be port-forwarded off the LAN or tailnet.** Edmund treats the
+LAN and tailnet as trusted; nothing here is designed to be exposed to the
+internet.
 
 ## Connecting Home Assistant Core
 
@@ -20,10 +26,25 @@ influxdb:
 ```
 
 `9547a9e0-influxdb2` is this add-on's hostname on the Supervisor's internal
-Docker network - reachable from HA Core and any other add-on, with no host
-port published. Put the token (see "Token location" below) into
-`secrets.yaml` as `influxdb_token: <value>`; never paste it into
-`configuration.yaml` directly.
+Docker network - reachable from HA Core and any other add-on regardless
+of the LAN port below. Put the **Home Assistant token** (see "Token
+locations" below, not the operator token) into `secrets.yaml` as
+`influxdb_token: <value>`; never paste it into `configuration.yaml`
+directly.
+
+## Network
+
+`ports: {"8086/tcp": 8086}` publishes InfluxDB's API on the host's LAN
+interfaces at port 8086 by default, so a backup job running on another
+machine on the LAN (or tailnet) can reach it directly - see "Backups"
+below. It can be disabled or remapped from the add-on's **Network** tab
+in the Supervisor UI if that job isn't wanted. Home Assistant Core's own
+connection (above) does not depend on this port at all; it always uses
+the Supervisor-internal hostname.
+
+**Do not port-forward 8086 to the internet.** The InfluxDB write token
+(see below) is bearer-token auth over plain HTTP by default; this is
+acceptable on a trusted LAN/tailnet, not acceptable on the open internet.
 
 ## Options and their defaults
 
@@ -32,7 +53,7 @@ port published. Put the token (see "Token location" below) into
 | `organization` | `household` | InfluxDB org created on first start. |
 | `bucket` | `homeassistant` | Bucket created on first start. |
 | `retention` | `` (empty) | Bucket retention. Empty means infinite - the brief for this add-on. |
-| `admin_username` | `admin` | Not a secret; the password and token are generated, never configured. |
+| `admin_username` | `admin` | Not a secret; the password and tokens are generated, never configured. |
 | `storage_cache_max_memory_size` | `268435456` (256 MiB) | Max size a shard's in-memory cache can reach before it rejects writes. |
 | `storage_cache_snapshot_memory_size` | `16777216` (16 MiB) | Size at which the cache is snapshotted to a TSM file to free memory. |
 | `storage_max_concurrent_compactions` | `1` | Max concurrent full/level compactions. |
@@ -42,8 +63,7 @@ port published. Put the token (see "Token location" below) into
 | `query_initial_memory_bytes` | `10485760` (10 MiB) | Memory a query starts with before it needs to grow. |
 | `query_max_memory_bytes` | `419430400` (400 MiB) | Max memory for *all* queries running at once. |
 | `go_memlimit_mib` | `450` | `GOMEMLIMIT` - the Go runtime's soft heap limit, in MiB. |
-| `backup_keep` | `2` | How many nightly backup directories to keep under `addon_config`. |
-| `backup_hour` | `3` | Local hour (0-23) the nightly backup runs. |
+| `metrics_enabled` | `false` | Turn the `/metrics` endpoint back on (e.g. for a LAN Prometheus scraper). |
 
 ## Memory defaults and why
 
@@ -77,8 +97,8 @@ OOM killer, or Docker's own cgroup limit) kills it.
   outside the add-on, or downsample first.
 - `GOMEMLIMIT=450MiB`: a *soft* limit to the Go garbage collector - it
   makes the GC work harder to stay under 450 MiB of heap instead of
-  waiting for Go's usual pacing, so steady-state RSS settles below the
-  flags above would otherwise allow, with headroom under a ~700 MiB+
+  waiting for Go's usual pacing, so steady-state RSS settles below what
+  the flags above would otherwise allow, with headroom under a ~700 MiB+
   container memory cap. It does not by itself stop a single huge
   allocation; the query-memory flags above are the actual hard stop for
   that. See
@@ -99,44 +119,78 @@ as well, it has to be set outside the add-on's own configuration (not
 attempted here, since there is no documented way to do it from
 `config.yaml`).
 
-## Token location
+## Disabled endpoints
+
+Both are unauthenticated by design in InfluxDB itself, so both are off by
+default here:
+
+- `--pprof-disabled` (always on, not an option): `/debug/pprof/*` serves
+  Go runtime profiling data to anyone who can reach the port, with no
+  token check at all.
+- `--metrics-disabled` (on by default, `metrics_enabled: true` turns it
+  off): `/metrics` exposes internal InfluxDB counters, also with no token
+  check.
+
+Both flags verified against
+<https://docs.influxdata.com/influxdb/v2/reference/config-options/>
+(`pprof-disabled` / `INFLUXD_PPROF_DISABLED`, `metrics-disabled` /
+`INFLUXD_METRICS_DISABLED`). With both disabled, InfluxDB answers
+requests to either path with `403`, confirmed in `tests/test.sh`.
+
+## Token locations
 
 On first start, this add-on generates, under `/data/secrets/` inside the
 container (mode `0600`, root-owned, never logged, never in add-on
 options):
 
-- `admin_username` - the InfluxDB admin username (not secret; same value
-  as the `admin_username` option).
-- `admin_password` - a random 32-character admin password.
-- `admin_token` - a random 64-character **all-access (operator) token**,
-  passed to `influx setup --token` so it becomes both the InfluxDB admin
-  token *and* the token to give Home Assistant.
+- `/data/secrets/admin_username`, `/data/secrets/admin_password` - the
+  InfluxDB admin login (username not secret; same value as the
+  `admin_username` option).
+- `/data/secrets/admin_token` - a random 64-character **operator
+  (all-access) token**, passed to `influx setup --token`. **Used for
+  administration and for the remote backup job** (see "Backups") - it is
+  never given to Home Assistant.
+- `/data/secrets/ha_token` - a token scoped to **write-only on the
+  `bucket` option** (`homeassistant` by default), created once the server
+  is actually answering on :8086, via `influx auth create --write-bucket
+  <id>`. **This is the token to put in Home Assistant's `secrets.yaml`.**
+  It cannot read any bucket, write any other bucket, or administer
+  anything (create buckets/tokens/users, etc.) - verified in
+  `tests/test.sh` against the running server (write to its own bucket:
+  `204`; query/read its own bucket: `404`; write another bucket: `403`;
+  create a bucket: `401`; its own bucket listing: empty).
 
-An all-access token was chosen over a bucket-scoped one so the same token
-also works for the nightly `influx backup` job (which needs the root/
-operator token) without a second token to manage; the brief allows either.
-In a single-household add-on this is an acceptable trade-off - note it in
-case you want to issue HA a narrower, bucket-scoped token yourself later
-(`influx auth create --org household --read-bucket homeassistant
---write-bucket homeassistant`) and use that one in `secrets.yaml` instead.
+  Write-only, not read+write, because Home Assistant Core's `influxdb`
+  integration never needs read access for API v2: `get_influx_connection`
+  in `homeassistant/components/influxdb/__init__.py` only calls with
+  `test_read=True` from a code path that is in practice never taken for
+  v2 (the only caller, `config_flow.py`, always passes `test_write=True`
+  and leaves `test_read` at its default of `False`) - checked against the
+  `dev` branch of `home-assistant/core`. If a future HA version needs
+  read access too, regenerate `ha_token` with `--read-bucket <id>` added
+  (delete the file and restart; see "idempotent" below).
 
-To copy the token out without displaying it on screen, from the Home
+  This file is created once the server is healthy, which also covers an
+  add-on that was already set up by an earlier version of this add-on
+  that predates this token: on the next start, if `ha_token` is missing,
+  it is created then.
+
+Both secret files are regenerated **only** when missing: the upstream
+InfluxDB entry point itself skips `influx setup` whenever its boltdb file
+already exists, so this add-on never overwrites a live account's
+credentials on restart; `ha_token` is created once and left alone once it
+exists.
+
+To copy a token out without displaying it on screen, from the Home
 Assistant host (replace `<ha-user>` as appropriate):
 
 ```sh
-docker exec addon_9547a9e0_influxdb2 cat /data/secrets/admin_token \
+docker exec addon_9547a9e0_influxdb2 cat /data/secrets/ha_token \
   | ssh <ha-user>@<some-other-machine> 'cat > influxdb_token.txt'
 ```
 
-or use the Terminal & SSH add-on to run the same `docker exec` (or,
-simpler, add a `!secret` line referencing a file you copy by hand from
-`/addon_configs/9547a9e0_influxdb2/` - see below) - just avoid `cat`-ing
-it straight into a terminal that gets logged.
-
-These files are regenerated **only** when they do not already exist: the
-upstream InfluxDB entry point itself skips `influx setup` whenever its
-boltdb file is already present, so this add-on never overwrites a live
-account's credentials on restart.
+or use the Terminal & SSH add-on to run the same `docker exec` - just
+avoid `cat`-ing it straight into a terminal that gets logged.
 
 ## Backups
 
@@ -145,38 +199,36 @@ account's credentials on restart.
 <https://contributors.home-assistant.io/apps/reference/configuration/>
 and the Supervisor's own filter in `supervisor/apps/app.py`, which matches
 each backed-up file's *name* against every `backup_exclude` glob) excludes
-every file under `/data` from a Home Assistant backup of this add-on. The
-off-site copy is made separately (see below), by design, because InfluxDB
-line-protocol history does not belong in the same backup/restore cycle as
-the rest of Home Assistant.
+every file under `/data` from a Home Assistant backup of this add-on.
+InfluxDB line-protocol history does not belong in the same backup/restore
+cycle as the rest of Home Assistant - the off-site copy is made
+separately, by a job on another LAN machine, pulling over HTTP.
 
-**Limitation found while building this, not fixed by any add-on option:**
-the nightly backup files below live under `/addon_configs/9547a9e0_influxdb2/`,
-which Home Assistant backs up as part of the top-level "Add-on configs"
-folder category - a wholesale tar of the entire `/addon_configs` tree,
-selected per-backup by the user, with **no per-add-on filtering** (see
-`supervisor/backups/backup.py`'s `_folder_save`, which only skips network
-mount points, not `backup_exclude`). There is no documented add-on-level
-way to keep just this add-on's subfolder out of that specific backup
-folder. If you don't want the nightly InfluxDB backups duplicated into
-Home Assistant's own backups as well as the off-site S3 copy, deselect
-"Add-on configs" when creating a Home Assistant backup, or accept the
-duplication.
+This add-on does not run its own backup job or keep any backup files on
+disk (an earlier revision did, writing into `addon_config`; that was
+dropped because the Supervisor backs up `/addon_configs` as a single
+unit with no per-add-on filtering - see `supervisor/backups/backup.py`'s
+`_folder_save`, which only skips network mount points - so anything
+written there would have ridden inside every Home Assistant backup,
+including ones synced to Google Drive, which is explicitly not wanted).
 
-Nightly, at `backup_hour` (default 03:00 local time), this add-on runs
-`influx backup <dir> -t <admin token>` (a full, consistent backup: bolt +
-SQL metadata + TSM data) into a new timestamped directory under
-`/addon_configs/9547a9e0_influxdb2/backups/` (inside the container,
-`/config/backups/`), then deletes all but the `backup_keep` (default 2)
-most recent directories. A separate job on another machine is expected to
-pull these over SSH (e.g. with the SSH & Terminal add-on, or any SSH
-client reaching the host directly) and ship them to S3 Glacier - that job
-is out of scope here.
+Instead, from another machine on the LAN or tailnet, with the operator
+token from `/data/secrets/admin_token`:
 
-To restore: copy a backup directory to a fresh InfluxDB instance, run
-`influx setup --token <the same admin token the backup came from>` on
-that instance (the restore process re-authenticates using it), then
-`influx restore --full <path to the backup directory>`. See
+```sh
+influx backup /path/to/backup_$(date +%Y-%m-%d_%H-%M) \
+  --host http://<hass-lan-ip>:8086 \
+  -t <operator token>
+```
+
+This is a full, consistent backup (bolt + SQL metadata + TSM data). That
+job, and shipping its output to S3 Glacier, run elsewhere and are out of
+scope for this add-on.
+
+To restore (on a fresh InfluxDB instance): run `influx setup --token
+<the same operator token the backup came from>` first (the restore
+process re-authenticates using it), then `influx restore --full
+<path to the backup directory>`. See
 <https://docs.influxdata.com/influxdb/v2/admin/backup-restore/restore/>.
 
 ## Health
@@ -191,12 +243,15 @@ this stops responding.
 - Running on real Raspberry Pi hardware - only `docker buildx build
   --platform linux/arm64 --load` plus a plain `docker run --platform
   linux/arm64` under the host's QEMU emulation were tried locally; both
-  built and reached a healthy state with the expected flags in the logs
-  (see `tests/test.sh` for the equivalent amd64 checks, run for real).
+  built and reached a healthy state with the expected flags in the logs.
 - Installing through the Supervisor itself, or anything involving the
-  real `hassio` add-on store, ingress gateway, or backup UI - out of
-  scope per the brief (no install on `hass`, no SSH to it).
+  real `hassio` add-on store, ingress gateway, Network tab, or backup UI -
+  out of scope per the brief (no install on `hass`, no SSH to it).
 - The exact behaviour of `backup_exclude: ["**"]` inside a real Supervisor
   backup (verified instead by reading the Supervisor source referenced
   above, since creating a real Home Assistant backup was not possible
   without installing on `hass`).
+- Home Assistant Core's `influxdb` integration itself talking to this
+  add-on (verified instead by reading its source, and by exercising the
+  HA token's exact permission set directly against the API in
+  `tests/test.sh`).

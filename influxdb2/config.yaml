@@ -8,11 +8,18 @@ boot: auto
 arch:
   - aarch64
   - amd64
-# No `ports:` entry anywhere in this file: there is deliberately no host
-# port. Home Assistant Core and every other add-on reach this container
-# only over the Supervisor's internal network, at
-# http://9547a9e0-influxdb2:8086 — see DOCS.md.
 watchdog: "http://[HOST]:8086/health"
+# Published on the LAN (default host port 8086) so a backup job on another
+# LAN machine can pull `influx backup` over HTTP. Home Assistant Core and
+# every other add-on can also reach it over the Supervisor's internal
+# network, at http://9547a9e0-influxdb2:8086, regardless of this mapping.
+# Edmund treats the LAN/tailnet as trusted - this must never be
+# port-forwarded to the internet. Disable it from the add-on's Network
+# tab if the backup job isn't needed. See DOCS.md.
+ports:
+  "8086/tcp": 8086
+ports_description:
+  "8086/tcp": "InfluxDB API - LAN-trusted only, never port-forward off the LAN"
 options:
   organization: "household"
   bucket: "homeassistant"
@@ -27,8 +34,7 @@ options:
   query_memory_bytes: 209715200
   query_max_memory_bytes: 419430400
   go_memlimit_mib: 450
-  backup_keep: 2
-  backup_hour: 3
+  metrics_enabled: false
 schema:
   organization: "str"
   bucket: "str"
@@ -43,19 +49,13 @@ schema:
   query_memory_bytes: "int(1048576,)"
   query_max_memory_bytes: "int(1048576,)"
   go_memlimit_mib: "int(64,)"
-  backup_keep: "int(1,)"
-  backup_hour: "int(0,23)"
+  metrics_enabled: "bool"
 # Own private data (bolt + engine, under /data) is excluded from Home
-# Assistant's own backups: the off-site copy is the nightly `influx backup`
-# under addon_config, pulled over SSH separately. See DOCS.md.
+# Assistant's own backups: the off-site copy is pulled by a job on another
+# LAN machine, over HTTP, against the published port above. See DOCS.md.
 backup: hot
 backup_exclude:
   - "**"
-# addon_config:rw -> /addon_configs/9547a9e0_influxdb2/ on the host, and
-# /config inside this container. Nightly backups land in
-# /config/backups/ here. See DOCS.md.
-map:
-  - addon_config:rw
 hassio_api: false
 homeassistant_api: false
 auth_api: false

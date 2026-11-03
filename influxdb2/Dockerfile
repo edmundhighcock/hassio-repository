@@ -10,10 +10,11 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY rootfs/ /
-RUN chmod a+x /run.sh /usr/local/bin/influxdb2-backup.sh
+RUN chmod a+x /run.sh
 
 # Replace the upstream entrypoint.sh/influxd default with our own run.sh,
-# which sets up secrets and the backup loop, then calls /entrypoint.sh
-# itself (still present in the image, unmodified) to do setup and run influxd.
+# which sets up secrets, then runs /entrypoint.sh itself (still present in
+# the image, unmodified) as a child to do setup and run influxd, and once
+# it is healthy, ensures the Home Assistant write-only token exists.
 ENTRYPOINT []
 CMD ["/run.sh"]
