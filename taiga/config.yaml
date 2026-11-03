@@ -1,11 +1,13 @@
 name: "Taiga Project Manager"
 description: "Taiga Agile Project Manager"
-version: "6.0.10-p7"
+version: "6.0.10-p8"
 slug: "taiga"
 init: false
+# armv7 dropped: no armv7 base image was ever published (build.yaml only maps
+# amd64/aarch64), and Home Assistant OS itself no longer supports 32-bit ARM.
 arch:
+  - aarch64
   - amd64
-  - armv7
 options:
   taiga_secret_key: "pleasechange"
   rabbitmq_password: "pleasechange"
@@ -17,6 +19,18 @@ options:
     host: '9547a9e0-taiga-postgres'
     user: 'taiga'
     database: 'taiga'
+  # Scale-control options. Defaults are sized for a light household
+  # install (a couple of humans and a few agents) on a Raspberry Pi 5.
+  # See translations/en.yaml for the trade-offs of each.
+  gunicorn_django_workers: 2
+  gunicorn_django_threads: 2
+  gunicorn_django_max_requests: 500
+  celery_enabled: true
+  celery_concurrency: 1
+  celery_pool: "solo"
+  taiga_protected_workers: 1
+  events_enabled: true
+  malloc_arena_max: 2
 schema:
   taiga_secret_key: "password"
   rabbitmq_password: "password"
@@ -24,11 +38,20 @@ schema:
   minutes_between_backups: "float"
   rabbitmq_advanced_options:
     virtual_host: "str"
-  postgres_advanced_options: 
+  postgres_advanced_options:
     host: 'str'
     user: 'str'
     database: 'str'
-ingress: 8099
+  gunicorn_django_workers: "int(1,8)"
+  gunicorn_django_threads: "int(1,8)"
+  gunicorn_django_max_requests: "int(0,5000)"
+  celery_enabled: "bool"
+  celery_concurrency: "int(1,4)"
+  celery_pool: "list(prefork|solo|threads)"
+  taiga_protected_workers: "int(1,4)"
+  events_enabled: "bool"
+  malloc_arena_max: "int(0,8)"
+ingress: true
 ingress_port: 8099
 ingress_entry: "/discover"
 hassio_api: true

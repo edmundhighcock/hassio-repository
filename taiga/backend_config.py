@@ -83,7 +83,10 @@ EVENTS_PUSH_BACKEND_OPTIONS = {
 #########################################
 ## TAIGA ASYNC
 #########################################
-CELERY_ENABLED = os.getenv('CELERY_ENABLED', 'True') == 'True'
+# CELERY_ENABLED is exported by start.sh from the `celery_enabled` add-on
+# option, which jq renders as lowercase JSON ("true"/"false"); accept any
+# case so both that and a manually-set "True"/"False" work.
+CELERY_ENABLED = os.getenv('CELERY_ENABLED', 'True').lower() == 'true'
 
 from kombu import Queue  # noqa
 

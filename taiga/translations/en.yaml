@@ -1,0 +1,74 @@
+configuration:
+  gunicorn_django_workers:
+    name: "Django worker processes"
+    description: >-
+      Gunicorn processes serving the Taiga API (port 8001). Each process
+      duplicates the full Django/DRF import footprint in memory (the
+      single biggest consumer in this add-on), so raising this trades RAM
+      for the ability to handle more requests truly in parallel. Combine
+      with "Django worker threads" to get concurrency more cheaply.
+  gunicorn_django_threads:
+    name: "Django worker threads"
+    description: >-
+      Threads per Django worker process (gthread worker class). Cheaper
+      on memory than extra processes, but a slow/hung request can delay
+      others sharing the same process; fine for light, mostly I/O-bound
+      household use.
+  gunicorn_django_max_requests:
+    name: "Django worker max requests"
+    description: >-
+      Restart each Django worker after roughly this many requests (±10%
+      jitter, so workers do not all restart at once), to cap slow memory
+      growth over a long uptime. 0 disables automatic restarts.
+  celery_enabled:
+    name: "Enable Celery (async tasks)"
+    description: >-
+      Celery runs webhook delivery, timeline/activity-feed writes, the
+      notification-digest emails, and expired-token cleanup in the
+      background. Turning this off does not remove that functionality,
+      but makes webhook delivery and timeline/activity writes run
+      synchronously inside each web request instead, and it stops the
+      notification-digest emails and token cleanup entirely (they are
+      periodic Celery-beat tasks with no other trigger). Only turn this
+      off if those emails are not wanted and the household accepts
+      slightly slower writes.
+  celery_concurrency:
+    name: "Celery concurrency"
+    description: >-
+      Number of concurrent Celery workers (ignored when "Celery pool" is
+      solo, which is always single-process). Low-risk to reduce: a light
+      household has no concurrent bulk imports or webhook storms.
+  celery_pool:
+    name: "Celery pool"
+    description: >-
+      Celery's worker pool implementation. "solo" runs tasks one at a
+      time in a single process (lowest memory, serializes tasks - fine at
+      this scale). "prefork" forks "Celery concurrency" child processes
+      (matches Taiga's upstream default). "threads" uses a thread pool
+      instead of forking, a middle ground on memory.
+  taiga_protected_workers:
+    name: "Protected-media worker processes"
+    description: >-
+      Gunicorn processes serving signed attachment URLs (port 8003). This
+      service is lightweight; 1 is enough unless attachments are
+      downloaded very heavily and concurrently.
+  events_enabled:
+    name: "Enable live events (WebSocket updates)"
+    description: >-
+      Pushes live board/task updates to open browser tabs over
+      WebSocket via RabbitMQ. Turning this off stops only the live
+      push - open tabs need a manual refresh to see others' changes.
+      It does not touch RabbitMQ itself, which Django still uses to
+      publish events (this happens directly from Django, independent of
+      Celery) whether or not this is enabled, and does not affect the
+      Home Assistant integration, which talks to the REST API.
+  malloc_arena_max:
+    name: "glibc malloc arena limit"
+    description: >-
+      Caps the number of memory arenas glibc creates per process
+      (MALLOC_ARENA_MAX), applied to every Python process (Django,
+      Celery, protected-media). Without a limit, glibc can create up to
+      8 arenas per CPU core, which is a well-known source of RSS
+      fragmentation in long-lived multi-process Python workloads. 0
+      leaves glibc's own default in place; 1-2 is a safe, zero
+      functional-risk reduction.

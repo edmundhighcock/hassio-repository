@@ -24,14 +24,31 @@ then
   chown taiga /data/taiga-media
 fi
 
-export TAIGA_SECRET_KEY=$(cat /data/options.json | jq -r .taiga_secret_key) 
-export RABBITMQ_DEFAULT_PASS=$(cat /data/options.json | jq -r .rabbitmq_password) 
-export POSTGRES_PASSWORD=$(cat /data/options.json | jq -r .postgres_password) 
-export POSTGRES_HOST=$(cat /data/options.json | jq -r .postgres_advanced_options.host) 
-export POSTGRES_USER=$(cat /data/options.json | jq -r .postgres_advanced_options.user) 
-export POSTGRES_DB=$(cat /data/options.json | jq -r .postgres_advanced_options.database) 
-export RABBITMQ_VHOST=$(cat /data/options.json | jq -r .rabbitmq_advanced_options.virtual_host) 
-export MINUTES_BETWEEN_BACKUPS=$(cat /data/options.json | jq -r .minutes_between_backups) 
+export TAIGA_SECRET_KEY=$(cat /data/options.json | jq -r .taiga_secret_key)
+export RABBITMQ_DEFAULT_PASS=$(cat /data/options.json | jq -r .rabbitmq_password)
+export POSTGRES_PASSWORD=$(cat /data/options.json | jq -r .postgres_password)
+export POSTGRES_HOST=$(cat /data/options.json | jq -r .postgres_advanced_options.host)
+export POSTGRES_USER=$(cat /data/options.json | jq -r .postgres_advanced_options.user)
+export POSTGRES_DB=$(cat /data/options.json | jq -r .postgres_advanced_options.database)
+export RABBITMQ_VHOST=$(cat /data/options.json | jq -r .rabbitmq_advanced_options.virtual_host)
+export MINUTES_BETWEEN_BACKUPS=$(cat /data/options.json | jq -r .minutes_between_backups)
+
+# Scale-control options, consumed by run.sh. jq renders bool/int straight to
+# text (e.g. "true"/"false", "2"), which is exactly what run.sh compares
+# against and what gunicorn/celery's own flags expect.
+export GUNICORN_DJANGO_WORKERS=$(cat /data/options.json | jq -r .gunicorn_django_workers)
+export GUNICORN_DJANGO_THREADS=$(cat /data/options.json | jq -r .gunicorn_django_threads)
+export GUNICORN_DJANGO_MAX_REQUESTS=$(cat /data/options.json | jq -r .gunicorn_django_max_requests)
+export CELERY_ENABLED=$(cat /data/options.json | jq -r .celery_enabled)
+export CELERY_CONCURRENCY=$(cat /data/options.json | jq -r .celery_concurrency)
+export CELERY_POOL=$(cat /data/options.json | jq -r .celery_pool)
+export TAIGA_PROTECTED_WORKERS=$(cat /data/options.json | jq -r .taiga_protected_workers)
+export EVENTS_ENABLED=$(cat /data/options.json | jq -r .events_enabled)
+# 0 means "leave MALLOC_ARENA_MAX unset", so glibc keeps its own default.
+MALLOC_ARENA_MAX_OPTION=$(cat /data/options.json | jq -r .malloc_arena_max)
+if [ "$MALLOC_ARENA_MAX_OPTION" != "0" ]; then
+  export MALLOC_ARENA_MAX="$MALLOC_ARENA_MAX_OPTION"
+fi
 
 SLUG=$(echo $HOSTNAME | sed -e 's/-/_/g')
 ADDON_INFO=$(curl  -H "Authorization: Bearer $SUPERVISOR_TOKEN" supervisor/addons/$SLUG/info)
@@ -42,7 +59,7 @@ sed -i "s base_url_to_be_replaced $INGRESS_ENTRY/ " /home/taiga/taiga-front-dist
 sed -i 's,base href="/",base href="'"$INGRESS_ENTRY"'/",' /home/taiga/taiga-front-dist/dist/index.html
 
 # ENVIRONMENT="INGRESS_ENTRY='$INGRESS_ENTRY' TAIGA_SECRET_KEY=$TAIGA_SECRET_KEY RABBITMQ_DEFAULT_PASS='$RABBITMQ_DEFAULT_PASS'"
-VARIABLES="TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS,POSTGRES_PASSWORD,POSTGRES_HOST,POSTGRES_USER,POSTGRES_DB,RABBITMQ_VHOST,MINUTES_BETWEEN_BACKUPS"
+VARIABLES="TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS,POSTGRES_PASSWORD,POSTGRES_HOST,POSTGRES_USER,POSTGRES_DB,RABBITMQ_VHOST,MINUTES_BETWEEN_BACKUPS,GUNICORN_DJANGO_WORKERS,GUNICORN_DJANGO_THREADS,GUNICORN_DJANGO_MAX_REQUESTS,CELERY_ENABLED,CELERY_CONCURRENCY,CELERY_POOL,TAIGA_PROTECTED_WORKERS,EVENTS_ENABLED,MALLOC_ARENA_MAX"
 # Carry out db migrations
 su -w $VARIABLES  - taiga -c "bash -l /migrate.sh"
 

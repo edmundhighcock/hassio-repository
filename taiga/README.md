@@ -7,6 +7,9 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 - Visible in the web ui which can be added to the Home Assistant sidebar.
 - Data persistence
 - Architecture: `amd64` (i.e. most modern Intel and AMD chips) and `aarch64` (Raspberry PI)
+- Configurable gunicorn/Celery worker, thread, and concurrency counts, so the
+  add-on's memory footprint can be tuned to the device it runs on (see
+  "Scale-control options" below)
 - Allow use of a 3rd-party postgres server (must be <= 13.9)
 - Automatic backups
 - Access the WebUI via the nabucasa remote URL (`https://<uid>.ui.nabu.casa/...`)
@@ -26,8 +29,9 @@ An add-on to allow the agile Taiga project manager to be deployed on home assist
 Taiga is a big application so needs a bit of power behind it.
 
 - Around 3GB disk space.
-- Around 400MB RAM
-- Architecture=`amd64` (extending to ARM is a high priority)
+- Around 400-650MB RAM with the default scale-control options (see below;
+  it can be tuned lower on a memory-constrained device).
+- Architecture: `amd64` or `aarch64` (e.g. Raspberry Pi 5)
 
 
 ## Installation
@@ -98,5 +102,22 @@ If the worst happens and you need to restore the addon from scratch, you can
 #### Changing the update frequency
 
 You can change the time between project exports by changing the parameter `minutes_between_backups` in the project configuration.
+
+### Scale-control options
+
+The configuration page has options to trade memory for throughput, or vice
+versa: `gunicorn_django_workers`, `gunicorn_django_threads`,
+`gunicorn_django_max_requests` (the Django API, port 8001),
+`celery_enabled`, `celery_concurrency`, `celery_pool` (background tasks),
+`taiga_protected_workers` (signed attachment URLs, port 8003),
+`events_enabled` (live WebSocket board updates), and `malloc_arena_max`
+(a glibc memory-fragmentation knob applied to every Python process). The
+defaults are sized for a light household install (a couple of humans and a
+few agents) on a Raspberry Pi 5. Each option's description in the
+configuration UI explains its trade-off; in particular, turning
+`celery_enabled` off stops the notification-digest emails and the
+expired-token cleanup, and makes webhook/timeline writes synchronous, while
+turning `events_enabled` off only stops live push to open browser tabs (a
+manual refresh still shows changes).
 
 
