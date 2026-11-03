@@ -1,5 +1,41 @@
 # Changelog
 
+## [6.0.10-p9] - 2026-11-03
+
+### Fixed
+
+- **Live events (`taiga-events`) healthz failing with "RabbitMQ server is
+  down"**: the base image's `/home/taiga/taiga-events/.env`, baked into
+  `edmundhighcock/hass-taiga` at `taiga/build/events.env`, hardcodes
+  `RABBITMQ_URL=amqp://taiga:taiga@local-rabbitmq:5672/taiga`. That
+  hostname never resolved on the Supervisor network - the RabbitMQ
+  add-on's real alias is `<slug>-rabbitmq` (e.g. `9547a9e0-rabbitmq`).
+  Django's own event/Celery publishing (`backend_config.py`) already used
+  the right alias, but had it hardcoded rather than reading it from an
+  add-on option.
+  - Added a `rabbitmq_advanced_options.host` option (default
+    `9547a9e0-rabbitmq`), following the existing
+    `postgres_advanced_options.host` pattern.
+  - `start.sh` now computes `RABBITMQ_URL` from that host plus the
+    existing `rabbitmq_password`/`rabbitmq_advanced_options.virtual_host`
+    options (password percent-encoded via `jq`'s `@uri`, since it can
+    contain amqp URL-reserved characters) and exports it through `su -w`'s
+    variable whitelist to `taiga-events`. `taiga-events` loads its `.env`
+    with `dotenv`, which by default does not override a variable already
+    present in the process environment, so this takes precedence over the
+    base image's broken `.env` without rebuilding it. The password is
+    never echoed or written to a log.
+  - `backend_config.py` now reads the same `RABBITMQ_HOST` env var
+    (falling back to `9547a9e0-rabbitmq` if unset, e.g. under `tests/`)
+    instead of a hardcoded host, and percent-encodes the RabbitMQ password
+    (`urllib.parse.quote`) for both `EVENTS_PUSH_BACKEND_OPTIONS` and
+    `CELERY_BROKER_URL`, so a password with reserved characters cannot
+    silently break the amqp URL there either.
+  - `tests/test.sh` now asserts the computed `RABBITMQ_URL`'s host for
+    both the default and a custom `rabbitmq_advanced_options.host`, and
+    that a password containing `@`/`/` is never written to the test log
+    in plaintext (only password-redacted).
+
 ## [6.0.10-p8] - 2026-11-03
 
 ### Changed

@@ -1,6 +1,6 @@
 name: "Taiga Project Manager"
 description: "Taiga Agile Project Manager"
-version: "6.0.10-p8"
+version: "6.0.10-p9"
 slug: "taiga"
 init: false
 # armv7 dropped: no armv7 base image was ever published (build.yaml only maps
@@ -15,6 +15,7 @@ options:
   minutes_between_backups: 61
   rabbitmq_advanced_options:
     virtual_host: "taiga"
+    host: "9547a9e0-rabbitmq"
   postgres_advanced_options:
     host: '9547a9e0-taiga-postgres'
     user: 'taiga'
@@ -38,6 +39,7 @@ schema:
   minutes_between_backups: "float"
   rabbitmq_advanced_options:
     virtual_host: "str"
+    host: "str?"
   postgres_advanced_options:
     host: 'str'
     user: 'str'

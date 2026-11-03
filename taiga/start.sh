@@ -31,7 +31,24 @@ export POSTGRES_HOST=$(cat /data/options.json | jq -r .postgres_advanced_options
 export POSTGRES_USER=$(cat /data/options.json | jq -r .postgres_advanced_options.user)
 export POSTGRES_DB=$(cat /data/options.json | jq -r .postgres_advanced_options.database)
 export RABBITMQ_VHOST=$(cat /data/options.json | jq -r .rabbitmq_advanced_options.virtual_host)
+# Optional: installs whose options predate p9 have no host key, so fall back
+# to the RabbitMQ add-on's Supervisor alias.
+export RABBITMQ_HOST=$(cat /data/options.json | jq -r '.rabbitmq_advanced_options.host // "9547a9e0-rabbitmq"')
 export MINUTES_BETWEEN_BACKUPS=$(cat /data/options.json | jq -r .minutes_between_backups)
+
+# taiga-events (base image) ships a .env with RABBITMQ_URL pointing at
+# "local-rabbitmq", which never resolves on the Supervisor network (the
+# RabbitMQ add-on's real alias is $RABBITMQ_HOST, e.g. "9547a9e0-rabbitmq").
+# taiga-events loads its .env with dotenv, which (dotenv's documented
+# default) does not override a variable already present in the process
+# environment, so exporting the correct RABBITMQ_URL here - and passing it
+# through `su -w` below - takes precedence over the baked-in .env without
+# needing to touch the base image. The password is percent-encoded (jq's
+# @uri) since it can contain amqp URL-reserved characters; it is never
+# echoed or logged.
+RABBITMQ_URL_ENCODED_PASS=$(jq -rn --arg v "$RABBITMQ_DEFAULT_PASS" '$v|@uri')
+export RABBITMQ_URL="amqp://taiga:${RABBITMQ_URL_ENCODED_PASS}@${RABBITMQ_HOST}:5672/${RABBITMQ_VHOST}"
+unset RABBITMQ_URL_ENCODED_PASS
 
 # Scale-control options, consumed by run.sh. jq renders bool/int straight to
 # text (e.g. "true"/"false", "2"), which is exactly what run.sh compares
@@ -59,7 +76,7 @@ sed -i "s base_url_to_be_replaced $INGRESS_ENTRY/ " /home/taiga/taiga-front-dist
 sed -i 's,base href="/",base href="'"$INGRESS_ENTRY"'/",' /home/taiga/taiga-front-dist/dist/index.html
 
 # ENVIRONMENT="INGRESS_ENTRY='$INGRESS_ENTRY' TAIGA_SECRET_KEY=$TAIGA_SECRET_KEY RABBITMQ_DEFAULT_PASS='$RABBITMQ_DEFAULT_PASS'"
-VARIABLES="TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS,POSTGRES_PASSWORD,POSTGRES_HOST,POSTGRES_USER,POSTGRES_DB,RABBITMQ_VHOST,MINUTES_BETWEEN_BACKUPS,GUNICORN_DJANGO_WORKERS,GUNICORN_DJANGO_THREADS,GUNICORN_DJANGO_MAX_REQUESTS,CELERY_ENABLED,CELERY_CONCURRENCY,CELERY_POOL,TAIGA_PROTECTED_WORKERS,EVENTS_ENABLED,MALLOC_ARENA_MAX"
+VARIABLES="TAIGA_SECRET_KEY,INGRESS_ENTRY,RABBITMQ_DEFAULT_PASS,POSTGRES_PASSWORD,POSTGRES_HOST,POSTGRES_USER,POSTGRES_DB,RABBITMQ_VHOST,RABBITMQ_HOST,RABBITMQ_URL,MINUTES_BETWEEN_BACKUPS,GUNICORN_DJANGO_WORKERS,GUNICORN_DJANGO_THREADS,GUNICORN_DJANGO_MAX_REQUESTS,CELERY_ENABLED,CELERY_CONCURRENCY,CELERY_POOL,TAIGA_PROTECTED_WORKERS,EVENTS_ENABLED,MALLOC_ARENA_MAX"
 # Carry out db migrations
 su -w $VARIABLES  - taiga -c "bash -l /migrate.sh"
 

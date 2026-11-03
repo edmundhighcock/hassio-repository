@@ -28,7 +28,11 @@ hasnt() { grep -qF -- "$2" "$TMP/calls.log" && bad "$1 (did not want: $2)" || ok
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/log-stub" <<'EOF'
 #!/bin/bash
-echo "CALL: $0 $* | MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX-<unset>}" >> /test-calls.log
+# Redact the password out of RABBITMQ_URL before it ever reaches the log
+# file (which the test harness then cats to stdout) - mirrors the
+# redaction used for manual inspection on hass.
+REDACTED_RABBITMQ_URL=$(printf '%s' "${RABBITMQ_URL-<unset>}" | sed -E 's#(amqp://[^:]+:)[^@]+@#\1***@#')
+echo "CALL: $0 $* | MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX-<unset>} | RABBITMQ_URL=${REDACTED_RABBITMQ_URL}" >> /test-calls.log
 EOF
 cat > "$TMP/bin/curl-stub" <<'EOF'
 #!/bin/bash
@@ -47,10 +51,10 @@ base_options() {
   cat <<EOF
 {
   "taiga_secret_key": "test-secret",
-  "rabbitmq_password": "test-rabbit",
+  "rabbitmq_password": "${RABBITMQ_PASSWORD_OPT:-test-rabbit}",
   "postgres_password": "test-postgres",
   "minutes_between_backups": 61,
-  "rabbitmq_advanced_options": {"virtual_host": "taiga"},
+  "rabbitmq_advanced_options": {"virtual_host": "taiga", "host": "${RABBITMQ_HOST_OPT:-9547a9e0-rabbitmq}"},
   "postgres_advanced_options": {"host": "local-postgres", "user": "taiga", "database": "taiga"},
   "gunicorn_django_workers": ${GUNICORN_DJANGO_WORKERS:-2},
   "gunicorn_django_threads": ${GUNICORN_DJANGO_THREADS:-2},
@@ -66,13 +70,20 @@ EOF
 }
 
 mkdir -p "$TMP/options"
-( unset GUNICORN_DJANGO_WORKERS GUNICORN_DJANGO_THREADS GUNICORN_DJANGO_MAX_REQUESTS CELERY_ENABLED CELERY_CONCURRENCY CELERY_POOL TAIGA_PROTECTED_WORKERS EVENTS_ENABLED MALLOC_ARENA_MAX
+( unset GUNICORN_DJANGO_WORKERS GUNICORN_DJANGO_THREADS GUNICORN_DJANGO_MAX_REQUESTS CELERY_ENABLED CELERY_CONCURRENCY CELERY_POOL TAIGA_PROTECTED_WORKERS EVENTS_ENABLED MALLOC_ARENA_MAX RABBITMQ_HOST_OPT RABBITMQ_PASSWORD_OPT
   base_options ) > "$TMP/options/defaults.json"
 ( CELERY_ENABLED=false base_options ) > "$TMP/options/celery-off.json"
 ( EVENTS_ENABLED=false base_options ) > "$TMP/options/events-off.json"
 ( GUNICORN_DJANGO_WORKERS=4 GUNICORN_DJANGO_THREADS=1 GUNICORN_DJANGO_MAX_REQUESTS=0 \
   CELERY_CONCURRENCY=3 CELERY_POOL=prefork TAIGA_PROTECTED_WORKERS=4 base_options ) > "$TMP/options/workers4-threads1.json"
 ( MALLOC_ARENA_MAX=0 base_options ) > "$TMP/options/arena0.json"
+# Non-default RabbitMQ host, plus a password with amqp URL-reserved
+# characters, to check the computed RABBITMQ_URL is built from the option
+# (not the base image's broken "local-rabbitmq" default) and that the
+# password is percent-encoded rather than leaking into the URL verbatim.
+( RABBITMQ_HOST_OPT=custom-rabbitmq RABBITMQ_PASSWORD_OPT='p@ss/word' base_options ) > "$TMP/options/custom-rabbitmq.json"
+# Options saved by an install that predates p9 carry no rabbitmq host key.
+( base_options ) | jq 'del(.rabbitmq_advanced_options.host)' > "$TMP/options/no-host-key.json"
 
 run_scenario() {  # name, options-file
     local name="$1" optfile="$2"
@@ -117,6 +128,9 @@ has   "defaults: protected workers" \
       "$GUNICORN_PROTECTED --workers 1 --timeout 60 --log-level=info --access-logfile - --bind 0.0.0.0:8003 server:app"
 has   "defaults: events (npm) started" "$NPM run start:production"
 has   "defaults: MALLOC_ARENA_MAX reaches gunicorn via su -w" "MALLOC_ARENA_MAX=2"
+has   "defaults: RABBITMQ_URL built from the add-on's rabbitmq host option (not the base image's broken local-rabbitmq)" \
+      "RABBITMQ_URL=amqp://taiga:***@9547a9e0-rabbitmq:5672/taiga"
+hasnt "defaults: rabbitmq password not logged" "test-rabbit"
 
 echo "== celery off =="
 run_scenario celery-off "$TMP/options/celery-off.json"
@@ -142,6 +156,19 @@ has   "workers4/threads1: protected workers" "$GUNICORN_PROTECTED --workers 4"
 echo "== malloc_arena_max 0 (unset) =="
 run_scenario arena0 "$TMP/options/arena0.json"
 has   "arena0: MALLOC_ARENA_MAX left unset" "MALLOC_ARENA_MAX=<unset>"
+
+echo "== custom rabbitmq host + password needing URL-encoding =="
+run_scenario custom-rabbitmq "$TMP/options/custom-rabbitmq.json"
+has   "custom-rabbitmq: RABBITMQ_URL host follows the option, password redacted" \
+      "RABBITMQ_URL=amqp://taiga:***@custom-rabbitmq:5672/taiga"
+hasnt "custom-rabbitmq: raw password not logged" "p@ss/word"
+hasnt "custom-rabbitmq: raw password not logged (url-decoded form)" "taiga:p@ss"
+has   "custom-rabbitmq: events (npm) still started" "$NPM run start:production"
+
+run_scenario no-host-key "$TMP/options/no-host-key.json"
+has   "no-host-key: pre-p9 options fall back to the RabbitMQ add-on alias" \
+      "RABBITMQ_URL=amqp://taiga:***@9547a9e0-rabbitmq:5672/taiga"
+has   "no-host-key: events (npm) still started" "$NPM run start:production"
 
 echo "$FAILS failed"
 exit $FAILS

@@ -120,4 +120,11 @@ expired-token cleanup, and makes webhook/timeline writes synchronous, while
 turning `events_enabled` off only stops live push to open browser tabs (a
 manual refresh still shows changes).
 
+Live events connect to RabbitMQ using the add-on's own `rabbitmq_password`
+and `rabbitmq_advanced_options` (`virtual_host`, and `host` - the RabbitMQ
+add-on's hostname on the Supervisor network, normally left at its default
+of `<slug>-rabbitmq`); there is no separate configuration for this. If the
+RabbitMQ add-on's slug ever differs from the default, update
+`rabbitmq_advanced_options.host` to match.
+
 
