@@ -26,3 +26,7 @@ addons:
     name: "Static Sites"
     description: "Household static sites, served through Ingress only"
     url: https://github.com/edmundhighcock/hassio-repository/tree/main/static_sites
+  influxdb2:
+    name: "InfluxDB 2"
+    description: "InfluxDB 2.x OSS, tuned for a memory-tight Pi, for the HA core influxdb integration"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/influxdb2

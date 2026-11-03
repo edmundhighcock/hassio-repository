@@ -33,3 +33,7 @@ This addon provides a rabbitmq message broker. At the moment it is hard-wired to
 #### Postgres (Supplemental)
 
 This addon provides a postgresql database server. Like the RabbitMQ add-on, at the moment it is hard-wired to support the Taiga addon and doesn't have the ability to customise e.g. the username, database etc. 
+
+### [InfluxDB 2](https://github.com/edmundhighcock/hassio-repository/tree/main/influxdb2)
+
+InfluxDB 2.x OSS, tuned to run comfortably on a memory-tight Raspberry Pi, for Home Assistant Core's own `influxdb` integration to store the household's full state-change history forever. No host port - reachable only from other add-ons and Home Assistant Core on the Supervisor's internal network.

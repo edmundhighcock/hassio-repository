@@ -1,0 +1,62 @@
+name: "InfluxDB 2"
+description: "InfluxDB 2.x OSS, tuned for a memory-tight Pi, for the HA core influxdb integration"
+version: "0.1.0"
+slug: "influxdb2"
+init: false
+startup: application
+boot: auto
+arch:
+  - aarch64
+  - amd64
+# No `ports:` entry anywhere in this file: there is deliberately no host
+# port. Home Assistant Core and every other add-on reach this container
+# only over the Supervisor's internal network, at
+# http://9547a9e0-influxdb2:8086 — see DOCS.md.
+watchdog: "http://[HOST]:8086/health"
+options:
+  organization: "household"
+  bucket: "homeassistant"
+  retention: ""
+  admin_username: "admin"
+  storage_cache_max_memory_size: 268435456
+  storage_cache_snapshot_memory_size: 16777216
+  storage_max_concurrent_compactions: 1
+  query_concurrency: 2
+  query_queue_size: 10
+  query_initial_memory_bytes: 10485760
+  query_memory_bytes: 209715200
+  query_max_memory_bytes: 419430400
+  go_memlimit_mib: 450
+  backup_keep: 2
+  backup_hour: 3
+schema:
+  organization: "str"
+  bucket: "str"
+  retention: "str"
+  admin_username: "str"
+  storage_cache_max_memory_size: "int(1048576,)"
+  storage_cache_snapshot_memory_size: "int(1048576,)"
+  storage_max_concurrent_compactions: "int(1,)"
+  query_concurrency: "int(0,)"
+  query_queue_size: "int(0,)"
+  query_initial_memory_bytes: "int(1048576,)"
+  query_memory_bytes: "int(1048576,)"
+  query_max_memory_bytes: "int(1048576,)"
+  go_memlimit_mib: "int(64,)"
+  backup_keep: "int(1,)"
+  backup_hour: "int(0,23)"
+# Own private data (bolt + engine, under /data) is excluded from Home
+# Assistant's own backups: the off-site copy is the nightly `influx backup`
+# under addon_config, pulled over SSH separately. See DOCS.md.
+backup: hot
+backup_exclude:
+  - "**"
+# addon_config:rw -> /addon_configs/9547a9e0_influxdb2/ on the host, and
+# /config inside this container. Nightly backups land in
+# /config/backups/ here. See DOCS.md.
+map:
+  - addon_config:rw
+hassio_api: false
+homeassistant_api: false
+auth_api: false
+ingress: false
