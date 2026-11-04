@@ -29,6 +29,13 @@ SECRETS_DIR=/data/secrets
 
 log() { echo "[influxdb2] $*"; }
 
+# sanitize_stderr <file>: first line of a captured stderr file, with any
+# token-like run of 20+ base64/hex-ish characters redacted, for safe
+# inclusion in an ERROR log line. Never logs a token value.
+sanitize_stderr() {
+    head -n1 "$1" 2>/dev/null | sed -E 's/[A-Za-z0-9+\/_=-]{20,}/[REDACTED]/g' | cut -c1-300
+}
+
 opt() {
     # opt <key> <default>
     jq -r --arg d "$2" '.[$ARGS.named.k] // $d | tostring' --arg k "$1" "$OPTIONS" \
@@ -126,7 +133,7 @@ log "GOMEMLIMIT=$GOMEMLIMIT pprof-disabled=true metrics-disabled=$INFLUXD_METRIC
 # admin_token at that point is known-good and left in place, so the
 # add-on is never left without a working operator token.
 rotate_admin_token() {
-    local desired_gen current_gen old_token old_auth_id new_token new_auth_id tmp http_code
+    local desired_gen current_gen old_token old_auth_id new_token new_auth_id tmp http_code err_file
 
     desired_gen="$ADMIN_TOKEN_GENERATION"
     current_gen="$(cat "$SECRETS_DIR/admin_token_generation" 2>/dev/null || true)"
@@ -144,30 +151,41 @@ rotate_admin_token() {
         return 1
     fi
 
+    err_file="$(mktemp)"
+
+    # --org is passed explicitly on every call below that can take one:
+    # the influx CLI's own saved config (~/.influxdbv2, holding the
+    # default org from first-run `influx setup`) lives in the container
+    # filesystem, not /data, so it is absent in any container created
+    # after the one that did setup (e.g. after an add-on update, which is
+    # a new container on the same /data) - never rely on it.
     old_auth_id="$(influx auth list --host http://localhost:8086 --token "$old_token" \
-        --user "$ADMIN_USERNAME" --json 2>/dev/null \
+        --org "$ORG" --user "$ADMIN_USERNAME" --json 2>"$err_file" \
         | jq -r --arg t "$old_token" '.[] | select(.token==$t) | .id' | head -1)"
     if [ -z "$old_auth_id" ]; then
-        log "ERROR: could not find the authorization ID of the current operator token; not rotating, old token kept, will retry next start"
+        log "ERROR: could not find the authorization ID of the current operator token (influx auth list: $(sanitize_stderr "$err_file")); not rotating, old token kept, will retry next start"
+        rm -f "$err_file"
         return 1
     fi
     log "current operator token is authorization $old_auth_id"
 
     new_token="$(influx auth create --host http://localhost:8086 --token "$old_token" \
-        --operator --user "$ADMIN_USERNAME" \
-        --description "operator token (generation $desired_gen)" --json 2>/dev/null \
+        --org "$ORG" --operator --user "$ADMIN_USERNAME" \
+        --description "operator token (generation $desired_gen)" --json 2>"$err_file" \
         | jq -r .token)"
     if [ -z "$new_token" ] || [ "$new_token" = "null" ]; then
-        log "ERROR: failed to create a new operator token; old token (authorization $old_auth_id) kept, will retry next start"
+        log "ERROR: failed to create a new operator token (influx auth create: $(sanitize_stderr "$err_file")); old token (authorization $old_auth_id) kept, will retry next start"
+        rm -f "$err_file"
         return 1
     fi
     new_auth_id="$(influx auth list --host http://localhost:8086 --token "$new_token" \
-        --user "$ADMIN_USERNAME" --json 2>/dev/null \
+        --org "$ORG" --user "$ADMIN_USERNAME" --json 2>"$err_file" \
         | jq -r --arg t "$new_token" '.[] | select(.token==$t) | .id' | head -1)"
 
-    if ! influx bucket list --host http://localhost:8086 --token "$new_token" --org "$ORG" >/dev/null 2>&1; then
-        log "ERROR: new operator token (authorization $new_auth_id) failed to authenticate; deleting it and keeping the old one (authorization $old_auth_id), will retry next start"
+    if ! influx bucket list --host http://localhost:8086 --token "$new_token" --org "$ORG" >/dev/null 2>"$err_file"; then
+        log "ERROR: new operator token (authorization $new_auth_id) failed to authenticate (influx bucket list: $(sanitize_stderr "$err_file")); deleting it and keeping the old one (authorization $old_auth_id), will retry next start"
         influx auth delete --host http://localhost:8086 --token "$old_token" -i "$new_auth_id" >/dev/null 2>&1 || true
+        rm -f "$err_file"
         return 1
     fi
     log "new operator token (authorization $new_auth_id) verified working"
@@ -179,8 +197,11 @@ rotate_admin_token() {
     mv -f "$tmp" "$SECRETS_DIR/admin_token"
     log "admin_token replaced with the new operator token (authorization $new_auth_id)"
 
-    if ! influx auth delete --host http://localhost:8086 --token "$new_token" -i "$old_auth_id" >/dev/null 2>&1; then
-        log "ERROR: failed to delete old operator token (authorization $old_auth_id); the new token (authorization $new_auth_id) is in place and working, but the old one is still valid too - not recording the new generation, will retry next start"
+    # auth delete takes no --org/--org-id flag (checked against `influx
+    # auth delete --help`): an authorization ID is already unambiguous.
+    if ! influx auth delete --host http://localhost:8086 --token "$new_token" -i "$old_auth_id" >/dev/null 2>"$err_file"; then
+        log "ERROR: failed to delete old operator token (authorization $old_auth_id) (influx auth delete: $(sanitize_stderr "$err_file")); the new token (authorization $new_auth_id) is in place and working, but the old one is still valid too - not recording the new generation, will retry next start"
+        rm -f "$err_file"
         return 1
     fi
 
@@ -188,6 +209,7 @@ rotate_admin_token() {
         -H "Authorization: Token $old_token" "http://localhost:8086/api/v2/buckets")"
     if [ "$http_code" != "401" ]; then
         log "ERROR: old operator token (authorization $old_auth_id) did not return 401 after deletion (got $http_code); not recording the new generation, will retry next start"
+        rm -f "$err_file"
         return 1
     fi
     log "old operator token (authorization $old_auth_id) confirmed revoked (401)"
@@ -196,6 +218,7 @@ rotate_admin_token() {
     printf '%s' "$desired_gen" >"$tmp"
     chmod 600 "$tmp"
     mv -f "$tmp" "$SECRETS_DIR/admin_token_generation"
+    rm -f "$err_file"
     log "operator token rotation complete: generation is now $desired_gen"
 }
 
@@ -211,22 +234,26 @@ rotate_admin_token() {
 ensure_ha_token() {
     [ -s "$SECRETS_DIR/ha_token" ] && return 0
     log "creating Home Assistant write-only token on bucket $BUCKET"
-    local admin_token bucket_id token
+    local admin_token bucket_id token err_file
     admin_token="$(cat "$SECRETS_DIR/admin_token")"
+    err_file="$(mktemp)"
     bucket_id="$(influx bucket list --host http://localhost:8086 --token "$admin_token" \
-        --org "$ORG" --name "$BUCKET" --hide-headers 2>/dev/null | cut -f1)"
+        --org "$ORG" --name "$BUCKET" --hide-headers 2>"$err_file" | cut -f1)"
     if [ -z "$bucket_id" ]; then
-        log "could not look up bucket '$BUCKET' yet, will retry next start"
+        log "could not look up bucket '$BUCKET' yet (influx bucket list: $(sanitize_stderr "$err_file")), will retry next start"
+        rm -f "$err_file"
         return 1
     fi
     token="$(influx auth create --host http://localhost:8086 --token "$admin_token" \
         --org "$ORG" --write-bucket "$bucket_id" \
-        --description "Home Assistant write access (bucket: $BUCKET)" --json \
+        --description "Home Assistant write access (bucket: $BUCKET)" --json 2>"$err_file" \
         | jq -r .token)"
     if [ -z "$token" ] || [ "$token" = "null" ]; then
-        log "failed to create Home Assistant token, will retry next start"
+        log "failed to create Home Assistant token (influx auth create: $(sanitize_stderr "$err_file")), will retry next start"
+        rm -f "$err_file"
         return 1
     fi
+    rm -f "$err_file"
     umask 077
     printf '%s' "$token" >"$SECRETS_DIR/ha_token"
     chmod 600 "$SECRETS_DIR/ha_token"

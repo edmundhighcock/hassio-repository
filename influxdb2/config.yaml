@@ -1,6 +1,6 @@
 name: "InfluxDB 2"
 description: "InfluxDB 2.x OSS, tuned for a memory-tight Pi, for the HA core influxdb integration"
-version: "0.1.1"
+version: "0.1.2"
 slug: "influxdb2"
 init: false
 startup: application

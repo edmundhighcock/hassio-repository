@@ -216,6 +216,14 @@ restart the add-on to rotate `/data/secrets/admin_token`:
 5. The new generation number is written last, only once all of the above
    has actually succeeded.
 
+Every `influx` CLI call in this process passes `--org` explicitly - the
+CLI's own saved config (which would otherwise supply a default org) is
+written inside the container's filesystem by first-run `influx setup`,
+not under `/data`, so it is absent in any container created after that
+one. An add-on **update** replaces the container (it is not a `docker
+restart` of the one that ran setup), so this matters on every update,
+not just the first rotation - fixed in 0.1.2 (see CHANGELOG.md).
+
 If any step fails, the generation file is left untouched (so the same
 rotation is retried on the next start) and the token currently in
 `admin_token` - old or new, whichever is last known to work - is left in

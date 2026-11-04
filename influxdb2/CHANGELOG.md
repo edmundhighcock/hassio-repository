@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.2
+
+- Fix: operator-token rotation (`admin_token_generation`) failed with
+  `ERROR: failed to create a new operator token; old token kept` whenever
+  it ran in a container other than the one that did first-run `influx
+  setup` - which, per Home Assistant's own add-on update mechanism, is
+  every container after the first one (an update replaces the container,
+  it does not restart it). Root cause: the `influx` CLI's own saved
+  config (`~/.influxdbv2`, holding the default org recorded by `influx
+  setup`) lives in the container filesystem, not `/data`, so it is
+  absent in any later container; `influx auth create --operator ...`
+  then fails with `Error: must specify org ID or org name`, which the
+  previous version hid behind `2>/dev/null`. `run.sh` now passes `--org`
+  explicitly on every `influx auth create`/`auth list` call in the
+  rotation path (never relying on the CLI's saved config), and captures
+  each call's stderr so a failure logs a sanitised (token values
+  stripped) first line instead of nothing. `ensure_ha_token` already
+  passed `--org` on its own calls and is otherwise unaffected, but gets
+  the same stderr capture/logging for consistency.
+- Test harness: added a scenario in `tests/test.sh` that reproduces the
+  real upgrade path - first-run setup in one container, then every
+  subsequent step (two rotations and an `ha_token` recreation) in a
+  brand-new container on the same `/data`, never a `docker restart` of
+  the container that ran setup. Confirmed this scenario fails against
+  0.1.1's `run.sh` and passes with the fix above.
+
 ## 0.1.1
 
 - New `admin_token_generation` option (default `0`): raise it by one and

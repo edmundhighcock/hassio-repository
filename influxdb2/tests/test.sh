@@ -14,6 +14,13 @@
 #     new working operator token and 401s the old one, re-running with
 #     the same generation is a no-op, raising it again rotates again,
 #     and ha_token is untouched throughout
+#   - the same rotation and ha_token-recreation checks again, but each
+#     step in a brand-new container on the same /data (the real upgrade
+#     path: a container update is a new container, never a `docker
+#     restart` of the one that ran first-run `influx setup`) - this is
+#     the scenario that caught the 0.1.1 bug where rotation relied on the
+#     influx CLI's own saved config, which does not survive a new
+#     container
 #   - a backup taken over HTTP from outside the container with the
 #     operator token, restored into a second throwaway container, with
 #     a matching point count
@@ -41,8 +48,38 @@ wait_healthy_url() {
 }
 set_option() { docker exec influxdb2-test-a sh -c "echo '$1' > /data/options.json"; }
 
+# wait_health_at <url>: like wait_healthy_url, for a container other than
+# influxdb2-test-a (used by the multi-container rotation scenario below,
+# where each step is a brand-new container on the same /data).
+wait_health_at() {
+    local u="$1" i
+    for i in $(seq 1 60); do
+        curl -s "$u/health" 2>/dev/null | grep -q '"status":"pass"' && return 0
+        sleep 1
+    done
+    return 1
+}
+# wait_new_token_at <container> <old_hash>: polls admin_token inside
+# <container> until it differs from <old_hash>, echoes it (whatever it
+# last read, even on timeout, so the caller's own hash-comparison assert
+# fails cleanly instead of comparing against an empty string).
+wait_new_token_at() {
+    local c="$1" oldhash="$2" tok i
+    for i in $(seq 1 30); do
+        tok=$(docker exec "$c" cat /data/secrets/admin_token 2>/dev/null)
+        if [ -n "$tok" ] && [ "$(hash "$tok")" != "$oldhash" ]; then
+            printf '%s' "$tok"
+            return 0
+        fi
+        sleep 1
+    done
+    printf '%s' "$tok"
+}
+
 cleanup() {
-    docker rm -f influxdb2-test-a influxdb2-test-restore >/dev/null 2>&1
+    docker rm -f influxdb2-test-a influxdb2-test-restore \
+        influxdb2-test-b influxdb2-test-c influxdb2-test-d influxdb2-test-e influxdb2-test-f \
+        >/dev/null 2>&1
     # Files under $TMP are root-owned (influxd runs as root in the
     # container); clean them up from a throwaway container too.
     docker run --rm -v "$TMP:/cleanup" "$IMG" sh -c 'rm -rf /cleanup/*' >/dev/null 2>&1
@@ -225,6 +262,112 @@ expect "ha_token still unchanged after second rotation" "$HA_TOKEN" "$(docker ex
 
 # All later steps (backup/restore) use the currently-valid operator token.
 ADMIN_TOKEN="$GEN2_TOKEN"
+
+echo "=== Multi-container rotation scenario (the real upgrade path) ==="
+# Reproduces the 0.1.1 bug: container A does first-run setup (which is
+# also when the influx CLI's own config gets written, inside *that*
+# container's filesystem, not /data); every following container here is
+# brand-new, never restarted, so none of them has that CLI config - only
+# /data is shared. Separate port/data dir from the influxdb2-test-a
+# scenario above.
+PORT_B=$((HOST_PORT + 1))
+URL_B="http://127.0.0.1:$PORT_B"
+mkdir -p "$TMP/multi/data"
+
+echo "Starting container B (first-run setup)..."
+docker run -d --name influxdb2-test-b --memory=700m \
+    -p "127.0.0.1:$PORT_B:8086" \
+    -v "$TMP/multi/data:/data" \
+    "$IMG" >/dev/null
+wait_health_at "$URL_B" && ok "container B became healthy" || bad "container B became healthy"
+docker logs influxdb2-test-b 2>&1 | grep -q "first run: generating admin credentials" \
+    && ok "container B ran first-run setup" || bad "container B ran first-run setup"
+
+MULTI_GEN0_TOKEN=$(docker exec influxdb2-test-b cat /data/secrets/admin_token 2>/dev/null)
+MULTI_GEN0_HASH=$(hash "$MULTI_GEN0_TOKEN")
+MULTI_HA_TOKEN=""
+for _ in $(seq 1 30); do
+    MULTI_HA_TOKEN=$(docker exec influxdb2-test-b cat /data/secrets/ha_token 2>/dev/null)
+    [ -n "$MULTI_HA_TOKEN" ] && break
+    sleep 1
+done
+[ -n "$MULTI_HA_TOKEN" ] && ok "container B created ha_token" || bad "container B created ha_token"
+
+echo "Removing container B, writing admin_token_generation=1 to /data, starting container C (a NEW container)..."
+docker rm -f influxdb2-test-b >/dev/null
+printf '{"admin_token_generation":1}' >"$TMP/multi/data/options.json"
+docker run -d --name influxdb2-test-c --memory=700m \
+    -p "127.0.0.1:$PORT_B:8086" \
+    -v "$TMP/multi/data:/data" \
+    "$IMG" >/dev/null
+wait_health_at "$URL_B" && ok "container C became healthy" || bad "container C became healthy"
+
+MULTI_GEN1_TOKEN=$(wait_new_token_at influxdb2-test-c "$MULTI_GEN0_HASH")
+MULTI_GEN1_HASH=$(hash "$MULTI_GEN1_TOKEN")
+[ "$MULTI_GEN1_HASH" != "$MULTI_GEN0_HASH" ] \
+    && ok "rotation to generation 1 succeeded in a new container (admin_token changed)" \
+    || bad "rotation to generation 1 succeeded in a new container (admin_token changed)"
+expect "container C: admin_token_generation recorded as 1" "1" "$(docker exec influxdb2-test-c cat /data/secrets/admin_token_generation 2>/dev/null)"
+expect "container C: new (gen 1) operator token works" "200" "$(code "$URL_B/api/v2/buckets" -H "Authorization: Token $MULTI_GEN1_TOKEN")"
+expect "container C: old (gen 0) operator token now 401" "401" "$(code "$URL_B/api/v2/buckets" -H "Authorization: Token $MULTI_GEN0_TOKEN")"
+expect "container C: ha_token unchanged by rotation" "$MULTI_HA_TOKEN" "$(docker exec influxdb2-test-c cat /data/secrets/ha_token)"
+expect "container C: ha_token still writes after rotation" "204" "$(code -XPOST "$URL_B/api/v2/write?org=household&bucket=homeassistant&precision=s" \
+    -H "Authorization: Token $MULTI_HA_TOKEN" --data-raw 'sensor,entity_id=multi1 state="on",value=1')"
+# `--` before each pattern: a server-generated token can start with `-`
+# (base64url alphabet), which would otherwise be read as a grep option.
+docker logs influxdb2-test-c 2>&1 | grep -qiF -- "$MULTI_GEN1_TOKEN" && bad "container C logs never contain a token value" \
+    || { docker logs influxdb2-test-c 2>&1 | grep -qiF -- "$MULTI_GEN0_TOKEN" && bad "container C logs never contain a token value" \
+    || ok "container C logs never contain a token value"; }
+
+echo "Removing container C, generation still 1 (no-op), starting container D (a NEW container)..."
+docker rm -f influxdb2-test-c >/dev/null
+docker run -d --name influxdb2-test-d --memory=700m \
+    -p "127.0.0.1:$PORT_B:8086" \
+    -v "$TMP/multi/data:/data" \
+    "$IMG" >/dev/null
+wait_health_at "$URL_B" && ok "container D became healthy" || bad "container D became healthy"
+sleep 2
+expect "container D: admin_token unchanged (generation 1 is a no-op in a new container)" \
+    "$MULTI_GEN1_HASH" "$(hash "$(docker exec influxdb2-test-d cat /data/secrets/admin_token 2>/dev/null)")"
+
+echo "Removing container D, writing admin_token_generation=2, starting container E (a NEW container)..."
+docker rm -f influxdb2-test-d >/dev/null
+printf '{"admin_token_generation":2}' >"$TMP/multi/data/options.json"
+docker run -d --name influxdb2-test-e --memory=700m \
+    -p "127.0.0.1:$PORT_B:8086" \
+    -v "$TMP/multi/data:/data" \
+    "$IMG" >/dev/null
+wait_health_at "$URL_B" && ok "container E became healthy" || bad "container E became healthy"
+
+MULTI_GEN2_TOKEN=$(wait_new_token_at influxdb2-test-e "$MULTI_GEN1_HASH")
+MULTI_GEN2_HASH=$(hash "$MULTI_GEN2_TOKEN")
+[ "$MULTI_GEN2_HASH" != "$MULTI_GEN1_HASH" ] \
+    && ok "rotation to generation 2 succeeded in another new container" \
+    || bad "rotation to generation 2 succeeded in another new container"
+expect "container E: admin_token_generation recorded as 2" "2" "$(docker exec influxdb2-test-e cat /data/secrets/admin_token_generation 2>/dev/null)"
+expect "container E: new (gen 2) operator token works" "200" "$(code "$URL_B/api/v2/buckets" -H "Authorization: Token $MULTI_GEN2_TOKEN")"
+expect "container E: gen 1 operator token now 401" "401" "$(code "$URL_B/api/v2/buckets" -H "Authorization: Token $MULTI_GEN1_TOKEN")"
+expect "container E: ha_token still unchanged after second rotation" "$MULTI_HA_TOKEN" "$(docker exec influxdb2-test-e cat /data/secrets/ha_token)"
+
+echo "Deleting ha_token, removing container E, starting container F (a NEW container) - upgrade path for ha_token too..."
+docker exec influxdb2-test-e rm -f /data/secrets/ha_token
+docker rm -f influxdb2-test-e >/dev/null
+docker run -d --name influxdb2-test-f --memory=700m \
+    -p "127.0.0.1:$PORT_B:8086" \
+    -v "$TMP/multi/data:/data" \
+    "$IMG" >/dev/null
+wait_health_at "$URL_B" && ok "container F became healthy" || bad "container F became healthy"
+MULTI_HA_TOKEN_2=""
+for _ in $(seq 1 30); do
+    MULTI_HA_TOKEN_2=$(docker exec influxdb2-test-f cat /data/secrets/ha_token 2>/dev/null)
+    [ -n "$MULTI_HA_TOKEN_2" ] && break
+    sleep 1
+done
+[ -n "$MULTI_HA_TOKEN_2" ] && ok "ensure_ha_token re-created ha_token in a new container" || bad "ensure_ha_token re-created ha_token in a new container"
+expect "container F: new ha_token writes" "204" "$(code -XPOST "$URL_B/api/v2/write?org=household&bucket=homeassistant&precision=s" \
+    -H "Authorization: Token $MULTI_HA_TOKEN_2" --data-raw 'sensor,entity_id=multi2 state="on",value=2')"
+
+docker rm -f influxdb2-test-f >/dev/null 2>&1
 
 echo "Backing up over HTTP from outside the container (operator token)..."
 mkdir -p "$TMP/backup"
