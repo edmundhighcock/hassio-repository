@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.1
+
+- Fix live inputs never matching: Home Assistant events carry `sensor.`
+  ids while modules name inputs without the domain (as the InfluxDB
+  buckets do); the prefix is now stripped before routing.
+- Fix the warm-up history request: one comma-separated
+  `filter_entity_id` of full ids (was rejected with 400), and keep the
+  entity id across a `minimal_response` series, where only the first
+  entry carries it.
+- hot_water: convert `loaver_power` (the EV charger, kW) to W live, as
+  the backfill already does by InfluxDB measurement.
+
 ## 0.1.0
 
 - First release: a small Go add-on hosting pluggable "virtual sensor"

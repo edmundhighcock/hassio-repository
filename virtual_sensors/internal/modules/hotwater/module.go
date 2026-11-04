@@ -307,6 +307,12 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	}
 	m.processedUntil = t
 
+	// loaver_power (the EV charger) reports kW; every other input is W.
+	// The backfill converts by InfluxDB measurement; live has no unit, so
+	// it is fixed here.
+	if u.EntityID == "loaver_power" {
+		u.Value *= 1000
+	}
 	if u.EntityID != GridEntity {
 		if u.Available {
 			m.lastLoad[u.EntityID] = detect.Point{T: t, V: u.Value}

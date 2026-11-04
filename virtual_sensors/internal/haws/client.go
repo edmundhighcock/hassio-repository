@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -136,9 +137,16 @@ func (c *Client) Close() error {
 func (c *Client) History(ctx context.Context, since time.Time, entityIDs []string) ([]StateEvent, error) {
 	u := fmt.Sprintf("%s/history/period/%s?minimal_response&no_attributes",
 		c.httpURL, since.UTC().Format(time.RFC3339))
+	// One comma-separated filter_entity_id of full ids; module inputs
+	// carry no domain, so sensor. is added here.
+	full := make([]string, 0, len(entityIDs))
 	for _, e := range entityIDs {
-		u += "&filter_entity_id=" + e
+		if !strings.Contains(e, ".") {
+			e = "sensor." + e
+		}
+		full = append(full, e)
 	}
+	u += "&filter_entity_id=" + strings.Join(full, ",")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -165,12 +173,17 @@ func (c *Client) History(ctx context.Context, since time.Time, entityIDs []strin
 	}
 	var out []StateEvent
 	for _, series := range raw {
+		// minimal_response carries entity_id on the first entry only.
+		id := ""
 		for _, s := range series {
+			if s.EntityID != "" {
+				id = s.EntityID
+			}
 			t, err := time.Parse(time.RFC3339Nano, s.LastChanged)
 			if err != nil {
 				continue
 			}
-			out = append(out, StateEvent{EntityID: s.EntityID, Time: t, State: s.State})
+			out = append(out, StateEvent{EntityID: id, Time: t, State: s.State})
 		}
 	}
 	return out, nil

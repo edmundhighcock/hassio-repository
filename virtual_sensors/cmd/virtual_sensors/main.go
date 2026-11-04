@@ -241,12 +241,15 @@ func runLive() {
 	}
 
 	dispatch := func(ev haws.StateEvent) {
-		ms, ok := entityToModules[ev.EntityID]
+		// Modules name inputs as the InfluxDB buckets do (no "sensor."
+		// prefix), so live and backfill share one set of ids.
+		id := strings.TrimPrefix(ev.EntityID, "sensor.")
+		ms, ok := entityToModules[id]
 		if !ok {
 			return
 		}
 		value, available := haws.ParseFloat(ev.State)
-		u := modules.StateUpdate{EntityID: ev.EntityID, Time: ev.Time, Value: value, Available: available}
+		u := modules.StateUpdate{EntityID: id, Time: ev.Time, Value: value, Available: available}
 		for _, m := range ms {
 			for _, out := range m.OnStateUpdate(u) {
 				if err := pub.PublishState(out); err != nil {
