@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2
+
+- MQTT discovery now sends `default_entity_id`, which current Home
+  Assistant uses to pick the entity id (`object_id` alone produced
+  `sensor.virtual_sensors_...`). Existing installs keep whatever id the
+  entity registry already holds.
+- Modules may publish initial states once MQTT is up; hot_water
+  publishes its restored energy total and current power at start, so the
+  energy sensor is never `unknown` after a restart.
+
 ## 0.1.1
 
 - Fix live inputs never matching: Home Assistant events carry `sensor.`

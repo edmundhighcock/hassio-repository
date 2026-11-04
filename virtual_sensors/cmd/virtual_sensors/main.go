@@ -205,6 +205,15 @@ func runLive() {
 		}
 	}
 	defer pub.Close()
+	for _, m := range active {
+		if is, ok := m.(modules.InitialStater); ok {
+			for _, out := range is.InitialStates() {
+				if err := pub.PublishState(out); err != nil {
+					log.Printf("ERROR: publishing initial %s: %v", out.ObjectID, err)
+				}
+			}
+		}
+	}
 
 	persistAll := func() {
 		for _, m := range active {

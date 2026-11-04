@@ -103,8 +103,12 @@ func (p *Publisher) onHAStatus(_ mqtt.Client, msg mqtt.Message) {
 }
 
 type discoveryConfig struct {
-	UniqueID          string         `json:"unique_id"`
-	ObjectID          string         `json:"object_id"`
+	UniqueID string `json:"unique_id"`
+	ObjectID string `json:"object_id"`
+	// default_entity_id is what current Home Assistant uses to choose the
+	// entity id; object_id alone was ignored on 2026.8 and the device name
+	// was prefixed (sensor.virtual_sensors_...).
+	DefaultEntityID   string         `json:"default_entity_id"`
 	Name              string         `json:"name"`
 	DeviceClass       string         `json:"device_class,omitempty"`
 	StateClass        string         `json:"state_class,omitempty"`
@@ -128,7 +132,7 @@ func (p *Publisher) publishDiscovery() error {
 	}
 	for _, o := range p.outputs {
 		cfg := discoveryConfig{
-			UniqueID: o.UniqueID, ObjectID: o.ObjectID, Name: o.Name,
+			UniqueID: o.UniqueID, ObjectID: o.ObjectID, DefaultEntityID: "sensor." + o.ObjectID, Name: o.Name,
 			DeviceClass: o.DeviceClass, StateClass: o.StateClass, UnitOfMeasurement: o.Unit,
 			StateTopic: stateTopic(o.ObjectID), AvailabilityTopic: availabilityTopic,
 			Device: Device,

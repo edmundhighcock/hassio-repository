@@ -150,6 +150,20 @@ func New() *Module {
 
 func (m *Module) Name() string { return "hot_water" }
 
+// InitialStates publishes the restored energy total and the current power
+// (the open cycle's step, or 0) as soon as MQTT is connected.
+func (m *Module) InitialStates() []modules.OutputUpdate {
+	now := time.Now().UTC()
+	power := 0.0
+	if m.open {
+		power = m.onMagnitude
+	}
+	return []modules.OutputUpdate{
+		{ObjectID: OutPowerObjectID, Time: now, Value: power},
+		{ObjectID: OutEnergyObjectID, Time: now, Value: m.energyKwh},
+	}
+}
+
 func (m *Module) Inputs() []modules.InputSpec {
 	specs := []modules.InputSpec{{EntityID: GridEntity}}
 	for _, e := range KnownLoadEntities {

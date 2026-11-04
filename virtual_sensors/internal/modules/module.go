@@ -45,6 +45,13 @@ type OutputUpdate struct {
 	Value    float64
 }
 
+// InitialStater is optional: a module implementing it has its current
+// outputs published once MQTT is up, so restored totals appear at start
+// rather than "unknown" until the next change.
+type InitialStater interface {
+	InitialStates() []OutputUpdate
+}
+
 // Module is the interface every virtual-sensor module implements.
 type Module interface {
 	// Name is the registry key - must match what's registered with Register.
