@@ -1,0 +1,34 @@
+configuration:
+  modules:
+    name: "Modules"
+    description: >-
+      Which virtual-sensor modules to run. See DOCS.md "Adding a module"
+      for what each one publishes. `example_passthrough` is a trivial
+      demonstration module, off by default - it republishes one input
+      entity unchanged under a new name, to prove the module interface
+      is genuinely reusable.
+  log_level:
+    name: "Log level"
+    description: "How much detail to log."
+  mqtt_host:
+    name: "MQTT host (override)"
+    description: >-
+      Only needed if the Supervisor's services API fails to report the
+      Mosquitto add-on's connection details (this has been observed to
+      happen even while Mosquitto is running - see DOCS.md "MQTT
+      credentials"). Leave blank to rely on the Supervisor.
+  mqtt_port:
+    name: "MQTT port (override)"
+    description: "Used only together with mqtt_host above."
+  mqtt_username:
+    name: "MQTT username (override)"
+    description: "Used only together with mqtt_host above."
+  mqtt_password:
+    name: "MQTT password (override)"
+    description: "Used only together with mqtt_host above."
+  go_memlimit_mib:
+    name: "Go memory limit (MiB)"
+    description: >-
+      GOMEMLIMIT - the Go runtime's soft heap limit, in MiB. Default 24
+      targets well under 30MB resident on a memory-tight Raspberry Pi -
+      see DOCS.md "Memory".

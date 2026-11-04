@@ -1,0 +1,44 @@
+name: "Virtual Sensors"
+description: "Derived sensors computed from other HA entities, published via MQTT discovery"
+version: "0.1.0"
+slug: "virtual_sensors"
+init: false
+startup: application
+boot: auto
+arch:
+  - aarch64
+  - amd64
+# Live inputs: Home Assistant's own WebSocket/REST APIs (state_changed
+# subscription + history warm-up) - see DOCS.md "Live inputs".
+homeassistant_api: true
+# Outputs: MQTT discovery to the Mosquitto add-on. `want`, not `need`: on
+# this system the Supervisor's service registry has reported mqtt
+# unavailable while Mosquitto was running (2026-08-30), and `need` would
+# then refuse to start the add-on at all. With `want` it starts, logs the
+# missing credentials loudly and retries, and the mqtt_* options below can
+# override - see DOCS.md "MQTT credentials".
+services:
+  - "mqtt:want"
+# No ports, no ingress - this add-on has no UI; everything it produces
+# shows up as ordinary Home Assistant sensor entities.
+options:
+  modules:
+    - "hot_water"
+  log_level: "info"
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  go_memlimit_mib: 24
+schema:
+  modules:
+    - "list(hot_water|example_passthrough)"
+  log_level: "list(debug|info|warning|error)"
+  mqtt_host: "str?"
+  mqtt_port: "port?"
+  mqtt_username: "str?"
+  mqtt_password: "password?"
+  go_memlimit_mib: "int(16,512)"
+# This add-on's own /data (energy totals, open-cycle state - see DOCS.md
+# "Restart semantics") is small; it is included in Home Assistant's
+# normal backups like any other add-on's /data, with no backup_exclude.

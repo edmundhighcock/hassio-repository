@@ -30,3 +30,7 @@ addons:
     name: "InfluxDB 2"
     description: "InfluxDB 2.x OSS, tuned for a memory-tight Pi, for the HA core influxdb integration"
     url: https://github.com/edmundhighcock/hassio-repository/tree/main/influxdb2
+  virtual_sensors:
+    name: "Virtual Sensors"
+    description: "Derived sensors computed from other HA entities, published via MQTT discovery"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/virtual_sensors
