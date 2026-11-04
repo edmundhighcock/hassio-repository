@@ -1,6 +1,6 @@
 name: "InfluxDB 2"
 description: "InfluxDB 2.x OSS, tuned for a memory-tight Pi, for the HA core influxdb integration"
-version: "0.1.0"
+version: "0.1.1"
 slug: "influxdb2"
 init: false
 startup: application
@@ -35,6 +35,7 @@ options:
   query_max_memory_bytes: 419430400
   go_memlimit_mib: 450
   metrics_enabled: false
+  admin_token_generation: 0
 schema:
   organization: "str"
   bucket: "str"
@@ -50,6 +51,7 @@ schema:
   query_max_memory_bytes: "int(1048576,)"
   go_memlimit_mib: "int(64,)"
   metrics_enabled: "bool"
+  admin_token_generation: "int(0,)"
 # Own private data (bolt + engine, under /data) is excluded from Home
 # Assistant's own backups: the off-site copy is pulled by a job on another
 # LAN machine, over HTTP, against the published port above. See DOCS.md.

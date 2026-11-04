@@ -64,6 +64,7 @@ acceptable on a trusted LAN/tailnet, not acceptable on the open internet.
 | `query_max_memory_bytes` | `419430400` (400 MiB) | Max memory for *all* queries running at once. |
 | `go_memlimit_mib` | `450` | `GOMEMLIMIT` - the Go runtime's soft heap limit, in MiB. |
 | `metrics_enabled` | `false` | Turn the `/metrics` endpoint back on (e.g. for a LAN Prometheus scraper). |
+| `admin_token_generation` | `0` | Raise by one and restart to rotate the operator token - see "Rotating the operator token" below. |
 
 ## Memory defaults and why
 
@@ -191,6 +192,51 @@ docker exec addon_9547a9e0_influxdb2 cat /data/secrets/ha_token \
 
 or use the Terminal & SSH add-on to run the same `docker exec` - just
 avoid `cat`-ing it straight into a terminal that gets logged.
+
+## Rotating the operator token
+
+Raise the `admin_token_generation` option by one (e.g. `0` -> `1`) and
+restart the add-on to rotate `/data/secrets/admin_token`:
+
+1. On the next start, once `influxd` is healthy, `run.sh` compares the
+   option against the generation it last recorded at
+   `/data/secrets/admin_token_generation` (a missing file counts as `0`).
+   If the option is now higher, it creates a new operator (all-access,
+   instance-wide) token for the admin user, using the current operator
+   token to authenticate.
+2. The new token is verified (a bucket listing) before anything on disk
+   changes.
+3. `/data/secrets/admin_token` is replaced with the new token (written to
+   a temp file, then `mv`'d into place, so nothing ever reads a
+   half-written file).
+4. The *old* authorization is deleted by its ID (found by matching it
+   against the token that was on disk, never printed), and the add-on
+   confirms the old token now gets `401` before it records the new
+   generation.
+5. The new generation number is written last, only once all of the above
+   has actually succeeded.
+
+If any step fails, the generation file is left untouched (so the same
+rotation is retried on the next start) and the token currently in
+`admin_token` - old or new, whichever is last known to work - is left in
+place; the add-on logs a clear `ERROR` line but is never left without a
+working operator token. Restarting again with the same
+`admin_token_generation` value, once rotation has already succeeded, does
+nothing (no new token is created). Nothing here touches `ha_token` - it
+keeps working throughout, unmodified.
+
+Logs name only authorization IDs and the generation number; no token
+value is ever written to a log.
+
+**After rotating, refresh any copy of the operator token kept on another
+machine** (e.g. the "Backups" job below) - the old copy will start
+getting `401` as soon as the old authorization is deleted. Fetch the new
+one the same way as the original (see "Token locations" above):
+
+```sh
+docker exec addon_9547a9e0_influxdb2 cat /data/secrets/admin_token \
+  | ssh <ha-user>@<some-other-machine> 'cat > admin_token.txt'
+```
 
 ## Backups
 

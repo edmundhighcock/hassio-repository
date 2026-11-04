@@ -1,0 +1,12 @@
+configuration:
+  admin_token_generation:
+    name: "Operator token generation"
+    description: >-
+      Raise this by one and restart to rotate the operator (all-access)
+      token stored at /data/secrets/admin_token: a new operator token is
+      created and verified working, the old one is then deleted, and
+      this generation is recorded once that is confirmed. The Home
+      Assistant write-only token is untouched by this. Any other
+      machine holding a copy of the operator token (e.g. the remote
+      backup job - see DOCS.md "Backups") must have its copy refreshed
+      after a rotation, or it will start getting 401s.

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.1
+
+- New `admin_token_generation` option (default `0`): raise it by one and
+  restart to rotate the operator (all-access) token at
+  `/data/secrets/admin_token`. On start, if the option is ahead of the
+  generation last recorded under `/data/secrets/`, `run.sh` creates a new
+  operator token for the admin user, verifies it works, writes it over
+  `admin_token` (temp file + atomic `mv`, mode 0600), deletes the old
+  authorization by ID, confirms the old token now gets `401`, then
+  records the new generation - in that order, so a failure at any step
+  before the old token is actually deleted leaves the previously-working
+  token in place and just logs an error for the next start to retry.
+  Idempotent: re-running with the same generation does nothing.
+  `ha_token` is never touched by this. No token value is ever logged,
+  only authorization IDs and the generation number. See DOCS.md
+  "Rotating the operator token" for how to fetch the new token for the
+  remote backup job afterwards.
+
 ## 0.1.0
 
 - First release: InfluxDB 2.7.12 OSS, tuned for a memory-tight Pi, for

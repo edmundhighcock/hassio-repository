@@ -13,10 +13,14 @@
 #     --metrics-disabled (unless `metrics_enabled` is set).
 #  4. Runs the image's own /entrypoint.sh (unmodified) as a child - not
 #     exec'd - so this script stays alive to forward signals to it and,
-#     once it is actually healthy on :8086, to make sure a Home Assistant
-#     write-only token exists under /data/secrets/, creating it then if
-#     missing (first run, or an upgrade from a version of this add-on
-#     that predates it - idempotent either way).
+#     once it is actually healthy on :8086, to:
+#       a. rotate the operator (admin) token if `admin_token_generation`
+#          has been raised above the generation recorded under
+#          /data/secrets/ - see DOCS.md "Rotating the operator token".
+#       b. make sure a Home Assistant write-only token exists under
+#          /data/secrets/, creating it then if missing (first run, or an
+#          upgrade from a version of this add-on that predates it -
+#          idempotent either way).
 set -eu
 
 OPTIONS=/data/options.json
@@ -45,6 +49,7 @@ QUERY_MEMORY_BYTES="$(opt query_memory_bytes 209715200)"
 QUERY_MAX_MEMORY_BYTES="$(opt query_max_memory_bytes 419430400)"
 GO_MEMLIMIT_MIB="$(opt go_memlimit_mib 450)"
 METRICS_ENABLED="$(opt metrics_enabled false)"
+ADMIN_TOKEN_GENERATION="$(opt admin_token_generation 0)"
 
 mkdir -p "$DATA_DIR/engine" "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
@@ -107,6 +112,93 @@ log "storage-cache-max-memory-size=$STORAGE_CACHE_MAX_MEMORY_SIZE storage-cache-
 log "query-concurrency=$QUERY_CONCURRENCY query-queue-size=$QUERY_QUEUE_SIZE query-initial-memory-bytes=$QUERY_INITIAL_MEMORY_BYTES query-memory-bytes=$QUERY_MEMORY_BYTES query-max-memory-bytes=$QUERY_MAX_MEMORY_BYTES"
 log "GOMEMLIMIT=$GOMEMLIMIT pprof-disabled=true metrics-disabled=$INFLUXD_METRICS_DISABLED"
 
+# --- Rotate the operator (admin) token on request ----------------------
+# Compares the `admin_token_generation` option against the generation
+# recorded at $SECRETS_DIR/admin_token_generation (missing file = 0, per
+# DOCS.md). When the option is higher: create a new operator (all-access,
+# instance-wide) token for $ADMIN_USERNAME, verify it actually
+# authenticates, write it over admin_token (temp file + mv, so a reader
+# never sees a half-written file), then delete the previous authorization
+# by ID and confirm it now gets 401 before recording the new generation.
+# Never logs a token value - only authorization IDs and the generation
+# number. If any step fails, the generation file is left alone so the
+# same rotation is retried next start; whichever token is currently in
+# admin_token at that point is known-good and left in place, so the
+# add-on is never left without a working operator token.
+rotate_admin_token() {
+    local desired_gen current_gen old_token old_auth_id new_token new_auth_id tmp http_code
+
+    desired_gen="$ADMIN_TOKEN_GENERATION"
+    current_gen="$(cat "$SECRETS_DIR/admin_token_generation" 2>/dev/null || true)"
+    [ -n "$current_gen" ] || current_gen=0
+
+    if [ "$desired_gen" -le "$current_gen" ] 2>/dev/null; then
+        return 0
+    fi
+
+    log "admin_token_generation option ($desired_gen) is ahead of the recorded generation ($current_gen): rotating the operator token"
+
+    old_token="$(cat "$SECRETS_DIR/admin_token" 2>/dev/null || true)"
+    if [ -z "$old_token" ]; then
+        log "ERROR: no current admin_token on disk to rotate from; not rotating, will retry next start"
+        return 1
+    fi
+
+    old_auth_id="$(influx auth list --host http://localhost:8086 --token "$old_token" \
+        --user "$ADMIN_USERNAME" --json 2>/dev/null \
+        | jq -r --arg t "$old_token" '.[] | select(.token==$t) | .id' | head -1)"
+    if [ -z "$old_auth_id" ]; then
+        log "ERROR: could not find the authorization ID of the current operator token; not rotating, old token kept, will retry next start"
+        return 1
+    fi
+    log "current operator token is authorization $old_auth_id"
+
+    new_token="$(influx auth create --host http://localhost:8086 --token "$old_token" \
+        --operator --user "$ADMIN_USERNAME" \
+        --description "operator token (generation $desired_gen)" --json 2>/dev/null \
+        | jq -r .token)"
+    if [ -z "$new_token" ] || [ "$new_token" = "null" ]; then
+        log "ERROR: failed to create a new operator token; old token (authorization $old_auth_id) kept, will retry next start"
+        return 1
+    fi
+    new_auth_id="$(influx auth list --host http://localhost:8086 --token "$new_token" \
+        --user "$ADMIN_USERNAME" --json 2>/dev/null \
+        | jq -r --arg t "$new_token" '.[] | select(.token==$t) | .id' | head -1)"
+
+    if ! influx bucket list --host http://localhost:8086 --token "$new_token" --org "$ORG" >/dev/null 2>&1; then
+        log "ERROR: new operator token (authorization $new_auth_id) failed to authenticate; deleting it and keeping the old one (authorization $old_auth_id), will retry next start"
+        influx auth delete --host http://localhost:8086 --token "$old_token" -i "$new_auth_id" >/dev/null 2>&1 || true
+        return 1
+    fi
+    log "new operator token (authorization $new_auth_id) verified working"
+
+    umask 077
+    tmp="$SECRETS_DIR/admin_token.new.$$"
+    printf '%s' "$new_token" >"$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$SECRETS_DIR/admin_token"
+    log "admin_token replaced with the new operator token (authorization $new_auth_id)"
+
+    if ! influx auth delete --host http://localhost:8086 --token "$new_token" -i "$old_auth_id" >/dev/null 2>&1; then
+        log "ERROR: failed to delete old operator token (authorization $old_auth_id); the new token (authorization $new_auth_id) is in place and working, but the old one is still valid too - not recording the new generation, will retry next start"
+        return 1
+    fi
+
+    http_code="$(curl -s -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Token $old_token" "http://localhost:8086/api/v2/buckets")"
+    if [ "$http_code" != "401" ]; then
+        log "ERROR: old operator token (authorization $old_auth_id) did not return 401 after deletion (got $http_code); not recording the new generation, will retry next start"
+        return 1
+    fi
+    log "old operator token (authorization $old_auth_id) confirmed revoked (401)"
+
+    tmp="$SECRETS_DIR/admin_token_generation.new.$$"
+    printf '%s' "$desired_gen" >"$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$SECRETS_DIR/admin_token_generation"
+    log "operator token rotation complete: generation is now $desired_gen"
+}
+
 # --- Ensure the Home Assistant write-only token exists -----------------
 # Scoped to write on $BUCKET only (not read: Home Assistant Core's own
 # influxdb integration never calls get_influx_connection with
@@ -159,6 +251,7 @@ forward() { kill -TERM "$ENTRY_PID" 2>/dev/null || true; }
 trap forward TERM INT
 
 if wait_healthy; then
+    rotate_admin_token || true
     ensure_ha_token || true
 else
     log "influxd did not become healthy in time; skipping Home Assistant token check this start"

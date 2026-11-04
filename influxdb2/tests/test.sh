@@ -10,6 +10,10 @@
 #   - the Home Assistant write-only token can write to the homeassistant
 #     bucket but cannot read it, write another bucket, or administer
 #   - /debug/pprof and /metrics are refused by default
+#   - admin_token_generation rotation: raising it swaps admin_token for a
+#     new working operator token and 401s the old one, re-running with
+#     the same generation is a no-op, raising it again rotates again,
+#     and ha_token is untouched throughout
 #   - a backup taken over HTTP from outside the container with the
 #     operator token, restored into a second throwaway container, with
 #     a matching point count
@@ -26,6 +30,16 @@ ok()  { echo "PASS $*"; }
 bad() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
 expect() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$2', got '$3')"; fi; }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+hash() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+wait_healthy_url() {
+    local i
+    for i in $(seq 1 60); do
+        curl -s "$URL/health" 2>/dev/null | grep -q '"status":"pass"' && return 0
+        sleep 1
+    done
+    return 1
+}
+set_option() { docker exec influxdb2-test-a sh -c "echo '$1' > /data/options.json"; }
 
 cleanup() {
     docker rm -f influxdb2-test-a influxdb2-test-restore >/dev/null 2>&1
@@ -163,6 +177,54 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 [ -n "$RECREATED" ] && ok "ha_token re-created on next start when missing" || bad "ha_token re-created on next start when missing"
+HA_TOKEN="$RECREATED"
+
+echo "Testing admin_token_generation rotation (0 -> 1)..."
+GEN0_TOKEN=$(docker exec influxdb2-test-a cat /data/secrets/admin_token)
+GEN0_HASH=$(hash "$GEN0_TOKEN")
+set_option '{"admin_token_generation":1}'
+docker restart influxdb2-test-a >/dev/null
+wait_healthy_url && ok "container healthy after gen-1 restart" || bad "container healthy after gen-1 restart"
+GEN1_TOKEN=""
+for _ in $(seq 1 30); do
+    GEN1_TOKEN=$(docker exec influxdb2-test-a cat /data/secrets/admin_token 2>/dev/null)
+    [ -n "$GEN1_TOKEN" ] && [ "$(hash "$GEN1_TOKEN")" != "$GEN0_HASH" ] && break
+    sleep 1
+done
+GEN1_HASH=$(hash "$GEN1_TOKEN")
+[ "$GEN1_HASH" != "$GEN0_HASH" ] && ok "admin_token changed after generation 1 rotation" || bad "admin_token changed after generation 1 rotation"
+expect "admin_token_generation recorded as 1" "1" "$(docker exec influxdb2-test-a cat /data/secrets/admin_token_generation 2>/dev/null)"
+expect "new (gen 1) operator token works" "200" "$(code "$URL/api/v2/buckets" -H "Authorization: Token $GEN1_TOKEN")"
+expect "old (gen 0) operator token now 401" "401" "$(code "$URL/api/v2/buckets" -H "Authorization: Token $GEN0_TOKEN")"
+expect "ha_token unchanged by rotation" "$HA_TOKEN" "$(docker exec influxdb2-test-a cat /data/secrets/ha_token)"
+expect "ha_token still writes after rotation" "204" "$(code -XPOST "$URL/api/v2/write?org=household&bucket=homeassistant&precision=s" \
+    -H "Authorization: Token $HA_TOKEN" --data-raw 'sensor,entity_id=test4 state="on",value=1')"
+
+echo "Restarting again at generation 1 (should not rotate again)..."
+docker restart influxdb2-test-a >/dev/null
+wait_healthy_url && ok "container healthy after no-op gen-1 restart" || bad "container healthy after no-op gen-1 restart"
+sleep 2
+expect "admin_token unchanged on restart at the same generation" "$GEN1_HASH" "$(hash "$(docker exec influxdb2-test-a cat /data/secrets/admin_token 2>/dev/null)")"
+
+echo "Testing admin_token_generation rotation (1 -> 2)..."
+set_option '{"admin_token_generation":2}'
+docker restart influxdb2-test-a >/dev/null
+wait_healthy_url && ok "container healthy after gen-2 restart" || bad "container healthy after gen-2 restart"
+GEN2_TOKEN=""
+for _ in $(seq 1 30); do
+    GEN2_TOKEN=$(docker exec influxdb2-test-a cat /data/secrets/admin_token 2>/dev/null)
+    [ -n "$GEN2_TOKEN" ] && [ "$(hash "$GEN2_TOKEN")" != "$GEN1_HASH" ] && break
+    sleep 1
+done
+GEN2_HASH=$(hash "$GEN2_TOKEN")
+[ "$GEN2_HASH" != "$GEN1_HASH" ] && ok "admin_token changed again for generation 2" || bad "admin_token changed again for generation 2"
+expect "admin_token_generation recorded as 2" "2" "$(docker exec influxdb2-test-a cat /data/secrets/admin_token_generation 2>/dev/null)"
+expect "new (gen 2) operator token works" "200" "$(code "$URL/api/v2/buckets" -H "Authorization: Token $GEN2_TOKEN")"
+expect "gen 1 operator token now 401" "401" "$(code "$URL/api/v2/buckets" -H "Authorization: Token $GEN1_TOKEN")"
+expect "ha_token still unchanged after second rotation" "$HA_TOKEN" "$(docker exec influxdb2-test-a cat /data/secrets/ha_token)"
+
+# All later steps (backup/restore) use the currently-valid operator token.
+ADMIN_TOKEN="$GEN2_TOKEN"
 
 echo "Backing up over HTTP from outside the container (operator token)..."
 mkdir -p "$TMP/backup"
