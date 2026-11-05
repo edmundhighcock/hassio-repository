@@ -1,0 +1,3 @@
+build_from:
+  amd64: "fireflyiii/data-importer:version-2.3.5"
+  aarch64: "fireflyiii/data-importer:version-2.3.5"

@@ -1,0 +1,17 @@
+#!/bin/bash
+# Non-blocking mutex around the data importer's auto-import artisan command.
+#
+# Baked into the image (unlike the live hass add-on, which installs this same
+# wrapper at every container start via a cont-init autoscript — see
+# ~/Code/fin/skills/firefly-import-common/scripts/fireflyiii-data-importer-autoscript.sh).
+# Here it ships as a plain rootfs file instead, so it survives independently
+# of that script.
+#
+# Exits 0 (success) if another instance already holds the lock — cron
+# treats a skipped run as OK, matching the live wrapper's behaviour.
+#
+# Lock file: /tmp/firefly-importer.lock
+set -euo pipefail
+LOCK=/tmp/firefly-importer.lock
+exec flock -n -E 0 "$LOCK" sudo -Eu www-data /usr/local/bin/php \
+    /var/www/html/artisan importer:auto-import "${1:-/config/import_files}"
