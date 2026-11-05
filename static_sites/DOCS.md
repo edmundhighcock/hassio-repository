@@ -66,6 +66,14 @@ ECharts 6.1.0 (Apache-2.0) is baked into the image at `vendor/echarts-6.1.0/echa
 From a site's `index.html` that is `../vendor/echarts-6.1.0/echarts.min.js`. It is cached as immutable; a
 new version will arrive at a new path.
 
+## Navigation control
+
+Every HTML page (the site browser and every site's pages) gets a small
+floating Back / Refresh / Home control at the bottom-right, injected
+server-side on `</body>` — sites need not add anything. Useful because
+pages are shown inside Home Assistant's Ingress panel (an iframe, and the
+companion app on phones), which has no browser toolbar.
+
 ## What the server enforces
 
 - GET and HEAD only; no directory listings.
