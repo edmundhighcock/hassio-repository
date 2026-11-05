@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.3
+
+- hot_water: recognise a STAGED reheat - the immersion heater switching
+  on or off in 1-3 sub-steps seconds to minutes apart (e.g. +2.08kW then
+  +0.85kW four minutes later, confirmed live 2026-11-05) - which
+  previously read 0W throughout. `detect.FindMergedEvents` now builds a
+  chain of consecutive same-sign deltas (catching a transition whose
+  individual samples never reach the 800W seed threshold but whose sum
+  does) and `detect.FindStagedEvents` bridges up to 3 such sub-threshold
+  events across a stable plateau within a 450s window; the live path
+  mirrors this with a small residual ring buffer (`admitMergedEvent`).
+  The on/off band widened from 2500-3300W to 2500-3600W to absorb the
+  modest shoulder the chain-based merge can legitimately pick up around
+  a real step. A new `MinOnDurationS` (60s) guard rejects a brief
+  reversal (a kettle/toaster-like blip) that the wider chain made
+  easier to nudge into the band.
+- Fixed a pre-existing `pointsToArrays` bug (`cmd/virtual_sensors/
+  backfill_hotwater.go`): a duplicate timestamp in `fridge_power`
+  (`homeassistant_2026` bucket) broke the bisect helpers' sortedness
+  assumption and panicked; points are now sorted and de-duplicated
+  (keeping the last of exact ties) before use, matching the Python
+  reference's own `load_series`.
+- Parity re-verified against the full history, not just the committed
+  live-bucket fixture: 5,676/5,676 accepted cycles match the Python
+  reference exactly across `homeassistant_legacy` (4,399),
+  `homeassistant_2026` (1,262) and the committed `homeassistant` fixture
+  (15) - see DOCS.md "Parity with the Python reference".
+
 ## 0.1.2
 
 - MQTT discovery now sends `default_entity_id`, which current Home

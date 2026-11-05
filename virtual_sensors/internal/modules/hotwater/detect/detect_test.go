@@ -167,11 +167,15 @@ func TestSplitStepIsMergedIntoOneEvent(t *testing.T) {
 	if !c.Accepted {
 		t.Fatalf("cycle not accepted")
 	}
+	// The chain-based merge (see FindMergedEvents) also folds the adjacent
+	// same-sign baseline wobbles (+20 before the on-step, -120 and -30
+	// around the off-step) into their respective chains, so the recovered
+	// magnitudes run a little wider than the step itself.
 	if c.OnStep < 2900 || c.OnStep > 3100 {
 		t.Fatalf("OnStep = %v, want [2900,3100]", c.OnStep)
 	}
-	if *c.OffStep < -3100 || *c.OffStep > -2900 {
-		t.Fatalf("OffStep = %v, want [-3100,-2900]", *c.OffStep)
+	if *c.OffStep < -3300 || *c.OffStep > -2900 {
+		t.Fatalf("OffStep = %v, want [-3300,-2900]", *c.OffStep)
 	}
 	if len(result.RejectedCycles) != 0 || len(result.UnmatchedCycles) != 0 {
 		t.Fatalf("expected no rejected/unmatched cycles")
@@ -196,8 +200,11 @@ func TestEarlierSpuriousOnStepIsSupersededByALaterRealOne(t *testing.T) {
 	if !c.Accepted {
 		t.Fatalf("cycle not accepted")
 	}
-	if c.OnStep != 2590 {
-		t.Fatalf("OnStep = %v, want 2590 (the later, real step)", c.OnStep)
+	// 2620, not 2590: the chain-based merge also folds the +30 same-sign
+	// wobble just before the real step into its chain. Still clearly the
+	// later, real step, not the false 2500 one.
+	if c.OnStep != 2620 {
+		t.Fatalf("OnStep = %v, want 2620 (the later, real step)", c.OnStep)
 	}
 	if c.OnTime != 340 {
 		t.Fatalf("OnTime = %v, want 340", c.OnTime)
@@ -291,5 +298,140 @@ func TestBuildResidualSamplesLOCFAndMissingAsZero(t *testing.T) {
 	}
 	if samples[2].Residual != 3500 {
 		t.Fatalf("samples[2].Residual = %v, want 3500", samples[2].Residual)
+	}
+}
+
+// TestStagedReheatTwoSubstepsMinutesApartIsDetected is modelled directly on
+// the owner-confirmed, live-missed staged reheat, 2026-11-05 ~19:47-21:27
+// UTC: raw grid_meter_power rose 380 -> 800 -> 2460 W (19:47:05-19:49:05,
+// net +2080, chained from two deltas of +420 and +1660 -- the first alone
+// is below SeedDeltaMin) then wobbled on a plateau for ~3.5 minutes, then
+// rose again 2510 -> 3530 W over 19:52:51-19:53:31 (net ~+990 over the
+// first MergeWindowS of that rise -- six deltas none of which individually
+// reaches SeedDeltaMin: +40,+160,+680,+90,+20,+20,+10). Neither sub-step
+// alone is a 2.5-3.3kW step; FindStagedEvents must bridge them into one
+// ~3070W on-event.
+func TestStagedReheatTwoSubstepsMinutesApartIsDetected(t *testing.T) {
+	samples := []Sample{
+		mk(0, 380, nil),
+		mk(115, 800, nil),  // +420 (sub-seed on its own)
+		mk(120, 2460, nil), // +1660 -- chain totals +2080
+		mk(145, 2500, nil), mk(150, 2530, nil), mk(155, 2570, nil), mk(160, 2590, nil),
+		mk(165, 2560, nil), mk(170, 2550, nil), mk(175, 2600, nil), mk(180, 2590, nil),
+		mk(185, 2580, nil), mk(190, 2550, nil), mk(195, 2560, nil), mk(200, 2590, nil),
+		mk(205, 2560, nil), mk(210, 2550, nil), mk(215, 2560, nil), mk(220, 2570, nil),
+		mk(225, 2530, nil), mk(230, 2560, nil), mk(235, 2540, nil), mk(240, 2520, nil),
+		mk(245, 2560, nil), mk(250, 2520, nil), mk(255, 2550, nil), mk(260, 2510, nil),
+		mk(266, 2550, nil), // +40
+		mk(271, 2710, nil), // +160
+		mk(276, 3390, nil), // +680 -- none of these individually >= SeedDeltaMin
+		mk(281, 3480, nil), mk(286, 3500, nil), mk(291, 3520, nil), mk(296, 3530, nil),
+		mk(356, 3530, nil), // flat hold
+		mk(416, 3530, nil), // flat hold
+		mk(421, 380, nil),  // off-step: clean single drop back to baseline
+		mk(426, 380, nil),
+	}
+	result := DetectCycles(samples, DefaultParams())
+	if len(result.Cycles) != 1 {
+		t.Fatalf("len(Cycles) = %d, want 1 (rejected=%v unmatched=%v)", len(result.Cycles), result.RejectedCycles, result.UnmatchedCycles)
+	}
+	c := result.Cycles[0]
+	if !c.Accepted {
+		t.Fatalf("cycle not accepted")
+	}
+	if c.OnStep < 2500 || c.OnStep > 3300 {
+		t.Fatalf("OnStep = %v, want [2500,3300]", c.OnStep)
+	}
+	if c.OnTime != 286 {
+		t.Fatalf("OnTime = %v, want 286 (t_end of the combined staged on-event)", c.OnTime)
+	}
+	if len(result.RejectedCycles) != 0 || len(result.UnmatchedCycles) != 0 {
+		t.Fatalf("expected no rejected/unmatched cycles")
+	}
+}
+
+// TestStagedSubstepsTooFarApartAreNotBridged checks that two sub-threshold
+// same-sign events that would sum into the on/off band, but are more than
+// StageWindowS apart, are NOT merged -- a "level shift" has to be reached
+// promptly, not accumulate from two coincidentally-timed but unrelated
+// events many minutes apart.
+func TestStagedSubstepsTooFarApartAreNotBridged(t *testing.T) {
+	params := DefaultParams()
+	samples := []Sample{
+		mk(0, 500, nil),
+		mk(20, 500, nil),
+		mk(40, 2200, nil), // +1700 sub-threshold on its own
+		mk(140, 2200, nil),
+		mk(140+params.StageWindowS+60, 4200, nil), // +2000, well beyond the window
+		mk(140+params.StageWindowS+160, 4200, nil),
+	}
+	result := DetectCycles(samples, params)
+	if len(result.Cycles) != 0 {
+		t.Fatalf("len(Cycles) = %d, want 0", len(result.Cycles))
+	}
+	if len(result.UnmatchedCycles) != 0 {
+		t.Fatalf("len(UnmatchedCycles) = %d, want 0 (neither event qualifies on its own)", len(result.UnmatchedCycles))
+	}
+}
+
+// TestStagedSubstepsWithUnstablePlateauAreNotBridged checks that two
+// sub-threshold same-sign merged events close enough in time to bridge (and
+// which would sum into the on-band, 1700+920=2620), but with an intervening
+// plateau that DRIFTS by more than PlateauTol (600W, e.g. a different,
+// unmetered load's own gradual activity, not mere noise) are NOT bridged.
+// The drift itself stays below SeedDeltaMin (so it is correctly invisible
+// as its own event, same as ordinary wobble) but still fails the
+// plateau-stability check.
+func TestStagedSubstepsWithUnstablePlateauAreNotBridged(t *testing.T) {
+	samples := []Sample{
+		mk(0, 500, nil),
+		mk(20, 500, nil),
+		mk(40, 2200, nil),  // +1700 (chain start)
+		mk(60, 2190, nil),  // -10 reversal -> flushes the +1700 event
+		mk(80, 2310, nil),  // +120 (new chain)
+		mk(100, 2430, nil), // +120
+		mk(120, 2550, nil), // +120
+		mk(140, 2670, nil), // +120
+		mk(160, 2790, nil), // +120 -- drift totals +600 (> PlateauTol, < SeedDeltaMin)
+		mk(180, 2780, nil), // -10 reversal -> flushes the +600 drift (discarded, sub-seed)
+		mk(200, 3700, nil), // +920 (new chain)
+		mk(220, 3700, nil), // flat -> flushes the +920 event
+	}
+	result := DetectCycles(samples, DefaultParams())
+	if len(result.Cycles) != 0 {
+		t.Fatalf("len(Cycles) = %d, want 0", len(result.Cycles))
+	}
+	if len(result.RejectedCycles) != 0 || len(result.UnmatchedCycles) != 0 {
+		t.Fatalf("expected no rejected/unmatched cycles")
+	}
+}
+
+// TestBriefKettleLikeBlipIsNotAPhantomCycle is modelled on a blip found
+// empirically while validating the chain-based merge (2025-10-04
+// 07:57:10-07:57:40, legacy bucket): a ~20s kettle/toaster-like blip whose
+// single biggest raw delta (+2434W) alone stays BELOW StepLo, but which the
+// chain absorbs two tiny same-sign wobbles (+96W before, +45W after) into,
+// tipping the combined magnitude to +2575W -- just inside the on-band --
+// paired with an equally brief reversal immediately after. MinOnDurationS
+// exists specifically to reject this.
+func TestBriefKettleLikeBlipIsNotAPhantomCycle(t *testing.T) {
+	samples := []Sample{
+		mk(0, -740.25, nil),
+		mk(10, -644.25, nil), // +96 (wobble)
+		mk(15, 1789.75, nil), // +2434 (the blip itself, still < StepLo alone)
+		mk(20, 1834.75, nil), // +45 (wobble) -- chain totals +2575, in-band
+		mk(25, 958.75, nil),  // -876 (reversal)
+		mk(30, -673.25, nil), // -1632 -- chain totals -2532, in-band
+		mk(45, -681.25, nil),
+	}
+	result := DetectCycles(samples, DefaultParams())
+	if len(result.Cycles) != 0 {
+		t.Fatalf("len(Cycles) = %d, want 0", len(result.Cycles))
+	}
+	if len(result.RejectedCycles) != 1 {
+		t.Fatalf("len(RejectedCycles) = %d, want 1", len(result.RejectedCycles))
+	}
+	if result.RejectedCycles[0].RejectReason != ReasonTooShort {
+		t.Fatalf("RejectReason = %q, want too_short", result.RejectedCycles[0].RejectReason)
 	}
 }

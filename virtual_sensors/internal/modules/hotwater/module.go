@@ -89,6 +89,30 @@ func (r *loadRing) rangeOK(loT, hiT, maxDelta float64) bool {
 	return mx-mn <= maxDelta
 }
 
+// stable is the live equivalent of detect.go's plateauStable: true if every
+// buffered sample with loT < t < hiT stays within tol of anchor. Used by
+// the staged-reheat bridge (admitMergedEvent) against a short residual
+// history ring, since a restart-safe live stream can't re-query the raw
+// grid series the way the batch pipeline can.
+func (r *loadRing) stable(loT, hiT, anchor, tol float64) bool {
+	for i, t := range r.t {
+		if t > loT && t < hiT {
+			if abs(r.v[i]-anchor) > tol {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// persistedMergedEvent is the JSON shape of one detect.MergedEvent, used to
+// persist the pending staged-reheat buffer below.
+type persistedMergedEvent struct {
+	TStart    float64 `json:"t_start"`
+	TEnd      float64 `json:"t_end"`
+	Magnitude float64 `json:"magnitude"`
+}
+
 // persistedState is the module's /data/hot_water-state.json shape.
 type persistedState struct {
 	EnergyKwh      float64            `json:"energy_kwh"`
@@ -106,6 +130,11 @@ type persistedState struct {
 	RunSign        int                `json:"run_sign,omitempty"`
 	RunMagnitude   float64            `json:"run_magnitude,omitempty"`
 	LastSeedT      float64            `json:"last_seed_t,omitempty"`
+	// PendingStage is the staged-reheat bridge buffer (see admitMergedEvent)
+	// - persisted so a restart mid-bridge (e.g. between the two sub-steps
+	// of a staged reheat) doesn't silently drop it, same concern this fix
+	// exists for in the first place.
+	PendingStage []persistedMergedEvent `json:"pending_stage,omitempty"`
 }
 
 // Module is the hot_water virtual sensor.
@@ -118,14 +147,31 @@ type Module struct {
 	lastLoad map[string]detect.Point
 	loads    map[string]*loadRing
 
+	// residual is a short time-pruned ring of recent (t, residual) samples
+	// (kept back StageWindowS), used by admitMergedEvent's plateau-
+	// stability check - the live equivalent of detect.go's plateauStable,
+	// which the batch pipeline answers directly from the full raw series.
+	residual *loadRing
+
 	// incremental merge-run state - mirrors detect.FindMergedEvents's
 	// per-run variables so a restart can resume mid-run (a gap caused by
 	// the restart itself will simply flush it, same as any other gap).
+	// lastSeedT is the time of the last sample INCLUDED in the run (every
+	// included delta refreshes it, not just seed-level ones, matching
+	// FindMergedEvents); runStartT is fixed for the run's life and bounds
+	// how far a sub-seed (below SeedDeltaMin) delta may extend it.
 	runActive    bool
 	runStartT    float64
 	runSign      int
 	runMagnitude float64
 	lastSeedT    float64
+
+	// pendingStage holds 1-2 sub-threshold merged events (same sign)
+	// waiting to see if a further same-sign event arrives within
+	// StageWindowS, bridged by a stable plateau, to land the combined
+	// magnitude in the on/off band - the live, streaming equivalent of
+	// detect.go's FindStagedEvents. See admitMergedEvent.
+	pendingStage []detect.MergedEvent
 
 	// pairing state
 	open         bool
@@ -145,6 +191,7 @@ func New() *Module {
 		params:   detect.DefaultParams(),
 		lastLoad: map[string]detect.Point{},
 		loads:    map[string]*loadRing{},
+		residual: &loadRing{},
 	}
 }
 
@@ -211,6 +258,9 @@ func (m *Module) Init(persisted []byte) error {
 	m.runSign = ps.RunSign
 	m.runMagnitude = ps.RunMagnitude
 	m.lastSeedT = ps.LastSeedT
+	for _, pe := range ps.PendingStage {
+		m.pendingStage = append(m.pendingStage, detect.MergedEvent{TStart: pe.TStart, TEnd: pe.TEnd, Magnitude: pe.Magnitude})
+	}
 	return nil
 }
 
@@ -226,6 +276,9 @@ func (m *Module) Persist() ([]byte, error) {
 	for name, p := range m.lastLoad {
 		ps.LastLoadT[name] = p.T
 		ps.LastLoadV[name] = p.V
+	}
+	for _, pe := range m.pendingStage {
+		ps.PendingStage = append(ps.PendingStage, persistedMergedEvent{TStart: pe.TStart, TEnd: pe.TEnd, Magnitude: pe.Magnitude})
 	}
 	return json.Marshal(ps)
 }
@@ -265,6 +318,17 @@ func (m *Module) rejectOK(tStart, tEnd float64) bool {
 // FindMergedEvents-equivalent run tracker, calling emit(event) for every
 // event that FINALIZES as a result (there may be more than one if a gap
 // both flushes the previous run and immediately starts a new seed).
+//
+// This is a CHAIN, matching detect.go's FindMergedEvents: any nonzero delta
+// can start or extend a run (not just one that itself reaches
+// SeedDeltaMin), so a transition whose individual samples are each too
+// small to seed on their own but whose sum over the window is not is still
+// caught (see FindMergedEvents' doc comment for the full rationale,
+// including why a sub-seed delta may only extend a run within
+// MergeWindowS of the run's OWN start, while a seed-level delta can extend
+// it indefinitely as long as consecutive seeds keep arriving within
+// MergeWindowS of each other). A flushed run only becomes an event if its
+// net magnitude reaches SeedDeltaMin.
 func (m *Module) onNewGridSample(t, v float64, emit func(detect.MergedEvent)) {
 	if !m.haveLastGrid {
 		m.lastGrid = detect.Point{T: t, V: v}
@@ -273,10 +337,10 @@ func (m *Module) onNewGridSample(t, v float64, emit func(detect.MergedEvent)) {
 	}
 	dt := t - m.lastGrid.T
 	flush := func() {
-		if m.runActive {
+		if m.runActive && abs(m.runMagnitude) >= m.params.SeedDeltaMin {
 			emit(detect.MergedEvent{TStart: m.runStartT, TEnd: m.lastGrid.T, Magnitude: m.runMagnitude})
-			m.runActive = false
 		}
+		m.runActive = false
 	}
 	if dt <= 0 || dt > m.params.MaxGapS {
 		flush()
@@ -284,26 +348,122 @@ func (m *Module) onNewGridSample(t, v float64, emit func(detect.MergedEvent)) {
 		return
 	}
 	delta := v - m.lastGrid.V
-	if abs(delta) >= m.params.SeedDeltaMin {
-		sign := 1
-		if delta <= 0 {
-			sign = -1
-		}
-		if m.runActive && sign == m.runSign && (m.lastGrid.T-m.lastSeedT) <= m.params.MergeWindowS {
-			m.runMagnitude += delta
-			m.lastSeedT = t
-		} else {
+	if delta == 0 {
+		if m.runActive && (t-m.lastSeedT) > m.params.MergeWindowS {
 			flush()
-			m.runStartT = m.lastGrid.T
-			m.runSign = sign
-			m.runMagnitude = delta
-			m.lastSeedT = t
-			m.runActive = true
 		}
-	} else if m.runActive && (t-m.lastSeedT) > m.params.MergeWindowS {
+		m.lastGrid = detect.Point{T: t, V: v}
+		return
+	}
+	sign := 1
+	if delta <= 0 {
+		sign = -1
+	}
+	isSeed := abs(delta) >= m.params.SeedDeltaMin
+	canExtend := m.runActive && sign == m.runSign &&
+		(m.lastGrid.T-m.lastSeedT) <= m.params.MergeWindowS &&
+		(isSeed || (t-m.runStartT) <= m.params.MergeWindowS)
+	if canExtend {
+		m.runMagnitude += delta
+		m.lastSeedT = t
+	} else {
 		flush()
+		m.runStartT = m.lastGrid.T
+		m.runSign = sign
+		m.runMagnitude = delta
+		m.lastSeedT = t
+		m.runActive = true
 	}
 	m.lastGrid = detect.Point{T: t, V: v}
+}
+
+// admitMergedEvent is the live, streaming equivalent of detect.go's
+// FindStagedEvents: it tries to bridge up to MaxSubsteps consecutive
+// same-sign sub-threshold merged events (buffered in pendingStage), across
+// a stable intervening plateau (checked against the short residual ring -
+// see loadRing.stable), into one staged event before handing it to
+// handleEvent. An already-qualifying event (on/off band on its own) is
+// passed straight through, same as the batch pass. Because live can't look
+// ahead, a failed bridge (overshoot, unstable plateau, or window expiry)
+// emits the FIRST buffered event standalone (it was sub-threshold, so
+// handleEvent's isOn/isOff checks simply ignore it) and restarts the
+// pending buffer from the SECOND one, mirroring detect.go's own re-
+// examination of events[i+1:] after a failed run.
+func (m *Module) admitMergedEvent(e detect.MergedEvent, emit func(detect.MergedEvent)) {
+	if abs(e.Magnitude) >= m.params.StepLo {
+		m.flushPendingStandalone(emit)
+		emit(e)
+		return
+	}
+
+	if len(m.pendingStage) > 0 {
+		first := m.pendingStage[0]
+		last := m.pendingStage[len(m.pendingStage)-1]
+		sameSign := (first.Magnitude > 0) == (e.Magnitude > 0)
+		withinWindow := e.TEnd-first.TStart <= m.params.StageWindowS
+		if sameSign && withinWindow && len(m.pendingStage) < m.params.MaxSubsteps &&
+			m.residual.stable(last.TEnd, e.TStart, m.residualAt(last.TEnd), m.params.PlateauTol) {
+			m.pendingStage = append(m.pendingStage, e)
+			total := 0.0
+			for _, p := range m.pendingStage {
+				total += p.Magnitude
+			}
+			if m.params.StepLo <= abs(total) && abs(total) <= m.params.StepHi {
+				combined := detect.MergedEvent{TStart: m.pendingStage[0].TStart, TEnd: e.TEnd, Magnitude: total}
+				m.pendingStage = nil
+				emit(combined)
+				return
+			}
+			if abs(total) > m.params.StepHi {
+				// Overshot: emit the first buffered event standalone (it
+				// never qualified alone, so this is a no-op downstream)
+				// and re-attempt bridging from the rest, same as
+				// detect.go's FindStagedEvents advancing by 1 on failure.
+				rest := m.pendingStage[1:]
+				m.pendingStage = nil
+				emit(first)
+				for _, r := range rest {
+					m.admitMergedEvent(r, emit)
+				}
+				return
+			}
+			return // still accumulating, wait for more
+		}
+	}
+
+	m.flushPendingStandalone(emit)
+	m.pendingStage = []detect.MergedEvent{e}
+}
+
+// flushPendingStandalone emits any buffered sub-threshold event(s) unmerged
+// when a new event can't be bridged with them (different sign, outside
+// StageWindowS, an unstable plateau, or the buffer already at MaxSubsteps).
+// Each was already sub-threshold on its own, so handleEvent's isOn/isOff
+// checks simply ignore it - this is a no-op downstream, matching detect.go's
+// FindStagedEvents leaving a failed run's events unmerged.
+func (m *Module) flushPendingStandalone(emit func(detect.MergedEvent)) {
+	if len(m.pendingStage) == 0 {
+		return
+	}
+	pending := m.pendingStage
+	m.pendingStage = nil
+	for _, p := range pending {
+		emit(p)
+	}
+}
+
+// residualAt returns the most recent buffered residual sample at or before
+// t - the live equivalent of detect.go's valueAt.
+func (m *Module) residualAt(t float64) float64 {
+	v := 0.0
+	for i, rt := range m.residual.t {
+		if rt <= t {
+			v = m.residual.v[i]
+		} else {
+			break
+		}
+	}
+	return v
 }
 
 func abs(v float64) float64 {
@@ -348,9 +508,12 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 
 	var out []modules.OutputUpdate
 	residual := u.Value - m.knownSum()
+	m.residual.push(t, residual, m.params.StageWindowS)
 
 	m.onNewGridSample(t, u.Value, func(e detect.MergedEvent) {
-		out = append(out, m.handleEvent(e)...)
+		m.admitMergedEvent(e, func(staged detect.MergedEvent) {
+			out = append(out, m.handleEvent(staged)...)
+		})
 	})
 
 	// Floor check for an open cycle, evaluated on every grid sample (not
@@ -427,11 +590,18 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 		// in OnStateUpdate; a floor violation would already have closed
 		// (unaccepted) the cycle before this off-event could arrive, so
 		// reaching here with m.open still true means the floor held.
-		power := (abs(m.onMagnitude) + abs(e.Magnitude)) / 2.0
-		durH := (e.TStart - m.onTime) / 3600.0
-		m.energyKwh += power * durH / 1000.0
+		dur := e.TStart - m.onTime
 		out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(e.TStart), Value: 0})
-		out = append(out, modules.OutputUpdate{ObjectID: OutEnergyObjectID, Time: unixTime(e.TStart), Value: m.energyKwh})
+		if dur >= m.params.MinOnDurationS {
+			// too_short otherwise: a step that reverses within
+			// MinOnDurationS is almost certainly a different, fast load,
+			// not the immersion heater - see detect.go's PairEvents and
+			// DefaultParams.MinOnDurationS. Close the cycle unaccepted,
+			// crediting no energy.
+			power := (abs(m.onMagnitude) + abs(e.Magnitude)) / 2.0
+			m.energyKwh += power * (dur / 3600.0) / 1000.0
+			out = append(out, modules.OutputUpdate{ObjectID: OutEnergyObjectID, Time: unixTime(e.TStart), Value: m.energyKwh})
+		}
 		m.open = false
 	}
 	return out

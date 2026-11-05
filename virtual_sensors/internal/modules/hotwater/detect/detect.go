@@ -32,9 +32,21 @@ type Params struct {
 	PairTol        float64 // loose tie-breaker among several off-candidates
 	MaxOnDurationS float64
 
+	// Staged-reheat merge (bridging 1-3 sub-threshold merged events across
+	// a stable intervening plateau into one staged on/off event - see
+	// FindStagedEvents and detect.py's module docstring "Staged reheats").
+	StageWindowS float64
+	MaxSubsteps  int
+	PlateauTol   float64
+
 	// Floor check.
 	FloorTol     float64
 	FloorDipMaxS float64
+
+	// Minimum ON duration - see detect.py's DetectionParams.min_on_duration_s
+	// for the full rationale (a brief kettle/toaster-like blip can be
+	// nudged into the on/off band by the chain-based merge below).
+	MinOnDurationS float64
 }
 
 // DefaultParams returns the production thresholds, tuned against this
@@ -45,14 +57,18 @@ func DefaultParams() Params {
 		SeedDeltaMin:    800.0,
 		MergeWindowS:    30.0,
 		StepLo:          2500.0,
-		StepHi:          3300.0,
+		StepHi:          3600.0,
 		MaxGapS:         120.0,
 		RejectWindowS:   60.0,
 		RejectLoadDelta: 800.0,
 		PairTol:         900.0,
 		MaxOnDurationS:  4 * 3600.0,
+		StageWindowS:    450.0,
+		MaxSubsteps:     3,
+		PlateauTol:      500.0,
 		FloorTol:        600.0,
 		FloorDipMaxS:    120.0,
+		MinOnDurationS:  60.0,
 	}
 }
 
@@ -76,6 +92,7 @@ const (
 	ReasonTimeout        = "timeout"
 	ReasonDataGap        = "data_gap"
 	ReasonFloorViolation = "floor_violation"
+	ReasonTooShort       = "too_short"
 	ReasonStreamEnd      = "stream_end"
 	ReasonCoincidentLoad = "coincident_load"
 	ReasonSuperseded     = "superseded"
@@ -113,6 +130,7 @@ type Stats struct {
 	CyclesAcceptedWithToleratedDip int
 	CyclesRejectedMagnitude        int // kept for backward-compat reporting; always 0
 	CyclesRejectedFloor            int
+	CyclesRejectedTooShort         int
 	CyclesUnmatchedTimeout         int
 	CyclesUnmatchedDataGap         int
 	GapsSkipped                    int
@@ -136,74 +154,197 @@ func f64p(v float64) *float64 { return &v }
 // Port of detect.py's find_merged_events.
 // ---------------------------------------------------------------------------
 
+// FindMergedEvents builds a CHAIN of consecutive same-sign deltas as long as
+// each new sample follows the previous one within MergeWindowS; a sign
+// reversal, a data gap (dt > MaxGapS), or the end of the series flushes the
+// chain. A flushed chain becomes an event only if its NET total reaches
+// SeedDeltaMin - this subsumes the old "one big single-sample delta" case
+// (a chain of length 1) and additionally catches a transition whose
+// individual samples are each too small to seed on their own but whose sum
+// over the window is not (observed e.g. 2,550 -> 2,710 -> 3,390 -> 3,480 ->
+// 3,500 W, no single delta >= 800W, net +950W, 2026-11-05).
+//
+// A delta that itself reaches SeedDeltaMin can extend a chain at any point,
+// exactly as in the single-sample-seed design this replaces (so a run of
+// several big, unambiguous steps still merges across however long they keep
+// arriving within MergeWindowS of each other). A SMALLER, sub-seed delta may
+// only extend a chain within MergeWindowS of the chain's OWN start - found
+// necessary empirically: without this cap, a slow, genuinely unrelated
+// multi-minute drift (observed e.g. 2025-10-03 18:45-18:49, legacy bucket)
+// got folded in around a real, separate ~3000W heater step that happened to
+// occur partway through it, pushing the combined magnitude well outside the
+// step band and losing the real step entirely. Bounding small-delta
+// accumulation to the chain's own short opening window still catches the
+// motivating case (a staged sub-step whose own samples are all within a few
+// tens of seconds of each other, e.g. the six deltas 40,160,680,90,20,20,10W
+// observed 2026-11-05, none individually >= SeedDeltaMin) without letting an
+// unrelated slow drift ride along. See detect.py's find_merged_events - this
+// must stay a line-for-line-equivalent port.
 func FindMergedEvents(times []float64, values []float64, p Params) []MergedEvent {
 	n := len(times)
 	var events []MergedEvent
 	runStartIdx := -1 // -1 == None
+	runStartTime := 0.0
 	runSign := 0
 	runMagnitude := 0.0
-	lastSeedTime := 0.0
-	haveLastSeedTime := false
 	lastIdx := -1
 
 	flush := func(endIdx int) {
-		if runStartIdx != -1 {
+		if runStartIdx != -1 && endIdx != -1 && abs(runMagnitude) >= p.SeedDeltaMin {
 			events = append(events, MergedEvent{
 				TStart:    times[runStartIdx],
 				TEnd:      times[endIdx],
 				Magnitude: runMagnitude,
 			})
-			runStartIdx = -1
 		}
+		runStartIdx = -1
 	}
 
 	i := 1
 	for i < n {
 		dt := times[i] - times[i-1]
 		if dt <= 0 || dt > p.MaxGapS {
-			flush(i - 1)
+			flush(lastIdx)
+			lastIdx = -1
 			i++
 			continue
 		}
 
 		delta := values[i] - values[i-1]
-		if abs(delta) >= p.SeedDeltaMin {
-			sign := 1
-			if delta <= 0 {
-				sign = -1
-			}
-			if runStartIdx != -1 && sign == runSign && haveLastSeedTime &&
-				(times[i-1]-lastSeedTime) <= p.MergeWindowS {
-				runMagnitude += delta
-				lastSeedTime = times[i]
-				haveLastSeedTime = true
-				lastIdx = i
-			} else {
-				if lastIdx != -1 {
+		if delta == 0 {
+			if runStartIdx != -1 {
+				if (times[i] - times[lastIdx]) > p.MergeWindowS {
 					flush(lastIdx)
 				} else {
-					flush(i - 1)
+					lastIdx = i
 				}
-				runStartIdx = i - 1
-				runSign = sign
-				runMagnitude = delta
-				lastSeedTime = times[i]
-				haveLastSeedTime = true
-				lastIdx = i
 			}
+			i++
+			continue
+		}
+
+		sign := 1
+		if delta <= 0 {
+			sign = -1
+		}
+		isSeed := abs(delta) >= p.SeedDeltaMin
+		canExtend := runStartIdx != -1 && sign == runSign &&
+			(times[i-1]-times[lastIdx]) <= p.MergeWindowS &&
+			(isSeed || (times[i]-runStartTime) <= p.MergeWindowS)
+		if canExtend {
+			runMagnitude += delta
+			lastIdx = i
 		} else {
-			if runStartIdx != -1 && haveLastSeedTime && (times[i]-lastSeedTime) > p.MergeWindowS {
-				flush(lastIdx)
-			}
+			flush(lastIdx)
+			runStartIdx = i - 1
+			runStartTime = times[i-1]
+			runSign = sign
+			runMagnitude = delta
+			lastIdx = i
 		}
 		i++
 	}
-	if lastIdx != -1 {
-		flush(lastIdx)
-	} else {
-		flush(n - 1)
-	}
+	flush(lastIdx)
 	return events
+}
+
+// FindStagedEvents is a second pass over FindMergedEvents' output: it merges
+// a run of up to MaxSubsteps consecutive same-sign events into one staged
+// event if the FIRST event doesn't already qualify as on/off on its own (an
+// already-qualifying single step is left untouched - this both detects a
+// clean step exactly as before this change, and leaves the
+// re-anchor-to-the-newer-step pairing behaviour for genuinely separate real
+// steps unaffected), the intervening plateau(s) are stable, the total
+// elapsed stays within StageWindowS, and the combined magnitude lands in the
+// [StepLo, StepHi] on/off band. See detect.py's find_staged_events and the
+// module doc comment above FindMergedEvents - this must stay a
+// line-for-line-equivalent port.
+func FindStagedEvents(events []MergedEvent, times []float64, values []float64, p Params) []MergedEvent {
+	var out []MergedEvent
+	n := len(events)
+	i := 0
+	for i < n {
+		e := events[i]
+		if abs(e.Magnitude) >= p.StepLo {
+			out = append(out, e)
+			i++
+			continue
+		}
+
+		run := []MergedEvent{e}
+		total := e.Magnitude
+		sign := 1
+		if e.Magnitude <= 0 {
+			sign = -1
+		}
+		j := i + 1
+		for j < n && len(run) < p.MaxSubsteps {
+			nxt := events[j]
+			nxtSign := 1
+			if nxt.Magnitude <= 0 {
+				nxtSign = -1
+			}
+			if nxtSign != sign {
+				break
+			}
+			if nxt.TEnd-e.TStart > p.StageWindowS {
+				break
+			}
+			anchor := valueAt(times, values, run[len(run)-1].TEnd)
+			if !plateauStable(times, values, run[len(run)-1].TEnd, nxt.TStart, anchor, p.PlateauTol) {
+				break
+			}
+			run = append(run, nxt)
+			total += nxt.Magnitude
+			if p.StepLo <= abs(total) && abs(total) <= p.StepHi {
+				break // landed in band - stop extending
+			}
+			if abs(total) > p.StepHi {
+				break // overshot - this run is not usable
+			}
+			j++
+		}
+
+		if len(run) > 1 && p.StepLo <= abs(total) && abs(total) <= p.StepHi {
+			out = append(out, MergedEvent{TStart: run[0].TStart, TEnd: run[len(run)-1].TEnd, Magnitude: total})
+			i += len(run)
+		} else {
+			out = append(out, e)
+			i++
+		}
+	}
+	return out
+}
+
+// plateauStable is a port of detect.py's _plateau_stable: true if every raw
+// sample with loT < t < hiT stays within tol of anchor.
+func plateauStable(times, values []float64, loT, hiT, anchor, tol float64) bool {
+	lo := bisectRight(times, loT)
+	hi := bisectLeft(times, hiT)
+	for k := lo; k < hi; k++ {
+		if abs(values[k]-anchor) > tol {
+			return false
+		}
+	}
+	return true
+}
+
+// valueAt is a port of detect.py's _value_at.
+func valueAt(times, values []float64, t float64) float64 {
+	idx := bisectLeft(times, t)
+	if idx < len(times) && times[idx] == t {
+		return values[idx]
+	}
+	if idx > 0 {
+		idx--
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(values) {
+		idx = len(values) - 1
+	}
+	return values[idx]
 }
 
 func abs(v float64) float64 {
@@ -367,8 +508,9 @@ func PairEvents(events []MergedEvent, floorLookup FloorLookup, gapMarkers []floa
 			floorOK, floorMaxDeficit, dipTolerated := floorCheck(onEvent, offEvent)
 			dur := offEvent.TStart - onEvent.TEnd
 			power := (abs(onEvent.Magnitude) + abs(offEvent.Magnitude)) / 2.0
+			tooShort := dur < p.MinOnDurationS
 
-			if floorOK {
+			if floorOK && !tooShort {
 				c := Cycle{OnTime: onEvent.TEnd, OffTime: f64p(offEvent.TStart),
 					OnStep: onEvent.Magnitude, OffStep: f64p(offEvent.Magnitude),
 					DurationS: f64p(dur), PowerEstimateW: f64p(power),
@@ -380,13 +522,21 @@ func PairEvents(events []MergedEvent, floorLookup FloorLookup, gapMarkers []floa
 					stats.CyclesAcceptedWithToleratedDip++
 				}
 			} else {
+				reason := ReasonTooShort
+				if !floorOK {
+					reason = ReasonFloorViolation
+				}
 				c := Cycle{OnTime: onEvent.TEnd, OffTime: f64p(offEvent.TStart),
 					OnStep: onEvent.Magnitude, OffStep: f64p(offEvent.Magnitude),
 					DurationS: f64p(dur), PowerEstimateW: f64p(power),
 					FloorMaxDeficit: f64p(floorMaxDeficit), Accepted: false,
-					RejectReason: ReasonFloorViolation}
+					RejectReason: reason}
 				rejectedCycles = append(rejectedCycles, c)
-				stats.CyclesRejectedFloor++
+				if !floorOK {
+					stats.CyclesRejectedFloor++
+				} else {
+					stats.CyclesRejectedTooShort++
+				}
 			}
 
 			state = "OFF"
@@ -510,6 +660,7 @@ func DetectCycles(samples []Sample, p Params) Result {
 		residual[i] = s.Residual
 	}
 	events := FindMergedEvents(times, residual, p)
+	events = FindStagedEvents(events, times, residual, p)
 	gapMarkers := FindGapMarkers(times, p.MaxGapS)
 	rejectCheck := MakeSampleRejectCheck(samples, times, p.RejectWindowS, p.RejectLoadDelta)
 	floorLookup := MakeFloorLookup(times, residual)
@@ -609,6 +760,7 @@ func MakeArrayRejectCheck(loadSeries map[string]LoadSeries, windowS, maxDelta fl
 // large-dataset path, used by backfill.
 func DetectCyclesArrays(times []float64, residual []float64, loadSeries map[string]LoadSeries, p Params) Result {
 	events := FindMergedEvents(times, residual, p)
+	events = FindStagedEvents(events, times, residual, p)
 	gapMarkers := FindGapMarkers(times, p.MaxGapS)
 	rejectCheck := MakeArrayRejectCheck(loadSeries, p.RejectWindowS, p.RejectLoadDelta)
 	floorLookup := MakeFloorLookup(times, residual)

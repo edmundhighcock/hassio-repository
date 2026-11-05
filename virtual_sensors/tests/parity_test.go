@@ -178,6 +178,7 @@ func TestHotWaterParityAgainstPythonReference(t *testing.T) {
 		"cycles_accepted_with_tolerated_dip": result.Stats.CyclesAcceptedWithToleratedDip,
 		"cycles_rejected_magnitude":          result.Stats.CyclesRejectedMagnitude,
 		"cycles_rejected_floor":              result.Stats.CyclesRejectedFloor,
+		"cycles_rejected_too_short":          result.Stats.CyclesRejectedTooShort,
 		"cycles_unmatched_timeout":           result.Stats.CyclesUnmatchedTimeout,
 		"cycles_unmatched_data_gap":          result.Stats.CyclesUnmatchedDataGap,
 		"gaps_skipped":                       result.Stats.GapsSkipped,

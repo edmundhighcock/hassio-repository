@@ -28,10 +28,26 @@ Assistant.
 
 ## Live vs backfill
 
-**Step detection is identical** live and historical: both call the same
-`detect.FindMergedEvents` function (seed on a single-sample delta
->=800W, merge consecutive same-sign seeds within 30s into one event,
-judge each merged event's own magnitude against the 2500-3300W band).
+**Step detection is identical** live and historical: both build a CHAIN
+of consecutive same-sign deltas (any nonzero delta can start or extend
+one, not just one that itself reaches 800W; a sub-seed delta only
+extends within 30s of the chain's OWN start, while a delta that itself
+reaches 800W can extend indefinitely as long as consecutive seeds keep
+arriving within 30s of each other) and flushes it into a candidate
+event once its net total reaches 800W, judged on its own against a
+2500-3600W band (`detect.FindMergedEvents`). A STAGED reheat - the
+heater switching on or off in 1-3 sub-steps seconds to minutes apart,
+none of which alone reaches that band - is then bridged across a
+stable intervening plateau into one combined event within a 450s
+window: `detect.FindStagedEvents` in the batch path (a second pass over
+the full event list); `admitMergedEvent` plus a short residual ring
+buffer in the live path, since live can't re-query the raw series the
+batch pass does. Fixed 2026-11-05 (Taiga #237 follow-up), after a live
+staged on-step (+2.08kW then +0.85kW four minutes later) read 0W
+throughout. A brief (<60s) on/off pair is rejected regardless
+(`MinOnDurationS`) - the wider chain made a kettle/toaster-like blip
+easier to nudge into the band by absorbing an adjacent small wobble;
+every real heater cycle in this household's data is minutes long.
 
 **Pairing (which on-step closes with which off-step) is deliberately
 simplified live.** The batch algorithm (`detect.PairEvents`, used by
@@ -165,21 +181,30 @@ anywhere in this add-on.
 `tests/parity_test.go` runs this add-on's `detect`/`backfill` Go
 packages over `tests/testdata/homeassistant__*.csv` (exported from the
 Python reference's own cached `homeassistant` [live] bucket parquet -
-5,035 grid samples) and compares against
-`tests/testdata/homeassistant_expected.json` (the Python reference's own
-`detect_cycles_arrays()` output on the same data). Result: **1/1
-accepted cycles match exactly** (on/off time within the test's 1s
-tolerance - in practice exact to the float), every stats counter
-matches exactly, and total accepted-cycle kWh matches to 5 decimal
-places.
+10,962 grid samples, re-exported 2026-11-05 for the staged-reheat fix)
+and compares against `tests/testdata/homeassistant_expected.json` (the
+Python reference's own `detect_cycles_arrays()` output on the same
+data). Result: **15/15 accepted cycles match exactly**, every stats
+counter matches exactly, and total accepted-cycle kWh matches to 5
+decimal places.
 
-The much larger `homeassistant_2026` bucket (796,688 grid samples, 847
-accepted cycles over ~6 months) was checked the same way during
-development but is too large to commit as a fixture - see this add-on's
-hand-off report for the numbers: **847/847 accepted cycles matched
-exactly** (0 mismatches beyond 1s, max observed time difference
-0.000s), every stats counter identical, and total kWh matched to 5
-decimal places (415.96471 kWh both sides).
+The much larger `homeassistant_legacy` (7,348,207 grid samples, ~3
+years) and `homeassistant_2026` (796,688 grid samples, ~6 months)
+buckets are too large to commit as fixtures; checked the same way
+during development by running this add-on's own `backfill` CLI
+(read-only) against InfluxDB directly and comparing its logged stats to
+`build.py`'s `data/detection_summary.json` for the 2026-11-05
+staged-reheat fix: **legacy 4,399/4,399 accepted cycles** (2,265
+rejected-floor, 33 unmatched-timeout, 143 unmatched-data_gap, all
+matching exactly), **homeassistant_2026 1,262/1,262** (18/0/240
+likewise exact), on top of the committed 15/15 - 5,676/5,676 cycles
+across the entire history. This exercise also found and fixed a
+pre-existing bug in `pointsToArrays` (`cmd/virtual_sensors/
+backfill_hotwater.go`): a duplicate timestamp in `fridge_power` (seen
+only in the `homeassistant_2026` bucket) broke `sort.Search`'s
+sortedness assumption in `MakeArrayRejectCheck`'s bisect and panicked;
+`pointsToArrays` now sorts and de-duplicates (keeping the last of exact
+ties), mirroring the Python reference's own `load_series`.
 
 ## Memory
 

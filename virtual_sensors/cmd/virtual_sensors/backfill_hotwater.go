@@ -109,6 +109,18 @@ func runHotWaterBackfill(influxURL, org, token, bucket string, from, to time.Tim
 	return nil
 }
 
+// pointsToArrays converts InfluxDB points to the (times, values) arrays
+// detect.DetectCyclesArrays and backfill.Destale/LocfMerge expect, which -
+// like detect.go's own bisect helpers - assume a STRICTLY ascending times
+// array. The Flux query already sorts by _time, but duplicate/near-
+// duplicate timestamps (observed on this household's `fridge_power` in the
+// homeassistant_2026 bucket) can otherwise leave two points at the exact
+// same float64 second, which is enough to make sort.Search's bisect return
+// an inconsistent (lo > hi) range - found via a slice-bounds panic in
+// MakeArrayRejectCheck while validating the staged-reheat fix against the
+// full history (Taiga #237's follow-up). Python's build.py's load_series
+// guards against exactly this ("de-dup exact-duplicate timestamps (keep
+// last)"); mirrored here.
 func pointsToArrays(pts []influxread.Point) (times, values []float64) {
 	times = make([]float64, len(pts))
 	values = make([]float64, len(pts))
@@ -116,7 +128,31 @@ func pointsToArrays(pts []influxread.Point) (times, values []float64) {
 		times[i] = float64(p.Time.UnixNano()) / 1e9
 		values[i] = p.ToWatts()
 	}
-	return times, values
+	sort.Sort(sortablePoints{times, values})
+	dt := make([]float64, 0, len(times))
+	dv := make([]float64, 0, len(values))
+	for i := range times {
+		if i > 0 && times[i] == times[i-1] {
+			dv[len(dv)-1] = values[i] // keep the LAST of exact-duplicate timestamps
+			continue
+		}
+		dt = append(dt, times[i])
+		dv = append(dv, values[i])
+	}
+	return dt, dv
+}
+
+// sortablePoints implements sort.Interface to sort times/values together.
+type sortablePoints struct {
+	t []float64
+	v []float64
+}
+
+func (s sortablePoints) Len() int           { return len(s.t) }
+func (s sortablePoints) Less(i, j int) bool { return s.t[i] < s.t[j] }
+func (s sortablePoints) Swap(i, j int) {
+	s.t[i], s.t[j] = s.t[j], s.t[i]
+	s.v[i], s.v[j] = s.v[j], s.v[i]
 }
 
 func unixToTime(epochS float64) time.Time {
