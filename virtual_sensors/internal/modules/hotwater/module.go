@@ -1,14 +1,18 @@
 // Package hotwater is the live virtual-sensor module for the household's
-// hot-water immersion heater (Taiga #237). It shares detect.FindMergedEvents
-// with the backfill path verbatim (see detect/detect.go) so step detection
-// is identical live and historical; PAIRING is a deliberately simplified,
-// no-lookahead version of detect.PairEvents, documented below and in
-// DOCS.md "Live vs backfill" - the batch pairer can look ahead across
-// several off-candidates for the best magnitude match before closing a
-// cycle, which a live stream cannot do without delaying every
-// publication. The practical effect: live occasionally reports a
-// provisional ON that a backfill re-run later rejects or re-times - see
-// DOCS.md for when and why.
+// hot-water immersion heater (Taiga #237). Step detection mirrors
+// detect.FindMergedEvents (see onNewGridSample's doc comment) so a real
+// step is found the same way live and historical, including the 0.1.4
+// fix that a raw gap only hard-breaks a chain if it's real missing data
+// (see onNewGridSample and hadActivity). PAIRING is a deliberately
+// simplified, no-lookahead version of detect.PairEvents, documented below
+// and in DOCS.md "Live vs backfill": the batch pairer can look ahead
+// across several off-candidates for the best magnitude match before
+// closing a cycle, which a live stream cannot do without delaying every
+// publication. What live CAN do without delaying every publication is
+// defer just the ONE off-candidate it has found: handleEvent holds a
+// tentative off (pendingOff) for PostOffDwellS before crediting energy,
+// mirroring detect.go's post-off dwell check (0.1.5) - see OnStateUpdate's
+// pendingOff resolution block.
 package hotwater
 
 import (
@@ -40,6 +44,15 @@ const (
 	OutPowerObjectID  = "hot_water_estimated_power"
 	OutEnergyObjectID = "hot_water_estimated_energy"
 )
+
+// activityRetentionS bounds how far back each known load's ring (loadRing)
+// remembers samples, used by hadActivity to tell a benign quiet gap from a
+// true outage (see onNewGridSample). Must comfortably exceed RealGapMinS
+// (1800s/30min) so the activity check can see all the way back across any
+// gap that's still a candidate for being "benign"; set well short of it at
+// 45 min per the add-on's memory budget (a few MiB total) rather than
+// right at the edge.
+const activityRetentionS = 45 * 60.0
 
 func init() {
 	modules.Register("hot_water", func() modules.Module { return New() })
@@ -135,6 +148,13 @@ type persistedState struct {
 	// of a staged reheat) doesn't silently drop it, same concern this fix
 	// exists for in the first place.
 	PendingStage []persistedMergedEvent `json:"pending_stage,omitempty"`
+	// PendingOff/PendingOffDeadline/OnBaseline persist the post-off dwell
+	// confirmation (see handleEvent, OnStateUpdate) so a restart
+	// mid-confirmation doesn't drop a genuine close or double-count one
+	// that was about to commit.
+	PendingOff         *persistedMergedEvent `json:"pending_off,omitempty"`
+	PendingOffDeadline float64               `json:"pending_off_deadline,omitempty"`
+	OnBaseline         float64               `json:"on_baseline,omitempty"`
 }
 
 // Module is the hot_water virtual sensor.
@@ -177,10 +197,18 @@ type Module struct {
 	open         bool
 	onTime       float64
 	onMagnitude  float64
+	onBaseline   float64 // residual just before onTime - the post-off dwell check's baseline
 	belowFloor   bool
 	belowSince   float64
 	maxDeficit   float64
 	dipTolerated bool
+
+	// pendingOff holds a tentative off-candidate awaiting PostOffDwellS of
+	// confirmation that the residual actually stays down - the live,
+	// streaming equivalent of detect.go's post-off dwell check
+	// (MakePostOffLookup). See handleEvent and OnStateUpdate.
+	pendingOff         *detect.MergedEvent
+	pendingOffDeadline float64
 
 	energyKwh      float64
 	processedUntil float64
@@ -261,6 +289,12 @@ func (m *Module) Init(persisted []byte) error {
 	for _, pe := range ps.PendingStage {
 		m.pendingStage = append(m.pendingStage, detect.MergedEvent{TStart: pe.TStart, TEnd: pe.TEnd, Magnitude: pe.Magnitude})
 	}
+	m.onBaseline = ps.OnBaseline
+	m.pendingOffDeadline = ps.PendingOffDeadline
+	if ps.PendingOff != nil {
+		ev := detect.MergedEvent{TStart: ps.PendingOff.TStart, TEnd: ps.PendingOff.TEnd, Magnitude: ps.PendingOff.Magnitude}
+		m.pendingOff = &ev
+	}
 	return nil
 }
 
@@ -279,6 +313,11 @@ func (m *Module) Persist() ([]byte, error) {
 	}
 	for _, pe := range m.pendingStage {
 		ps.PendingStage = append(ps.PendingStage, persistedMergedEvent{TStart: pe.TStart, TEnd: pe.TEnd, Magnitude: pe.Magnitude})
+	}
+	ps.OnBaseline = m.onBaseline
+	ps.PendingOffDeadline = m.pendingOffDeadline
+	if m.pendingOff != nil {
+		ps.PendingOff = &persistedMergedEvent{TStart: m.pendingOff.TStart, TEnd: m.pendingOff.TEnd, Magnitude: m.pendingOff.Magnitude}
 	}
 	return json.Marshal(ps)
 }
@@ -314,6 +353,22 @@ func (m *Module) rejectOK(tStart, tEnd float64) bool {
 	return true
 }
 
+// hadActivity reports whether ANY known load has a sample within
+// [tStart, tEnd] - the live equivalent of detect.go's
+// MakeArrayActivityCheck, used by onNewGridSample to tell a benign quiet
+// gap (the recorder had nothing new to log, but the household wasn't
+// otherwise quiet) from a true outage.
+func (m *Module) hadActivity(tStart, tEnd float64) bool {
+	for _, r := range m.loads {
+		for _, lt := range r.t {
+			if lt >= tStart && lt <= tEnd {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // onNewGridSample feeds one grid sample through the incremental
 // FindMergedEvents-equivalent run tracker, calling emit(event) for every
 // event that FINALIZES as a result (there may be more than one if a gap
@@ -329,6 +384,16 @@ func (m *Module) rejectOK(tStart, tEnd float64) bool {
 // it indefinitely as long as consecutive seeds keep arriving within
 // MergeWindowS of each other). A flushed run only becomes an event if its
 // net magnitude reaches SeedDeltaMin.
+//
+// A raw gap (dt > MaxGapS) does NOT, on its own, hard-break the run: Home
+// Assistant's recorder only logs a sensor when its value changes, so a
+// gap at an unchanging reading means "nothing happened", not "data
+// lost" (see detect.go's FindGapMarkers for the evidence this was
+// verified against). The gap only forces a flush if it's REAL missing
+// data - long enough that continuity can't be assumed (>= RealGapMinS)
+// or no OTHER known load reported anything either (hadActivity, a true
+// outage) - otherwise the delta across it is computed normally, exactly
+// like FindMergedEvents.
 func (m *Module) onNewGridSample(t, v float64, emit func(detect.MergedEvent)) {
 	if !m.haveLastGrid {
 		m.lastGrid = detect.Point{T: t, V: v}
@@ -342,10 +407,22 @@ func (m *Module) onNewGridSample(t, v float64, emit func(detect.MergedEvent)) {
 		}
 		m.runActive = false
 	}
-	if dt <= 0 || dt > m.params.MaxGapS {
+	if dt <= 0 {
 		flush()
 		m.lastGrid = detect.Point{T: t, V: v}
 		return
+	}
+	if dt > m.params.MaxGapS {
+		isRealGap := dt >= m.params.RealGapMinS || !m.hadActivity(m.lastGrid.T, t)
+		if isRealGap {
+			flush()
+			m.lastGrid = detect.Point{T: t, V: v}
+			return
+		}
+		// else: benign quiet gap - fall through to normal delta handling
+		// below (it can start a new chain, though it still can't EXTEND
+		// an existing one, since that needs
+		// m.lastGrid.T-m.lastSeedT <= MergeWindowS regardless).
 	}
 	delta := v - m.lastGrid.V
 	if delta == 0 {
@@ -493,7 +570,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			if m.loads[u.EntityID] == nil {
 				m.loads[u.EntityID] = &loadRing{}
 			}
-			m.loads[u.EntityID].push(t, u.Value, m.params.RejectWindowS*2)
+			m.loads[u.EntityID].push(t, u.Value, activityRetentionS)
 		}
 		// A known load changing does not, on its own, step the grid
 		// residual - only a fresh grid sample re-evaluates the residual
@@ -515,6 +592,39 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			out = append(out, m.handleEvent(staged)...)
 		})
 	})
+
+	// Resolving a tentative off (see handleEvent) takes priority over the
+	// generic below-floor tracker below: once a specific off-candidate
+	// has been found, whether it's a real close is answered by the
+	// dedicated post-off dwell check against the ACTUAL pre-cycle
+	// baseline, not the generic "did the ON plateau dip" one.
+	if m.pendingOff != nil {
+		ceiling := m.onBaseline + m.params.FloorTol
+		if residual > ceiling {
+			// Bounce-back within the dwell window: this wasn't the
+			// heater turning off, just a dip in a different load's own
+			// activity (see detect.go's MakePostOffLookup). Cancel and
+			// resume the cycle exactly as it was.
+			m.pendingOff = nil
+			m.dipTolerated = true
+			m.belowFloor = false
+		} else if t >= m.pendingOffDeadline {
+			// Confirmed: commit the close, crediting energy up to the
+			// off time (not "now" - the boundary is the original
+			// off-event, same as backfill).
+			off := *m.pendingOff
+			dur := off.TStart - m.onTime
+			out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(off.TStart), Value: 0})
+			if dur >= m.params.MinOnDurationS {
+				power := (abs(m.onMagnitude) + abs(off.Magnitude)) / 2.0
+				m.energyKwh += power * (dur / 3600.0) / 1000.0
+				out = append(out, modules.OutputUpdate{ObjectID: OutEnergyObjectID, Time: unixTime(off.TStart), Value: m.energyKwh})
+			}
+			m.open = false
+			m.pendingOff = nil
+		}
+		return out
+	}
 
 	// Floor check for an open cycle, evaluated on every grid sample (not
 	// just at merged-event boundaries) so a floor violation zeroes live
@@ -556,9 +666,11 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 			m.open = true
 			m.onTime = e.TEnd
 			m.onMagnitude = e.Magnitude
+			m.onBaseline = m.residualAt(e.TStart)
 			m.maxDeficit = 0
 			m.belowFloor = false
 			m.dipTolerated = false
+			m.pendingOff = nil
 			out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(e.TEnd), Value: e.Magnitude})
 		}
 		return out
@@ -566,9 +678,13 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 
 	// Already open.
 	if e.TStart > m.onTime+m.params.MaxOnDurationS {
-		// Timeout: force-close, unaccepted, no energy.
+		// Timeout: force-close, unaccepted, no energy. Any tentative off
+		// in progress is discarded along with the rest of the cycle -
+		// matches detect.PairEvents, which never retroactively credits a
+		// cycle it's about to force-close for running too long.
 		out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(m.onTime + m.params.MaxOnDurationS), Value: 0})
 		m.open = false
+		m.pendingOff = nil
 		// Fall through: still evaluate e fresh, as if from OFF (matches
 		// detect.PairEvents's "continue // re-examine e from OFF state").
 		return append(out, m.handleEvent(e)...)
@@ -576,33 +692,38 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 
 	if m.isOn(e.Magnitude) {
 		if m.rejectOK(e.TStart, e.TEnd) {
-			// Re-anchor to the newer on-step.
+			// Re-anchor to the newer on-step. A fresh, genuine on-step is
+			// at least as strong a signal that the heater is still
+			// running as the post-off dwell check would need, so any
+			// tentative off in progress is cancelled (same as a
+			// bounce-back - see OnStateUpdate's pendingOff resolution).
 			m.onTime = e.TEnd
 			m.onMagnitude = e.Magnitude
+			m.onBaseline = m.residualAt(e.TStart)
+			m.pendingOff = nil
 			out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(e.TEnd), Value: e.Magnitude})
 		}
 		return out
 	}
 
 	if m.isOff(e.Magnitude) && m.rejectOK(e.TStart, e.TEnd) {
-		// No lookahead live: the FIRST qualifying off-candidate closes the
-		// cycle (see package doc). floor state was tracked continuously
-		// in OnStateUpdate; a floor violation would already have closed
-		// (unaccepted) the cycle before this off-event could arrive, so
-		// reaching here with m.open still true means the floor held.
-		dur := e.TStart - m.onTime
-		out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(e.TStart), Value: 0})
-		if dur >= m.params.MinOnDurationS {
-			// too_short otherwise: a step that reverses within
-			// MinOnDurationS is almost certainly a different, fast load,
-			// not the immersion heater - see detect.go's PairEvents and
-			// DefaultParams.MinOnDurationS. Close the cycle unaccepted,
-			// crediting no energy.
-			power := (abs(m.onMagnitude) + abs(e.Magnitude)) / 2.0
-			m.energyKwh += power * (dur / 3600.0) / 1000.0
-			out = append(out, modules.OutputUpdate{ObjectID: OutEnergyObjectID, Time: unixTime(e.TStart), Value: m.energyKwh})
+		// Don't replace an off-candidate already being confirmed -
+		// mirrors detect.PairEvents, which evaluates one chosen
+		// off-candidate's floor rather than restarting the search when a
+		// later one arrives before the first has resolved.
+		if m.pendingOff != nil {
+			return out
 		}
-		m.open = false
+		// Defer the close: hold this tentative off for PostOffDwellS
+		// before crediting energy or publishing power=0, confirming via
+		// OnStateUpdate's pendingOff resolution that the residual
+		// actually STAYS down (see detect.go's MakePostOffLookup) rather
+		// than closing on the first dip the way pre-0.1.5 live did. No
+		// output is published yet; the published power stays at the
+		// on-level until this resolves one way or the other.
+		ev := e
+		m.pendingOff = &ev
+		m.pendingOffDeadline = e.TEnd + m.params.PostOffDwellS
 	}
 	return out
 }

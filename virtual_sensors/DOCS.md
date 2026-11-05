@@ -48,57 +48,65 @@ throughout. A brief (<60s) on/off pair is rejected regardless
 (`MinOnDurationS`) - the wider chain made a kettle/toaster-like blip
 easier to nudge into the band by absorbing an adjacent small wobble;
 every real heater cycle in this household's data is minutes long.
-**One exception as of 0.1.4**: the batch path's gap-handling fix (a raw
-gap only hard-breaks a chain if it's real missing data, not just an
-unchanging reading - see `FindGapMarkers`) has NOT been ported to
-`onNewGridSample`; see "NOT YET PORTED to live" below.
+**As of 0.1.5, the gap-handling fix is also live**: `onNewGridSample`
+only hard-breaks its chain on a REAL gap (>= `RealGapMinS`, or no other
+known load reported anything either via `hadActivity`), not any raw
+gap > `MaxGapS`, mirroring `FindGapMarkers`/`FindMergedEvents` exactly.
+Each known load's ring (`loadRing`) is now retained for
+`activityRetentionS` (45 min) rather than `RejectWindowS*2` (120s) so
+`hadActivity` can answer "was anything else active" across the full
+span a gap might still be benign for.
 
 **Pairing (which on-step closes with which off-step) is deliberately
-simplified live.** The batch algorithm (`detect.PairEvents`, used by
-`backfill` and by the parity test) can look ahead across several
-off-candidates after the on-step closes, and pick whichever one best
-matches the on-step's magnitude (within a loose 900W tie-break) - see
-the Python reference's own README "Pairing" section. A live stream
-cannot look into the future without delaying every publication, so the
-live engine (`internal/modules/hotwater/module.go`) closes on the
-**first** qualifying off-candidate instead. In practice this rarely
-differs (most cycles have exactly one off-candidate), but it means:
+simplified live, but as of 0.1.5 it defers the one candidate it does
+find.** The batch algorithm (`detect.PairEvents`, used by `backfill` and
+by the parity test) can look ahead across several off-candidates after
+the on-step closes, and pick whichever one best matches the on-step's
+magnitude (within a loose 900W tie-break) - see the Python reference's
+own README "Pairing" section. A live stream cannot look into the future
+without delaying every publication, so the live engine
+(`internal/modules/hotwater/module.go`) still only ever considers the
+**first** qualifying off-candidate - but it no longer commits to it
+immediately. `handleEvent` holds it as `pendingOff` for `PostOffDwellS`
+(90s); `OnStateUpdate` resolves it on every subsequent sample against the
+residual level at/just before the on-step (`onBaseline`) + `FloorTol`:
+if the residual bounces back above that ceiling, the tentative off is
+cancelled and the cycle resumes exactly as it was (no output published
+either way); if the dwell passes clean, the close commits, backdated to
+the original off-event's own time, crediting energy there (not "now").
+This is the live equivalent of `MakePostOffLookup`/`PostOffDwellS` - see
+`tests/replay_test.go` for live vs backfill agreement on both the
+2026-11-05 staged reheat and the 2026-10-20 Case B regression this was
+built to fix. In practice this still rarely differs from the batch
+pairer (most cycles have exactly one off-candidate), but it means:
 
-- **A provisional ON can later be rejected.** Live sets power to the
-  heater's on-step magnitude as soon as a qualifying on-event is seen
-  (before any pairing or floor check completes) - so Home Assistant
-  shows power going up slightly ahead of the eventual accept/reject
-  decision. If the floor check later fails (residual sags below
-  `on_step - 600W` for more than 120s), live immediately republishes
-  power = 0 and the cycle counts as rejected (no energy credited) - but
-  a backfill re-run of the same period is the authority on whether that
-  provisional ON should have counted at all.
-- **Live never re-opens a closed cycle retroactively.** If the live
-  no-lookahead pairing picks a different (always-first) off-candidate
-  than the batch tie-break would have, the live energy credited for
-  that one cycle can differ slightly from a backfill of the same
-  period. This has not been observed in practice against this
-  household's data (see "Parity" below) but is not proven impossible.
+- **A provisional ON can later be rejected**, same as before. Live sets
+  power to the heater's on-step magnitude as soon as a qualifying
+  on-event is seen (before any pairing, floor, or post-off-dwell check
+  completes) - so Home Assistant shows power going up slightly ahead of
+  the eventual accept/reject decision. If the floor check later fails
+  (residual sags below `on_step - 600W` for more than 120s - this only
+  applies while NOT already resolving a pendingOff, since that has its
+  own dedicated check), live immediately republishes power = 0 and the
+  cycle counts as rejected (no energy credited).
+- **A tentative OFF is never published until it resolves.** Unlike the
+  on-step, the published power stays at the on-level throughout the
+  `PostOffDwellS` confirmation window - there is no "provisional OFF" to
+  retract, since nothing is published until the close actually commits.
+- **Live never re-opens a closed (committed) cycle retroactively.** Once
+  a close commits, it stands; only a STILL-PENDING off can be cancelled.
+  If the live no-lookahead pairing's one candidate differs from what the
+  batch tie-break across several candidates would have picked, the live
+  energy credited for that cycle can still differ slightly from a
+  backfill of the same period - not observed in practice (see "Parity")
+  but not proven impossible.
 - **Energy is credited live ONLY on acceptance**, exactly like backfill:
-  the energy total only increases when a cycle closes with the floor
-  check passed, never at the provisional on-event. This is what keeps
-  the live-accumulated energy total consistent with a backfill total
-  over the same period, even though the *power* trace can show
-  provisional detail backfill doesn't.
-- **NOT YET PORTED to live (0.1.4): the gap-handling fix and the
-  post-off dwell check.** `detect.go`'s batch path now (a) only treats a
-  raw-sample gap as real missing data if it's long (>= RealGapMinS) or
-  coincides with a true outage, rather than any gap > MaxGapS, and (b)
-  rejects an off-candidate unless the residual stays down for
-  PostOffDwellS afterward. Porting (a) to the live merge-run tracker
-  (`onNewGridSample`) would need a load-activity ring retained far
-  longer than the current 120s (`RejectWindowS*2`) to answer "was
-  anything else active during this gap"; porting (b) would need live's
-  no-lookahead pairing to defer crediting a close for PostOffDwellS and
-  be ready to cancel it, which the current one-shot `handleEvent` isn't
-  structured for. Deferred rather than rushed un-tested (`module.go` has
-  no unit tests) into a path that runs unsupervised in production;
-  backfill remains the authority for both of these until it's done.
+  the energy total only increases when a cycle closes with the floor and
+  post-off dwell checks passed, never at the provisional on-event or
+  during the pending-off window. This is what keeps the
+  live-accumulated energy total consistent with a backfill total over
+  the same period, even though the *power* trace can show provisional
+  detail backfill doesn't.
 
 ## Restart semantics
 
@@ -227,6 +235,21 @@ what's invariant is Python and Go always agreeing with EACH OTHER.)
 bisect and panicked; `pointsToArrays` now sorts and de-duplicates
 (keeping the last of exact ties), mirroring the Python reference's own
 `load_series`.
+
+**Live vs backfill agreement (0.1.5):** `tests/replay_test.go` feeds the
+same raw samples through the LIVE module (`hotwater.Module.OnStateUpdate`,
+one sample at a time, exactly as the live dispatch loop would) and
+through `detect.DetectCyclesArrays`, over two narrow fixtures
+(`tests/testdata/replay/{1105,1020}_*.csv`): the 2026-11-05 staged
+reheat and the 2026-10-20 Case B regression. Both agree closely: 1105
+on/off times exact to the second, kWh 4.638 (backfill) vs 4.799 (live,
++3.5%); 1020 on/off times within 5s, kWh 3.486 vs 3.497 (+0.3%), both
+showing the ~68-minute cycle intact. This is NOT a byte-exact parity
+gate like the one above (live's documented simplifications - no
+lookahead among several off-candidates - mean exact agreement isn't
+guaranteed even in principle) but confirms the gap-handling and
+post-off dwell fixes bring live into line on the two cases this
+iteration exists to fix.
 
 ## Memory
 

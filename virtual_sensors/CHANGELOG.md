@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.5
+
+- hot_water: brought the LIVE path into line with 0.1.4's batch fixes,
+  so the add-on stops cutting cycles short in production.
+  - Gap handling: `onNewGridSample` now only hard-breaks its merge-run
+    on a REAL gap (>= `RealGapMinS`/30min, or no other known load
+    reported anything either via the new `hadActivity`), not any raw
+    gap > `MaxGapS` (120s) - mirrors `FindGapMarkers`/`FindMergedEvents`
+    exactly. Each known load's ring is now retained for
+    `activityRetentionS` (45 min, bounded - the add-on still runs at a
+    few MiB) instead of `RejectWindowS*2` (120s), so `hadActivity` can
+    see back across the full span a gap might still be benign for.
+  - Post-off dwell: `handleEvent` no longer commits an off-candidate
+    immediately. It's held as `pendingOff` for `PostOffDwellS` (90s);
+    `OnStateUpdate` resolves it every sample against the residual at/
+    just before the on-step (`onBaseline`) + `FloorTol` - a bounce-back
+    cancels it (cycle resumes, nothing published either way), a clean
+    dwell commits it (backdated to the original off-event's time, so
+    energy is credited for the real interval, not "now"). A fresh
+    genuine on-step (re-anchor) or a `MaxOnDurationS` timeout also
+    cancels/discards any pending off, so energy is never double-counted
+    or dropped.
+  - New unit tests (`internal/modules/hotwater/module_test.go`): a flat
+    3kW stretch with 140s gaps (no premature close), a staged on
+    (+2.08kW then +0.85kW, 4 min apart), the oscillating-load case (no
+    premature off), and a clean on/off.
+  - New replay test (`tests/replay_test.go`): feeds the real
+    2026-11-05 19:20-21:40 and 2026-10-20 00:00-20:00 raw samples
+    through the live module and compares against
+    `detect.DetectCyclesArrays` over the same window. Both agree
+    closely: the 2026-11-05 staged reheat matches on/off times exactly
+    and kWh within 3.5% (4.638 vs 4.799); the 2026-10-20 Case B cycle
+    matches within 5s and 0.3% kWh (3.486 vs 3.497), both ~68 minutes.
+
 ## 0.1.4
 
 - hot_water: a raw-sample gap (> MaxGapS, 120s) no longer force-closes an
