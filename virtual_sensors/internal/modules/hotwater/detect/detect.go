@@ -47,6 +47,21 @@ type Params struct {
 	// for the full rationale (a brief kettle/toaster-like blip can be
 	// nudged into the on/off band by the chain-based merge below).
 	MinOnDurationS float64
+
+	// A gap > MaxGapS force-closes an open ON cycle (or hard-breaks a
+	// merge chain) only if it's REAL missing data, not just an unchanging
+	// reading the recorder had no reason to log again - see
+	// FindGapMarkers. RealGapMinS is comfortably longer than any gap this
+	// household's data shows while genuinely idle but far short of a true
+	// recorder/network outage.
+	RealGapMinS float64
+
+	// Post-off dwell check (see MakePostOffLookup): an off-candidate is
+	// only accepted if the residual stays within FloorTol of the ACTUAL
+	// pre-cycle baseline for at least this long afterward, confirming the
+	// heater really turned off rather than a different load's own
+	// activity briefly dipping the residual.
+	PostOffDwellS float64
 }
 
 // DefaultParams returns the production thresholds, tuned against this
@@ -69,6 +84,8 @@ func DefaultParams() Params {
 		FloorTol:        600.0,
 		FloorDipMaxS:    120.0,
 		MinOnDurationS:  60.0,
+		RealGapMinS:     1800.0,
+		PostOffDwellS:   90.0,
 	}
 }
 
@@ -180,7 +197,12 @@ func f64p(v float64) *float64 { return &v }
 // observed 2026-11-05, none individually >= SeedDeltaMin) without letting an
 // unrelated slow drift ride along. See detect.py's find_merged_events - this
 // must stay a line-for-line-equivalent port.
-func FindMergedEvents(times []float64, values []float64, p Params) []MergedEvent {
+// ActivityCheck(i) reports whether any OTHER known load reported anything
+// within [times[i-1], times[i]] - see MakeSampleActivityCheck /
+// MakeArrayActivityCheck. Passed to FindMergedEvents and FindGapMarkers.
+type ActivityCheck func(i int) bool
+
+func FindMergedEvents(times []float64, values []float64, p Params, activityCheck ActivityCheck) []MergedEvent {
 	n := len(times)
 	var events []MergedEvent
 	runStartIdx := -1 // -1 == None
@@ -203,11 +225,25 @@ func FindMergedEvents(times []float64, values []float64, p Params) []MergedEvent
 	i := 1
 	for i < n {
 		dt := times[i] - times[i-1]
-		if dt <= 0 || dt > p.MaxGapS {
+		if dt <= 0 {
 			flush(lastIdx)
 			lastIdx = -1
 			i++
 			continue
+		}
+		if dt > p.MaxGapS {
+			isRealGap := dt >= p.RealGapMinS || activityCheck == nil || !activityCheck(i)
+			if isRealGap {
+				flush(lastIdx)
+				lastIdx = -1
+				i++
+				continue
+			}
+			// else: benign quiet period (see FindGapMarkers) - fall
+			// through to normal delta handling below, same as any other
+			// delta (it can start a new chain, though it still can't
+			// EXTEND an existing one, since that needs
+			// times[i-1]-times[lastIdx] <= MergeWindowS regardless).
 		}
 
 		delta := values[i] - values[i-1]
@@ -355,15 +391,80 @@ func abs(v float64) float64 {
 }
 
 // FindGapMarkers is a port of detect.py's _find_gap_markers.
-func FindGapMarkers(times []float64, maxGapS float64) []float64 {
+// FindGapMarkers is a port of detect.py's _find_gap_markers. A raw-sample
+// gap (dt > p.MaxGapS) does NOT, on its own, mean data is missing: Home
+// Assistant's recorder (and this household's InfluxDB integration) only
+// logs a sensor when its value CHANGES, so a long gap at an unchanging
+// grid reading is exactly what "nothing happened" looks like - verified
+// against this household's own data: gaps > 120s have a median |delta| of
+// 1-10W, i.e. flat. Only treat a gap as REAL missing data - i.e.
+// force-close an open ON cycle - when either the gap itself is long
+// enough that continuity can no longer be assumed (>= RealGapMinS, 30 min
+// by default) or it coincides with a true outage: activityCheck(i)
+// reports that no OTHER known load reported anything either during
+// [times[i-1], times[i]], which a merely-unchanging grid reading would
+// not explain.
+func FindGapMarkers(times []float64, p Params, activityCheck ActivityCheck) []float64 {
 	var markers []float64
 	for i := 1; i < len(times); i++ {
 		dt := times[i] - times[i-1]
-		if dt <= 0 || dt > maxGapS {
+		if dt <= 0 {
 			markers = append(markers, times[i-1])
+		} else if dt > p.MaxGapS {
+			if dt >= p.RealGapMinS || activityCheck == nil || !activityCheck(i) {
+				markers = append(markers, times[i-1])
+			}
 		}
 	}
 	return markers
+}
+
+// MakeSampleActivityCheck is the simple-API equivalent of detect.py's
+// _make_sample_activity_check: True if any known load's LOCF'd value
+// differs between samples[i-1] and samples[i].
+func MakeSampleActivityCheck(samples []Sample) ActivityCheck {
+	return func(i int) bool {
+		prev, cur := samples[i-1].Loads, samples[i].Loads
+		keys := map[string]bool{}
+		for k := range prev {
+			keys[k] = true
+		}
+		for k := range cur {
+			keys[k] = true
+		}
+		for k := range keys {
+			pv, pok := prev[k]
+			cv, cok := cur[k]
+			if pok != cok || pv != cv {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// MakeArrayActivityCheck is the array-API equivalent of detect.py's
+// _make_array_activity_check: True if any known load's own raw (sparse)
+// series has a sample within [times[i-1], times[i]].
+func MakeArrayActivityCheck(loadSeries map[string]LoadSeries, times []float64) ActivityCheck {
+	var series [][]float64
+	for _, ls := range loadSeries {
+		series = append(series, ls.Times)
+	}
+	return func(i int) bool {
+		tStart, tEnd := times[i-1], times[i]
+		for _, lt := range series {
+			if len(lt) == 0 {
+				continue
+			}
+			lo := bisectLeft(lt, tStart)
+			hi := bisectRight(lt, tEnd)
+			if hi > lo {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // RejectCheck answers whether a candidate step is voided by a known load
@@ -389,7 +490,7 @@ func bisectRight(a []float64, x float64) int {
 // ---------------------------------------------------------------------------
 
 func PairEvents(events []MergedEvent, floorLookup FloorLookup, gapMarkers []float64,
-	seriesEndT float64, rejectCheck RejectCheck, p Params) Result {
+	seriesEndT float64, rejectCheck RejectCheck, p Params, postOffLookup PostOffLookup) Result {
 
 	var cycles, rejectedCycles, unmatchedCycles []Cycle
 	var rejectedSteps []RejectedStep
@@ -410,6 +511,13 @@ func PairEvents(events []MergedEvent, floorLookup FloorLookup, gapMarkers []floa
 		floor := onEvent.Magnitude - p.FloorTol
 		loT, hiT := onEvent.TEnd, offEvent.TStart
 		return floorLookup(loT, hiT, floor, p.FloorDipMaxS)
+	}
+
+	postOffOK := func(onEvent, offEvent MergedEvent) bool {
+		if postOffLookup == nil {
+			return true
+		}
+		return postOffLookup(onEvent.TStart, offEvent.TEnd, offEvent.TEnd+p.PostOffDwellS, p.FloorTol)
 	}
 
 	n := len(events)
@@ -486,22 +594,36 @@ func PairEvents(events []MergedEvent, floorLookup FloorLookup, gapMarkers []floa
 
 			// Look ahead among subsequent off-candidates (up to the deadline
 			// or the next on-candidate) for the best magnitude match; stop
-			// early once one is within pair_tol.
+			// early once one is within pair_tol. A candidate is only
+			// eligible at all if the residual actually STAYS down
+			// afterward (postOffOK) - otherwise it's a dip in a
+			// different load's own activity, not the heater really
+			// turning off (see MakePostOffLookup).
+			haveBest := postOffOK(onEvent, e)
 			bestI := i
 			bestDiff := abs(onEvent.Magnitude + e.Magnitude)
 			j := i + 1
 			for j < n && events[j].TStart <= deadline && !isOn(events[j]) {
-				if isOff(events[j]) && rejectCheck(events[j].TStart, events[j].TEnd, "off") {
+				if isOff(events[j]) && rejectCheck(events[j].TStart, events[j].TEnd, "off") &&
+					postOffOK(onEvent, events[j]) {
 					diff := abs(onEvent.Magnitude + events[j].Magnitude)
-					if diff < bestDiff {
+					if !haveBest || diff < bestDiff {
 						bestDiff = diff
 						bestI = j
+						haveBest = true
 					}
-					if diff <= p.PairTol {
+					if haveBest && bestDiff <= p.PairTol {
 						break
 					}
 				}
 				j++
+			}
+
+			if !haveBest {
+				// No off-candidate in this window held the floor
+				// afterward; don't close on e, keep scanning forward.
+				i++
+				continue
 			}
 			offEvent := events[bestI]
 
@@ -605,6 +727,46 @@ func MakeFloorLookup(times []float64, residual []float64) FloorLookup {
 	}
 }
 
+// PostOffLookup answers the post-off dwell check - detect.py's
+// post_off_lookup(on_t_start, lo_t, hi_t, floor_tol) -> bool.
+type PostOffLookup func(onTStart, loT, hiT, floorTol float64) bool
+
+// MakePostOffLookup is a port of detect.py's _make_post_off_lookup: True if
+// every sample with loT <= t <= hiT has residual <= (the residual level
+// at/just before onTStart) + floorTol - i.e. the residual returns to
+// within floorTol of the ACTUAL pre-cycle baseline (not an assumed-zero
+// one) and stays there (or there are no samples in range - lenient, like
+// MakeFloorLookup, when data is sparse).
+//
+// Used to confirm an off-candidate is a REAL close, not just a brief dip
+// while a different, concurrent load's own activity continues: a real
+// heater off-step should see the residual drop to and STAY near the
+// pre-cycle baseline for a minimum dwell (PostOffDwellS), not bounce back
+// up within seconds. Found necessary from a real case (2026-10-20
+// 18:30-19:38, legacy bucket): an unmetered oscillating load (grid
+// swinging ~3850<->6530W, no change in any metered entity) produced a
+// step-sized dip that satisfied the existing PairTol tie-break and closed
+// the cycle at 18:51 instead of the real off at 19:38.
+func MakePostOffLookup(times []float64, residual []float64) PostOffLookup {
+	return func(onTStart, loT, hiT, floorTol float64) bool {
+		baseline := valueAt(times, residual, onTStart)
+		ceiling := baseline + floorTol
+		lo := bisectLeft(times, loT)
+		hi := bisectRight(times, hiT)
+		seg := residual[lo:hi]
+		if len(seg) == 0 {
+			return true
+		}
+		mx := seg[0]
+		for _, v := range seg {
+			if v > mx {
+				mx = v
+			}
+		}
+		return mx <= ceiling
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Simple API: list of Sample(t, residual, loads-map). Port of detect.py's
 // _make_sample_reject_check / detect_cycles / build_residual_samples.
@@ -659,16 +821,18 @@ func DetectCycles(samples []Sample, p Params) Result {
 		times[i] = s.T
 		residual[i] = s.Residual
 	}
-	events := FindMergedEvents(times, residual, p)
+	activityCheck := MakeSampleActivityCheck(samples)
+	events := FindMergedEvents(times, residual, p, activityCheck)
 	events = FindStagedEvents(events, times, residual, p)
-	gapMarkers := FindGapMarkers(times, p.MaxGapS)
+	gapMarkers := FindGapMarkers(times, p, activityCheck)
 	rejectCheck := MakeSampleRejectCheck(samples, times, p.RejectWindowS, p.RejectLoadDelta)
 	floorLookup := MakeFloorLookup(times, residual)
+	postOffLookup := MakePostOffLookup(times, residual)
 	seriesEndT := 0.0
 	if len(times) > 0 {
 		seriesEndT = times[len(times)-1]
 	}
-	return PairEvents(events, floorLookup, gapMarkers, seriesEndT, rejectCheck, p)
+	return PairEvents(events, floorLookup, gapMarkers, seriesEndT, rejectCheck, p, postOffLookup)
 }
 
 // Point is a (t, value) pair - detect.py's bare (t, watts) tuples.
@@ -759,14 +923,16 @@ func MakeArrayRejectCheck(loadSeries map[string]LoadSeries, windowS, maxDelta fl
 // DetectCyclesArrays is a port of detect.py's detect_cycles_arrays - the
 // large-dataset path, used by backfill.
 func DetectCyclesArrays(times []float64, residual []float64, loadSeries map[string]LoadSeries, p Params) Result {
-	events := FindMergedEvents(times, residual, p)
+	activityCheck := MakeArrayActivityCheck(loadSeries, times)
+	events := FindMergedEvents(times, residual, p, activityCheck)
 	events = FindStagedEvents(events, times, residual, p)
-	gapMarkers := FindGapMarkers(times, p.MaxGapS)
+	gapMarkers := FindGapMarkers(times, p, activityCheck)
 	rejectCheck := MakeArrayRejectCheck(loadSeries, p.RejectWindowS, p.RejectLoadDelta)
 	floorLookup := MakeFloorLookup(times, residual)
+	postOffLookup := MakePostOffLookup(times, residual)
 	seriesEndT := 0.0
 	if len(times) > 0 {
 		seriesEndT = times[len(times)-1]
 	}
-	return PairEvents(events, floorLookup, gapMarkers, seriesEndT, rejectCheck, p)
+	return PairEvents(events, floorLookup, gapMarkers, seriesEndT, rejectCheck, p, postOffLookup)
 }

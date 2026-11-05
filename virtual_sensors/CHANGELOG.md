@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.4
+
+- hot_water: a raw-sample gap (> MaxGapS, 120s) no longer force-closes an
+  open ON cycle just because the recorder had nothing new to log.
+  Verified against this household's data that gaps > 120s have a median
+  |delta| of 1-10W (i.e. flat, consistent with Home Assistant/InfluxDB
+  only logging on change, not periodically) -- so a gap is now a REAL
+  data-loss event (`FindGapMarkers`) only if it's long (>= RealGapMinS,
+  30 min) or coincides with a true outage (no OTHER known load reported
+  anything either, `MakeSampleActivityCheck`/`MakeArrayActivityCheck`).
+  `FindMergedEvents` carries the same fix into step detection: a step
+  that happens to follow a benign quiet gap is no longer silently
+  dropped (found 118/283/3 such step-sized deltas across the three
+  buckets that were previously invisible).
+- hot_water: an off-candidate is now rejected unless the residual
+  actually STAYS down afterward (`MakePostOffLookup`, a new post-off
+  dwell check, 90s by default) -- fixes a regression where an unmetered
+  oscillating load (2026-10-20 18:30-19:38, grid swinging
+  ~3850<->6530W, no change in any metered entity) produced a dip that
+  satisfied the existing PairTol tie-break and closed a real ~68-minute
+  cycle at 21 minutes. The dwell check rejects that dip (it bounced back
+  up within ~20s) and the pairer keeps looking for the real off-step.
+- Together these fixes close tonight's (2026-11-05) staged reheat
+  end-to-end: 19:53-21:27 (~1.55h, ~4.6kWh), previously left unmatched
+  by a 140s benign gap at 20:13-20:15.
+- Parity re-verified against the full history: 4,535/4,535 accepted
+  cycles match the Python reference exactly across `homeassistant_legacy`
+  (3,312), `homeassistant_2026` (1,207) and the committed `homeassistant`
+  fixture (16).
+
 ## 0.1.3
 
 - hot_water: recognise a STAGED reheat - the immersion heater switching

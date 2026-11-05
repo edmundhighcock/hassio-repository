@@ -48,6 +48,10 @@ throughout. A brief (<60s) on/off pair is rejected regardless
 (`MinOnDurationS`) - the wider chain made a kettle/toaster-like blip
 easier to nudge into the band by absorbing an adjacent small wobble;
 every real heater cycle in this household's data is minutes long.
+**One exception as of 0.1.4**: the batch path's gap-handling fix (a raw
+gap only hard-breaks a chain if it's real missing data, not just an
+unchanging reading - see `FindGapMarkers`) has NOT been ported to
+`onNewGridSample`; see "NOT YET PORTED to live" below.
 
 **Pairing (which on-step closes with which off-step) is deliberately
 simplified live.** The batch algorithm (`detect.PairEvents`, used by
@@ -81,6 +85,20 @@ differs (most cycles have exactly one off-candidate), but it means:
   the live-accumulated energy total consistent with a backfill total
   over the same period, even though the *power* trace can show
   provisional detail backfill doesn't.
+- **NOT YET PORTED to live (0.1.4): the gap-handling fix and the
+  post-off dwell check.** `detect.go`'s batch path now (a) only treats a
+  raw-sample gap as real missing data if it's long (>= RealGapMinS) or
+  coincides with a true outage, rather than any gap > MaxGapS, and (b)
+  rejects an off-candidate unless the residual stays down for
+  PostOffDwellS afterward. Porting (a) to the live merge-run tracker
+  (`onNewGridSample`) would need a load-activity ring retained far
+  longer than the current 120s (`RejectWindowS*2`) to answer "was
+  anything else active during this gap"; porting (b) would need live's
+  no-lookahead pairing to defer crediting a close for PostOffDwellS and
+  be ready to cancel it, which the current one-shot `handleEvent` isn't
+  structured for. Deferred rather than rushed un-tested (`module.go` has
+  no unit tests) into a path that runs unsupervised in production;
+  backfill remains the authority for both of these until it's done.
 
 ## Restart semantics
 
@@ -181,30 +199,34 @@ anywhere in this add-on.
 `tests/parity_test.go` runs this add-on's `detect`/`backfill` Go
 packages over `tests/testdata/homeassistant__*.csv` (exported from the
 Python reference's own cached `homeassistant` [live] bucket parquet -
-10,962 grid samples, re-exported 2026-11-05 for the staged-reheat fix)
-and compares against `tests/testdata/homeassistant_expected.json` (the
-Python reference's own `detect_cycles_arrays()` output on the same
-data). Result: **15/15 accepted cycles match exactly**, every stats
-counter matches exactly, and total accepted-cycle kWh matches to 5
-decimal places.
+10,962 grid samples) and compares against
+`tests/testdata/homeassistant_expected.json` (the Python reference's
+own `detect_cycles_arrays()` output on the same data). Result (0.1.4,
+after the gap-handling and post-off dwell fixes): **16/16 accepted
+cycles match exactly**, every stats counter matches exactly, and total
+accepted-cycle kWh matches to 5 decimal places.
 
 The much larger `homeassistant_legacy` (7,348,207 grid samples, ~3
 years) and `homeassistant_2026` (796,688 grid samples, ~6 months)
 buckets are too large to commit as fixtures; checked the same way
-during development by running this add-on's own `backfill` CLI
-(read-only) against InfluxDB directly and comparing its logged stats to
-`build.py`'s `data/detection_summary.json` for the 2026-11-05
-staged-reheat fix: **legacy 4,399/4,399 accepted cycles** (2,265
-rejected-floor, 33 unmatched-timeout, 143 unmatched-data_gap, all
-matching exactly), **homeassistant_2026 1,262/1,262** (18/0/240
-likewise exact), on top of the committed 15/15 - 5,676/5,676 cycles
-across the entire history. This exercise also found and fixed a
-pre-existing bug in `pointsToArrays` (`cmd/virtual_sensors/
-backfill_hotwater.go`): a duplicate timestamp in `fridge_power` (seen
-only in the `homeassistant_2026` bucket) broke `sort.Search`'s
-sortedness assumption in `MakeArrayRejectCheck`'s bisect and panicked;
-`pointsToArrays` now sorts and de-duplicates (keeping the last of exact
-ties), mirroring the Python reference's own `load_series`.
+during development (0.1.3 and 0.1.4) by running this add-on's own
+`backfill` CLI (read-only) against InfluxDB directly and comparing its
+logged stats to `build.py`'s `data/detection_summary.json`. 0.1.4:
+**legacy 3,312/3,312 accepted cycles** (2,073 rejected-floor, 82
+unmatched-timeout, 239 unmatched-data_gap, all matching exactly),
+**homeassistant_2026 1,207/1,207** (19/3/256 likewise exact), on top of
+the committed 16/16 - **4,535/4,535 cycles across the entire history**.
+(0.1.3's own full-history check, before the gap/post-off fixes, was
+5,676/5,676 on different cycle boundaries - the counts move between
+versions as real cycles get recovered, split or re-paired differently;
+what's invariant is Python and Go always agreeing with EACH OTHER.)
+0.1.3 also found and fixed a pre-existing bug in `pointsToArrays`
+(`cmd/virtual_sensors/backfill_hotwater.go`): a duplicate timestamp in
+`fridge_power` (seen only in the `homeassistant_2026` bucket) broke
+`sort.Search`'s sortedness assumption in `MakeArrayRejectCheck`'s
+bisect and panicked; `pointsToArrays` now sorts and de-duplicates
+(keeping the last of exact ties), mirroring the Python reference's own
+`load_series`.
 
 ## Memory
 

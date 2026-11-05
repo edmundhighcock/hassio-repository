@@ -435,3 +435,121 @@ func TestBriefKettleLikeBlipIsNotAPhantomCycle(t *testing.T) {
 		t.Fatalf("RejectReason = %q, want too_short", result.RejectedCycles[0].RejectReason)
 	}
 }
+
+// TestFlatGapWithOtherActivityIsNotARealGapMarker: Home Assistant only
+// logs a sensor when its value changes, so a raw sample gap at an
+// unchanging grid reading means "nothing happened", not "data lost". A
+// gap > MaxGapS (120s) but well under RealGapMinS (1800s), with the grid
+// value unchanged either side AND another known load reporting during it
+// (so it's clearly not an outage), must NOT produce a gap marker.
+func TestFlatGapWithOtherActivityIsNotARealGapMarker(t *testing.T) {
+	samples := []Sample{
+		mk(0, 500, nil), mk(20, 500, nil), mk(40, 3500, nil),
+		mk(60, 3500, map[string]float64{"other": 1}),
+		mk(210, 3500, map[string]float64{"other": 2}), // 150s gap, flat grid value, other load active
+		mk(230, 3480, map[string]float64{"other": 2}),
+	}
+	times := make([]float64, len(samples))
+	for i, s := range samples {
+		times[i] = s.T
+	}
+	markers := FindGapMarkers(times, DefaultParams(), MakeSampleActivityCheck(samples))
+	if len(markers) != 0 {
+		t.Fatalf("markers = %v, want none", markers)
+	}
+}
+
+// TestLongGapIsARealGapMarkerEvenIfFlat: a gap >= RealGapMinS (30 min) is
+// always a real gap marker, regardless of flatness or other activity.
+func TestLongGapIsARealGapMarkerEvenIfFlat(t *testing.T) {
+	samples := []Sample{
+		mk(0, 500, nil), mk(20, 500, nil), mk(40, 3500, nil),
+		mk(60, 3500, map[string]float64{"other": 1}),
+		mk(2100, 3500, map[string]float64{"other": 2}), // 2040s gap (> 1800s), flat, other active
+		mk(2120, 3480, map[string]float64{"other": 2}),
+	}
+	times := make([]float64, len(samples))
+	for i, s := range samples {
+		times[i] = s.T
+	}
+	markers := FindGapMarkers(times, DefaultParams(), MakeSampleActivityCheck(samples))
+	if len(markers) != 1 || markers[0] != 60 {
+		t.Fatalf("markers = %v, want [60]", markers)
+	}
+}
+
+// TestShortGapWithNoOtherActivityIsARealGapMarker: a gap between MaxGapS
+// and RealGapMinS, where NO other known load reports anything either,
+// looks like a true outage and is still a real gap marker.
+func TestShortGapWithNoOtherActivityIsARealGapMarker(t *testing.T) {
+	samples := []Sample{
+		mk(0, 500, nil), mk(20, 500, nil), mk(40, 3500, nil),
+		mk(60, 3500, nil),
+		mk(210, 3500, nil), // 150s gap, flat grid value, NO other load activity
+		mk(230, 3480, nil),
+	}
+	times := make([]float64, len(samples))
+	for i, s := range samples {
+		times[i] = s.T
+	}
+	markers := FindGapMarkers(times, DefaultParams(), MakeSampleActivityCheck(samples))
+	if len(markers) != 1 || markers[0] != 60 {
+		t.Fatalf("markers = %v, want [60]", markers)
+	}
+}
+
+// TestFlatGapWithActivityLetsACyclePairAcrossIt is the end-to-end version:
+// the same flat/active gap as above, but now actually spanning an open ON
+// cycle, must not force-close it.
+func TestFlatGapWithActivityLetsACyclePairAcrossIt(t *testing.T) {
+	samples := []Sample{
+		mk(0, 500, nil), mk(20, 500, nil), mk(40, 3500, nil), // +3000 on-step
+		mk(60, 3500, map[string]float64{"other": 1}),
+		mk(210, 3500, map[string]float64{"other": 2}), // 150s gap, flat grid value, other load active
+		mk(230, 3480, map[string]float64{"other": 2}),
+		mk(250, 520, map[string]float64{"other": 2}), // -2960 off-step
+		mk(280, 510, map[string]float64{"other": 2}), mk(370, 515, map[string]float64{"other": 2}),
+	}
+	result := DetectCycles(samples, DefaultParams())
+	if len(result.Cycles) != 1 {
+		t.Fatalf("len(Cycles) = %d, want 1 (unmatched=%v)", len(result.Cycles), result.UnmatchedCycles)
+	}
+	if !result.Cycles[0].Accepted {
+		t.Fatalf("cycle not accepted")
+	}
+	if len(result.UnmatchedCycles) != 0 {
+		t.Fatalf("len(UnmatchedCycles) = %d, want 0", len(result.UnmatchedCycles))
+	}
+}
+
+// TestOffCandidateRejectedIfResidualBouncesBackIsNotAPhantomClose is
+// modelled on the real 2026-10-20 regression: a spurious off-looking dip
+// that bounces back up within the post-off dwell window must be rejected
+// as a close; the detector should keep looking and pair with the REAL
+// off-step further ahead.
+func TestOffCandidateRejectedIfResidualBouncesBackIsNotAPhantomClose(t *testing.T) {
+	samples := []Sample{
+		mk(0, 500, nil), mk(20, 500, nil),
+		mk(40, 3500, nil), // +3000 on-step, baseline=500
+		mk(140, 3480, nil), mk(240, 3510, nil),
+		mk(300, 900, nil),  // -2610 spurious dip (settles at 900)
+		mk(320, 3800, nil), // +2900 bounces back up within the dwell window (20s later)
+		mk(420, 3780, nil), mk(520, 3810, nil),
+		mk(600, 520, nil), // -3290 real off-step
+		mk(620, 510, nil), mk(720, 515, nil),
+	}
+	result := DetectCycles(samples, DefaultParams())
+	if len(result.Cycles) != 1 {
+		t.Fatalf("len(Cycles) = %d, want 1 (rejected=%v unmatched=%v)", len(result.Cycles), result.RejectedCycles, result.UnmatchedCycles)
+	}
+	c := result.Cycles[0]
+	if !c.Accepted {
+		t.Fatalf("cycle not accepted")
+	}
+	if *c.OffTime != 520 {
+		t.Fatalf("OffTime = %v, want 520 (the real off-chain, not the spurious dip at 300)", *c.OffTime)
+	}
+	if len(result.UnmatchedCycles) != 0 {
+		t.Fatalf("len(UnmatchedCycles) = %d, want 0", len(result.UnmatchedCycles))
+	}
+}
