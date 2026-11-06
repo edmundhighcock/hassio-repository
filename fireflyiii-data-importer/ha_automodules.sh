@@ -8,7 +8,15 @@ set -e
 
 MODULES="$1"
 MODULES="$MODULES 00-banner.sh 01-custom_script.sh 01-config_yaml.sh 00-global_var.sh"
-echo "To download : $MODULES"
+echo "To install : $MODULES"
+
+# Fin's change: these used to be downloaded at build time from
+# alexbelgium/hassio-addons' master branch (raw.githubusercontent.com),
+# which is unpinned. They are now vendored verbatim under
+# vendor/.templates/ (see vendor/README.md for the upstream commit they
+# were copied from) and COPY'd into the image before this script runs, so
+# the build has no network dependency on that repository.
+VENDOR_DIR="${VENDOR_DIR:-/vendor/.templates}"
 
 # Install bash if not available
 if ! command -v bash > /dev/null 2> /dev/null; then
@@ -26,21 +34,16 @@ fi
 # Create folder for scripts
 mkdir -p /etc/cont-init.d
 
-# Download scripts
+# Install scripts from the vendored copy (was: download from
+# alexbelgium/hassio-addons at build time; see note above)
 for scripts in $MODULES; do
     echo "$scripts"
-    success=false
-    for attempt in 1 2 3 4 5; do
-        if curl -f -L -s -S "https://raw.githubusercontent.com/alexbelgium/hassio-addons/master/.templates/$scripts" -o /etc/cont-init.d/"$scripts" \
-            && [ "$(sed -n '/\/bin/p;q' /etc/cont-init.d/"$scripts")" != "" ]; then
-            success=true
-            break
-        fi
-        echo "Attempt $attempt failed for $scripts, retrying in ${attempt}s..."
-        sleep "$attempt"
-    done
-    if [ "$success" != "true" ]; then
-        echo "script failed to install $scripts after 5 attempts"
+    if [ -f "$VENDOR_DIR/$scripts" ] \
+        && cp "$VENDOR_DIR/$scripts" /etc/cont-init.d/"$scripts" \
+        && [ "$(sed -n '/\/bin/p;q' /etc/cont-init.d/"$scripts")" != "" ]; then
+        :
+    else
+        echo "vendored script missing or invalid: $scripts (expected at $VENDOR_DIR/$scripts)"
         exit 1
     fi
 done

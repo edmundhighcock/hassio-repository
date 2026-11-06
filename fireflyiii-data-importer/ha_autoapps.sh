@@ -74,8 +74,23 @@ if ! command -v curl > /dev/null 2> /dev/null; then
     (apt-get update && apt-get install -yqq --no-install-recommends curl || apk add --no-cache curl) > /dev/null
 fi
 
-# Call apps installer script if needed
-curl -f -L -S "https://raw.githubusercontent.com/alexbelgium/hassio-addons/master/.templates/ha_automatic_packages.sh" --output /ha_automatic_packages.sh
+# Call apps installer script if needed.
+#
+# Fin's change: this used to be downloaded at build time from
+# alexbelgium/hassio-addons' master branch (raw.githubusercontent.com),
+# which is unpinned. It is now vendored verbatim under
+# vendor/.templates/ha_automatic_packages.sh (see vendor/README.md for
+# the upstream commit it was copied from) and COPY'd into the image
+# before this script runs, so the build has no network dependency on
+# that repository. ha_automatic_packages.sh itself still makes its own
+# further build-time fetches of pinned bashio/tempio releases from
+# Home Assistant's own repos -- unchanged, out of scope here.
+VENDOR_DIR="${VENDOR_DIR:-/vendor/.templates}"
+if [ ! -f "$VENDOR_DIR/ha_automatic_packages.sh" ]; then
+    echo "vendored script missing: ha_automatic_packages.sh (expected at $VENDOR_DIR/ha_automatic_packages.sh)" >&2
+    exit 1
+fi
+cp "$VENDOR_DIR/ha_automatic_packages.sh" /ha_automatic_packages.sh
 chmod 755 /ha_automatic_packages.sh
 eval /./ha_automatic_packages.sh "${PACKAGES:-}"
 

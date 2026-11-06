@@ -37,12 +37,19 @@ but land on different Firefly III accounts are both imported.
    and verbose branches both call it. This prevents the concurrent-run
    duplicate creation that a bare read-then-write dedup is otherwise
    exposed to (cron firing while a manual import is already running).
+4. **No build-time fetch from alexbelgium's repo.** The upstream template
+   scripts `ha_automodules.sh`/`ha_autoapps.sh` used to curl from
+   `alexbelgium/hassio-addons`' unpinned `master` branch are vendored
+   under `vendor/.templates/` instead — see `vendor/README.md` for
+   provenance — so a build no longer depends on that repository.
+5. **The `devices:` list is gone** from `config.yaml` — hardware
+   passthrough nodes a pure web-app/import addon never uses.
 
 Everything else — options, schema, ports, ingress, the `map:` mounts, the
-long `devices:` list, the S6/bashio bootstrap machinery, the healthcheck —
-is alexbelgium's, unchanged, so an existing configuration under
-`/config` (or `/addon_configs/.../fireflyiii_data_importer/`) can be
-copied across to this add-on's config location without translation.
+S6/bashio bootstrap machinery, the healthcheck — is alexbelgium's,
+unchanged, so an existing configuration under `/config` (or
+`/addon_configs/.../fireflyiii_data_importer/`) can be copied across to
+this add-on's config location without translation.
 
 ## Configuration
 

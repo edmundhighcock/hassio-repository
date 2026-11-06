@@ -31,6 +31,22 @@ pin the build against drift.
   (`/tmp/firefly-importer.lock`) and the same non-blocking `flock -n -E 0`
   semantics — a second run that finds the lock held exits 0 (a no-op), so
   cron sees a clean skip rather than a failure.
+- `ha_automodules.sh` and `ha_autoapps.sh` no longer fetch their upstream
+  template scripts (`00-banner.sh`, `01-custom_script.sh`,
+  `00-global_var.sh`, `01-config_yaml.sh`, `ha_automatic_packages.sh`)
+  from `alexbelgium/hassio-addons`' unpinned `master` branch at build
+  time. They are vendored verbatim under `vendor/.templates/`, copied
+  from that repo at commit `b5bd66c119755af40f199cbc6bb1b04563cb8f1a`
+  (2026-11-05) — see `vendor/README.md` for the full provenance and for
+  what is deliberately still fetched over the network (pinned
+  `bashio`/`tempio` releases from Home Assistant's own repos, unchanged).
+  Behaviour is otherwise identical; the build no longer depends on that
+  repository being reachable or unchanged between builds.
+- Removed `config.yaml`'s long `devices:` list (`/dev/dri`, the video and
+  block-storage device nodes, etc.) — alexbelgium's generic template for
+  hardware passthrough that a pure PHP web-app/import addon never needs.
+  `udev: true` is left as-is for now (flagged for a separate decision,
+  not removed here).
 
 ### Added
 

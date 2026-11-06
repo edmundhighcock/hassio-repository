@@ -14,8 +14,12 @@
 # fireflyiii_data_importer add-on (https://github.com/alexbelgium/hassio-addons).
 # Changes from the upstream recipe, relative to alexbelgium's original
 # Dockerfile for this add-on, are confined to the "0 Account-scoped dedup
-# patch" section below plus the BUILD_FROM pin passed in via build.yaml;
-# everything else — the module/app download machinery, the entrypoint,
+# patch" section below, the BUILD_FROM pin passed in via build.yaml, and
+# the vendoring of ha_automodules.sh/ha_autoapps.sh's upstream template
+# downloads (see "3 Install apps" below and vendor/README.md — these two
+# scripts no longer fetch from alexbelgium/hassio-addons' master branch
+# at build time, only from the vendored copies COPY'd in); everything
+# else — the module/app download machinery's own logic, the entrypoint,
 # the labels, the healthcheck — is alexbelgium's unchanged.
 
 #################
@@ -96,6 +100,14 @@ RUN if [ ! -f /bin/sh ] && [ -f /usr/bin/sh ]; then ln -s /usr/bin/sh /bin/sh; f
 # Modules
 ARG MODULES="00-banner.sh 01-custom_script.sh 00-global_var.sh 01-config_yaml.sh"
 
+# Vendored upstream templates: ha_automodules.sh and ha_autoapps.sh used to
+# curl these from alexbelgium/hassio-addons' unpinned master branch at
+# build time. They are now copied in from vendor/ (see vendor/README.md
+# for the exact upstream commit) and removed again once both scripts
+# below have used them, so the build makes no network request to that
+# repository.
+COPY vendor/ /vendor/
+
 # Automatic modules download
 COPY ha_automodules.sh /ha_automodules.sh
 RUN chmod 744 /ha_automodules.sh && /ha_automodules.sh "$MODULES" && rm /ha_automodules.sh
@@ -105,7 +117,7 @@ ENV PACKAGES="cron bash sudo"
 
 # Automatic apps & bashio
 COPY ha_autoapps.sh /ha_autoapps.sh
-RUN chmod 744 /ha_autoapps.sh && /ha_autoapps.sh "$PACKAGES" && rm /ha_autoapps.sh
+RUN chmod 744 /ha_autoapps.sh && /ha_autoapps.sh "$PACKAGES" && rm /ha_autoapps.sh && rm -rf /vendor
 
 ################
 # 4 Entrypoint #
