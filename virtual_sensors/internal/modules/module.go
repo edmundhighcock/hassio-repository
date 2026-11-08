@@ -26,6 +26,13 @@ type OutputSpec struct {
 	DeviceClass string // HA device_class, e.g. "power", "energy"
 	StateClass  string // HA state_class, e.g. "measurement", "total_increasing"
 	Unit        string // HA unit_of_measurement, e.g. "W", "kWh"
+	// PerEntityAvailability: if true, this sensor is published with its
+	// OWN retained availability topic (online/offline) instead of the
+	// add-on's shared device-wide one, so an OutputUpdate with
+	// Unavailable=true for this ObjectID marks only this entity
+	// unavailable in Home Assistant, not every sensor this add-on
+	// publishes. See mqttpub.Publisher.PublishState.
+	PerEntityAvailability bool
 }
 
 // StateUpdate is one Home Assistant state_changed event (or one history
@@ -43,6 +50,12 @@ type OutputUpdate struct {
 	ObjectID string
 	Time     time.Time
 	Value    float64
+	// Unavailable, when true, means Value is not meaningful: the
+	// publisher should mark this ObjectID's entity unavailable (via its
+	// PerEntityAvailability topic, see OutputSpec) rather than publish
+	// Value as a state. Only meaningful for outputs with
+	// PerEntityAvailability set; ignored otherwise.
+	Unavailable bool
 }
 
 // InitialStater is optional: a module implementing it has its current

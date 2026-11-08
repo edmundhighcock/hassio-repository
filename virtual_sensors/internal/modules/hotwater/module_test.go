@@ -1,6 +1,7 @@
 package hotwater
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -50,6 +51,38 @@ func lastPower(outs [][]modules.OutputUpdate) (float64, bool) {
 		}
 	}
 	return val, found
+}
+
+// pushGridUnavailable feeds a grid_meter_power state with Available:false
+// (e.g. "unavailable"/"unknown" in Home Assistant) through OnStateUpdate.
+func pushGridUnavailable(t *testing.T, m *Module, tSec float64) []modules.OutputUpdate {
+	t.Helper()
+	sec := int64(tSec)
+	nsec := int64((tSec - float64(sec)) * 1e9)
+	return m.OnStateUpdate(modules.StateUpdate{
+		EntityID: GridEntity, Time: time.Unix(sec, nsec).UTC(), Available: false,
+	})
+}
+
+// pushLoadUnavailable feeds a known-load state with Available:false.
+func pushLoadUnavailable(t *testing.T, m *Module, entityID string, tSec float64) []modules.OutputUpdate {
+	t.Helper()
+	sec := int64(tSec)
+	nsec := int64((tSec - float64(sec)) * 1e9)
+	return m.OnStateUpdate(modules.StateUpdate{
+		EntityID: entityID, Time: time.Unix(sec, nsec).UTC(), Available: false,
+	})
+}
+
+// lastResidual returns the last hot_water_residual_power OutputUpdate in
+// outs, if any.
+func lastResidual(outs []modules.OutputUpdate) (val float64, unavailable bool, found bool) {
+	for _, u := range outs {
+		if u.ObjectID == OutResidualObjectID {
+			val, unavailable, found = u.Value, u.Unavailable, true
+		}
+	}
+	return
 }
 
 func anyPowerZero(outs [][]modules.OutputUpdate) bool {
@@ -196,5 +229,131 @@ func TestOscillatingLoadDoesNotCauseAPrematureOff(t *testing.T) {
 	}
 	if m.energyKwh <= 0 {
 		t.Fatalf("energyKwh = %v, want > 0 after the real off-step resolved", m.energyKwh)
+	}
+}
+
+// TestResidualPublishedOnEveryFreshGridSample: with no known loads
+// reporting anything, the residual output must equal the grid value
+// itself, and must be published afresh on every single grid sample
+// (independent of step detection/pairing, which these grid values never
+// trigger).
+func TestResidualPublishedOnEveryFreshGridSample(t *testing.T) {
+	m := newTestModule(t)
+	// t starts at 10, not 0: OnStateUpdate drops any sample with
+	// t <= processedUntil (initially 0) as "already applied" - see its
+	// warm-up-replay-overlap guard - so a first call at t=0 would be a
+	// silent no-op, same as every other test in this file.
+	for i, v := range []float64{500, 510, 505, 520} {
+		outs := pushGrid(t, m, float64(i+1)*10, v)
+		val, unavailable, found := lastResidual(outs)
+		if !found {
+			t.Fatalf("sample %d: no %s output published", i, OutResidualObjectID)
+		}
+		if unavailable {
+			t.Fatalf("sample %d: residual marked unavailable, want available", i)
+		}
+		if val != v {
+			t.Fatalf("sample %d: residual = %v, want %v (no known loads)", i, val, v)
+		}
+	}
+}
+
+// TestResidualConvertsLoaverKwToW: loaver_power (the EV charger) reports
+// kW, like every other live input to this module - the residual must
+// subtract it in W, same conversion OnStateUpdate already applies for
+// the detector itself.
+func TestResidualConvertsLoaverKwToW(t *testing.T) {
+	m := newTestModule(t)
+	pushLoad(t, m, "loaver_power", 1, 2.5) // kW -> held as 2500W
+	outs := pushGrid(t, m, 10, 3000)
+	val, unavailable, found := lastResidual(outs)
+	if !found {
+		t.Fatalf("no %s output published", OutResidualObjectID)
+	}
+	if unavailable {
+		t.Fatalf("residual marked unavailable, want available")
+	}
+	if val != 500 {
+		t.Fatalf("residual = %v, want 500 (3000 grid - 2500W from loaver_power's 2.5kW)", val)
+	}
+}
+
+// TestResidualHoldsLastKnownLoadValueWhenUnavailable: a known load going
+// unavailable must NOT make the residual unavailable or drop it from the
+// sum - the existing held-value (LOCF) rule applies, same as the
+// detector's own knownSum.
+func TestResidualHoldsLastKnownLoadValueWhenUnavailable(t *testing.T) {
+	m := newTestModule(t)
+	pushLoad(t, m, "fridge_power", 1, 150)
+	outs := pushGrid(t, m, 5, 1150)
+	if val, _, found := lastResidual(outs); !found || val != 1000 {
+		t.Fatalf("setup: residual = %v found=%v, want 1000", val, found)
+	}
+
+	pushLoadUnavailable(t, m, "fridge_power", 10)
+	outs = pushGrid(t, m, 15, 1150)
+	val, unavailable, found := lastResidual(outs)
+	if !found {
+		t.Fatalf("no %s output published after a known load went unavailable", OutResidualObjectID)
+	}
+	if unavailable {
+		t.Fatalf("residual marked unavailable because a KNOWN LOAD (not the grid) went unavailable - the held-value rule should apply instead")
+	}
+	if val != 1000 {
+		t.Fatalf("residual = %v, want 1000 (fridge_power's held/last-known 150W still subtracted)", val)
+	}
+}
+
+// TestResidualGoesUnavailableWhenGridUnavailableDetectorUnaffected: the
+// grid input itself going unavailable must mark ONLY the residual
+// sensor unavailable - the detector's open-cycle/pairing state (and its
+// own outputs) must be completely untouched - and the residual must
+// recover as soon as the grid reports available again.
+func TestResidualGoesUnavailableWhenGridUnavailableDetectorUnaffected(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 500)
+	pushGrid(t, m, 20, 500)
+	pushGrid(t, m, 40, 3500)  // +3000 on-step
+	pushGrid(t, m, 140, 3480) // reversal -> flushes the on-step chain, opening the cycle
+	if !m.open {
+		t.Fatalf("setup: cycle did not open")
+	}
+
+	outs := pushGridUnavailable(t, m, 160)
+	val, unavailable, found := lastResidual(outs)
+	if !found || !unavailable {
+		t.Fatalf("residual output = %v unavailable=%v found=%v, want Unavailable:true", val, unavailable, found)
+	}
+	for _, u := range outs {
+		if u.ObjectID != OutResidualObjectID {
+			t.Fatalf("grid unavailable produced an unexpected output for %s - the detector's own outputs/behaviour must not change", u.ObjectID)
+		}
+	}
+	if !m.open {
+		t.Fatalf("grid going unavailable must not itself affect the open detector cycle")
+	}
+
+	outs = pushGrid(t, m, 180, 3510)
+	val, unavailable, found = lastResidual(outs)
+	if !found || unavailable {
+		t.Fatalf("residual did not recover (val=%v unavailable=%v found=%v) once the grid reported available again", val, unavailable, found)
+	}
+}
+
+// TestResidualRoundedToWholeWatt: the residual output must always be a
+// whole number of watts.
+func TestResidualRoundedToWholeWatt(t *testing.T) {
+	m := newTestModule(t)
+	pushLoad(t, m, "fridge_power", 1, 100.4)
+	outs := pushGrid(t, m, 5, 600.7) // 600.7 - 100.4 = 500.3 -> rounds to 500
+	val, _, found := lastResidual(outs)
+	if !found {
+		t.Fatalf("no %s output published", OutResidualObjectID)
+	}
+	if val != math.Round(val) {
+		t.Fatalf("residual %v is not a whole number of watts", val)
+	}
+	if val != 500 {
+		t.Fatalf("residual = %v, want 500 (rounded from 500.3)", val)
 	}
 }

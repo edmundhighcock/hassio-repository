@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.6
+
+- hot_water: a third published sensor, `sensor.hot_water_residual_power`
+  (W, `device_class: power`, `state_class: measurement`) - the live
+  residual (grid minus every known load's held/LOCF value, same
+  `knownSum` the detector itself uses) rounded to the nearest whole W,
+  published on every fresh grid sample. Grouped under the same MQTT
+  device as the other two sensors, with `default_entity_id:
+  sensor.hot_water_residual_power` in its discovery config, same as
+  they already have.
+  - No change at all to the detector's own behaviour or its two
+    existing outputs (`hot_water_estimated_power`/`_energy`): the new
+    output is computed and published independently, before step
+    detection/pairing runs, and a known load going unavailable is
+    handled exactly as before - its LAST held value simply keeps being
+    subtracted (see DOCS.md "Entities published").
+  - When the GRID input itself is unavailable, this new sensor (only)
+    goes `unavailable` in Home Assistant, so a consumer can fail safe
+    rather than read a stale or fabricated number - via its own
+    per-entity MQTT availability topic
+    (`virtual_sensors/hot_water_residual_power/availability`), not the
+    add-on's existing shared `virtual_sensors/status` topic (which
+    would have taken the other two sensors down with it). See
+    `modules.OutputSpec.PerEntityAvailability` and
+    `modules.OutputUpdate.Unavailable`, new this release, and
+    `mqttpub.Publisher.PublishState`.
+  - New unit tests
+    (`internal/modules/hotwater/module_test.go`): published on every
+    fresh grid sample, the `loaver_power` kW-to-W conversion feeding
+    into the residual, a known load going unavailable (held-value rule
+    applies, no change), the grid itself going unavailable (residual
+    only goes unavailable, detector untouched, recovers once grid
+    reports available again), and rounding to the nearest whole W.
+
 ## 0.1.5
 
 - hot_water: brought the LIVE path into line with 0.1.4's batch fixes,

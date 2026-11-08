@@ -22,9 +22,40 @@ does not re-derive any of those thresholds; it ports them.
 | --- | --- | --- | --- | --- |
 | `sensor.hot_water_estimated_power` | W | power | measurement | hot_water |
 | `sensor.hot_water_estimated_energy` | kWh | energy | total_increasing | hot_water |
+| `sensor.hot_water_residual_power` | W | power | measurement | hot_water |
 
-Both group under one MQTT device named "Virtual sensors" in Home
+All three group under one MQTT device named "Virtual sensors" in Home
 Assistant.
+
+`hot_water_residual_power` (0.1.6) is the live residual (grid minus the
+LOCF-held sum of every `KnownLoadEntities` entry - the same `knownSum`
+the detector itself uses) rounded to the nearest whole W, published on
+every fresh grid sample. It has NO effect on, and is computed
+independently of, the detector's own step detection/pairing and its two
+outputs above - the parity/replay tests below cover only those and are
+unaffected by this sensor's presence.
+
+- **Known-load gaps**: exactly the existing held-value (LOCF) rule
+  applies - a known load that stops reporting (goes `unavailable`, or
+  simply has nothing new to say) keeps contributing its LAST seen value
+  to the sum indefinitely; a load that has never reported at all
+  contributes nothing (effectively 0). This sensor does not add any new
+  staleness handling of its own - it inherits the detector's.
+- **Grid unavailable**: this is the one case this sensor DOES react to
+  on its own. When the grid input (`grid_meter_power`) itself reports
+  `unavailable`/`unknown`, `hot_water_residual_power` (only) goes
+  `unavailable` in Home Assistant, via its own dedicated MQTT
+  availability topic (`virtual_sensors/hot_water_residual_power/
+  availability`, online/offline) - NOT the add-on's shared
+  `virtual_sensors/status` topic, which covers every sensor and would
+  have taken the other two down with it. A consumer watching this
+  entity can thus fail safe (not treat a stale/fabricated residual as
+  current) exactly when the add-on itself no longer has a live grid
+  reading, while `hot_water_estimated_power`/`_energy` keep publishing
+  from their own, separately-tracked state exactly as before (see
+  `hotwater.Module.OnStateUpdate`'s `!u.Available` branch for
+  `GridEntity`). It recovers (`online`) as soon as the grid reports
+  available again.
 
 ## Live vs backfill
 
@@ -150,13 +181,21 @@ Discovery configs are published retained to
 `object_id` set explicitly in the payload (so the resulting entity id is
 `sensor.<object_id>`, e.g. `sensor.hot_water_estimated_power`, not a
 slug derived from the friendly name). State is published retained to
-`virtual_sensors/<object_id>/state`. Availability is a single retained
-LWT topic, `virtual_sensors/status` (`online`/`offline`), shared by
-every output and referenced by every discovery config's
-`availability_topic`. Discovery is re-published on every add-on start
-AND whenever `homeassistant/status` reports `online` (an HA restart, or
-an MQTT integration reload with "clean start" that would otherwise have
-wiped the retained discovery configs).
+`virtual_sensors/<object_id>/state`. Availability is, BY DEFAULT, a
+single retained LWT topic, `virtual_sensors/status` (`online`/
+`offline`), shared by every output and referenced by every discovery
+config's `availability_topic` - this still covers both detector
+outputs unchanged. An output can opt out of that sharing with
+`OutputSpec.PerEntityAvailability` (0.1.6): its discovery config then
+gets its OWN retained topic, `virtual_sensors/<object_id>/
+availability`, defaulted to `online` as soon as discovery is
+(re-)published, and flipped by `OutputUpdate.Unavailable` on the module's
+own say-so (see `mqttpub.Publisher.PublishState`) - used by
+`hot_water_residual_power` so a grid outage marks only that one sensor
+unavailable, not the whole device. Discovery is re-published on every
+add-on start AND whenever `homeassistant/status` reports `online` (an HA
+restart, or an MQTT integration reload with "clean start" that would
+otherwise have wiped the retained discovery configs).
 
 ### MQTT credentials
 

@@ -18,6 +18,7 @@ package hotwater
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"sort"
 	"time"
 
@@ -43,6 +44,13 @@ var KnownLoadEntities = []string{
 const (
 	OutPowerObjectID  = "hot_water_estimated_power"
 	OutEnergyObjectID = "hot_water_estimated_energy"
+	// OutResidualObjectID is the live residual (grid minus every known
+	// load, held-value LOCF) in W, published on every fresh grid sample -
+	// independent of, and with no effect on, the detector's own
+	// power/energy outputs or pairing state above. See
+	// OnStateUpdate's residual computation and DOCS.md "Entities
+	// published".
+	OutResidualObjectID = "hot_water_residual_power"
 )
 
 // activityRetentionS bounds how far back each known load's ring (loadRing)
@@ -233,10 +241,19 @@ func (m *Module) InitialStates() []modules.OutputUpdate {
 	if m.open {
 		power = m.onMagnitude
 	}
-	return []modules.OutputUpdate{
+	out := []modules.OutputUpdate{
 		{ObjectID: OutPowerObjectID, Time: now, Value: power},
 		{ObjectID: OutEnergyObjectID, Time: now, Value: m.energyKwh},
 	}
+	if m.haveLastGrid {
+		out = append(out, modules.OutputUpdate{
+			ObjectID: OutResidualObjectID, Time: now,
+			Value: math.Round(m.lastGrid.V - m.knownSum()),
+		})
+	} else {
+		out = append(out, modules.OutputUpdate{ObjectID: OutResidualObjectID, Time: now, Unavailable: true})
+	}
+	return out
 }
 
 func (m *Module) Inputs() []modules.InputSpec {
@@ -258,6 +275,17 @@ func (m *Module) Outputs() []modules.OutputSpec {
 			ObjectID: OutEnergyObjectID, UniqueID: "virtual_sensors_" + OutEnergyObjectID,
 			Name: "Hot water estimated energy", DeviceClass: "energy",
 			StateClass: "total_increasing", Unit: "kWh",
+		},
+		{
+			ObjectID: OutResidualObjectID, UniqueID: "virtual_sensors_" + OutResidualObjectID,
+			Name: "Hot water residual power", DeviceClass: "power",
+			StateClass: "measurement", Unit: "W",
+			// Its own availability topic: this sensor goes unavailable
+			// when the grid input itself is unavailable (see
+			// OnStateUpdate), independent of the detector outputs above,
+			// which keep publishing from held/last-known values exactly
+			// as before - see DOCS.md "Entities published".
+			PerEntityAvailability: true,
 		},
 	}
 }
@@ -580,12 +608,29 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	}
 
 	if !u.Available {
-		return nil
+		// The detector's own state (open cycle, pairing, run-in-progress)
+		// is untouched here, exactly as before 0.1.6 - only the new
+		// residual sensor reacts to a grid outage, going unavailable so a
+		// downstream consumer can fail safe rather than read a stale or
+		// fabricated number.
+		return []modules.OutputUpdate{{ObjectID: OutResidualObjectID, Time: u.Time, Unavailable: true}}
 	}
 
 	var out []modules.OutputUpdate
 	residual := u.Value - m.knownSum()
 	m.residual.push(t, residual, m.params.StageWindowS)
+
+	// Published on every fresh grid sample, independent of step
+	// detection/pairing below: the live residual (grid minus every known
+	// load's held/LOCF value - see knownSum) rounded to the nearest
+	// whole W. A known load with no recent sample simply keeps
+	// contributing its last-seen value here too, same held-value rule
+	// the detector itself relies on (see KnownLoadEntities/m.lastLoad) -
+	// see DOCS.md "Entities published" for why this is not a defect.
+	out = append(out, modules.OutputUpdate{
+		ObjectID: OutResidualObjectID, Time: u.Time,
+		Value: math.Round(residual),
+	})
 
 	m.onNewGridSample(t, u.Value, func(e detect.MergedEvent) {
 		m.admitMergedEvent(e, func(staged detect.MergedEvent) {

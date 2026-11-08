@@ -45,8 +45,17 @@ type Credentials struct {
 // Publisher owns one MQTT connection, (re)sends discovery configs for a
 // fixed set of outputs, and publishes their state.
 type Publisher struct {
-	client  mqtt.Client
-	outputs []modules.OutputSpec
+	client     mqtt.Client
+	outputs    []modules.OutputSpec
+	outputByID map[string]modules.OutputSpec
+}
+
+// perEntityAvailabilityTopic is the retained online/offline topic for one
+// output that has OutputSpec.PerEntityAvailability set - see that field's
+// doc comment. Distinct per ObjectID so losing one sensor's input doesn't
+// mark unrelated sensors unavailable, unlike the shared availabilityTopic.
+func perEntityAvailabilityTopic(objectID string) string {
+	return fmt.Sprintf("%s/%s/availability", nodeID, objectID)
 }
 
 // Connect blocks (with the caller's own retry loop expected around it -
@@ -68,7 +77,11 @@ func Connect(creds Credentials, outputs []modules.OutputSpec) (*Publisher, error
 	opts.SetConnectRetry(false) // main.go's own retry loop decides when to give up/log loudly
 	opts.SetKeepAlive(30 * time.Second)
 
-	p := &Publisher{outputs: outputs}
+	outputByID := make(map[string]modules.OutputSpec, len(outputs))
+	for _, o := range outputs {
+		outputByID[o.ObjectID] = o
+	}
+	p := &Publisher{outputs: outputs, outputByID: outputByID}
 	opts.OnConnect = func(c mqtt.Client) {
 		log.Printf("mqttpub: connected to %s:%d (credentials from %s)", creds.Host, creds.Port, creds.Source)
 		p.client = c
@@ -131,10 +144,21 @@ func (p *Publisher) publishDiscovery() error {
 		return fmt.Errorf("publish availability: %w", tok.Error())
 	}
 	for _, o := range p.outputs {
+		avTopic := availabilityTopic
+		if o.PerEntityAvailability {
+			avTopic = perEntityAvailabilityTopic(o.ObjectID)
+			// Default this entity to available at discovery time (before
+			// any state has been seen) - it is pulled back to "offline"
+			// by PublishState as soon as (and for as long as) its module
+			// reports Unavailable:true.
+			if tok := p.client.Publish(avTopic, 1, true, "online"); tok.Wait() && tok.Error() != nil {
+				return fmt.Errorf("publish initial availability for %s: %w", o.ObjectID, tok.Error())
+			}
+		}
 		cfg := discoveryConfig{
 			UniqueID: o.UniqueID, ObjectID: o.ObjectID, DefaultEntityID: "sensor." + o.ObjectID, Name: o.Name,
 			DeviceClass: o.DeviceClass, StateClass: o.StateClass, UnitOfMeasurement: o.Unit,
-			StateTopic: stateTopic(o.ObjectID), AvailabilityTopic: availabilityTopic,
+			StateTopic: stateTopic(o.ObjectID), AvailabilityTopic: avTopic,
 			Device: Device,
 		}
 		b, err := json.Marshal(cfg)
@@ -150,8 +174,24 @@ func (p *Publisher) publishDiscovery() error {
 
 // PublishState publishes one output's current numeric value, retained,
 // so a restarting Home Assistant immediately shows the last known value
-// instead of "unknown" until the next update.
+// instead of "unknown" until the next update. For an output with
+// OutputSpec.PerEntityAvailability set, u.Unavailable toggles that
+// output's own availability topic instead of (Unavailable=true) or in
+// addition to (Unavailable=false, i.e. back online) publishing a state
+// value - see OutputSpec.PerEntityAvailability and OutputUpdate.Unavailable.
 func (p *Publisher) PublishState(u modules.OutputUpdate) error {
+	if spec, ok := p.outputByID[u.ObjectID]; ok && spec.PerEntityAvailability {
+		payload := "online"
+		if u.Unavailable {
+			payload = "offline"
+		}
+		if tok := p.client.Publish(perEntityAvailabilityTopic(u.ObjectID), 1, true, payload); tok.Wait() && tok.Error() != nil {
+			return fmt.Errorf("publish availability for %s: %w", u.ObjectID, tok.Error())
+		}
+		if u.Unavailable {
+			return nil // no state payload while unavailable
+		}
+	}
 	tok := p.client.Publish(stateTopic(u.ObjectID), 1, true, fmt.Sprintf("%g", u.Value))
 	tok.Wait()
 	return tok.Error()
