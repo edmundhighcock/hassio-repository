@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.7
+
+- hot_water: a known load reporting `unavailable`/`unknown` is dropped
+  from `sensor.hot_water_residual_power` immediately (no held value) and
+  re-added on its next numeric value. Each loss/regain is published as a
+  discontinuity in the sensor's retained JSON attributes
+  (`missing_loads`, `discontinuity_seq`, `last_discontinuity`,
+  `recent_discontinuities`) with the signed `delta_w` it caused.
+- The detector uses the same residual and does not count a discontinuity
+  as an on/off step (window rejection plus cycle-level correction).
+- Known blind spot: a plug that freezes while still `available` is not
+  detectable. See DOCS.md.
+
 ## 0.1.6
 
 - hot_water: a third published sensor, `sensor.hot_water_residual_power`

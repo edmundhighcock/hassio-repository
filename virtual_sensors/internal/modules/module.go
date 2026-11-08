@@ -33,6 +33,14 @@ type OutputSpec struct {
 	// unavailable in Home Assistant, not every sensor this add-on
 	// publishes. See mqttpub.Publisher.PublishState.
 	PerEntityAvailability bool
+	// HasAttributes: if true, this sensor's discovery config also gets a
+	// `json_attributes_topic` (0.1.7), and an OutputUpdate for this
+	// ObjectID with AttributesJSON set has that JSON published retained
+	// to it. Used for structured, consumer-readable metadata (e.g. hot
+	// water's residual sensor: which known loads are currently excluded
+	// and the discontinuities that caused it) that doesn't belong in the
+	// numeric state itself.
+	HasAttributes bool
 }
 
 // StateUpdate is one Home Assistant state_changed event (or one history
@@ -56,6 +64,18 @@ type OutputUpdate struct {
 	// Value as a state. Only meaningful for outputs with
 	// PerEntityAvailability set; ignored otherwise.
 	Unavailable bool
+	// AttributesJSON, if non-empty, is published retained to this
+	// ObjectID's json_attributes_topic (see OutputSpec.HasAttributes).
+	// Already-marshalled JSON, not a Go value, so mqttpub stays ignorant
+	// of any module's attribute schema.
+	AttributesJSON string
+	// AttributesOnly, if true, means this update carries ONLY an
+	// attributes change (AttributesJSON) with nothing new to say about
+	// Value/Unavailable - e.g. a module reacting to something other than
+	// its own primary input tick. The publisher must publish the
+	// attributes topic and otherwise leave the state/availability topics
+	// untouched.
+	AttributesOnly bool
 }
 
 // InitialStater is optional: a module implementing it has its current

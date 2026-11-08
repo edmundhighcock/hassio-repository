@@ -35,12 +35,34 @@ independently of, the detector's own step detection/pairing and its two
 outputs above - the parity/replay tests below cover only those and are
 unaffected by this sensor's presence.
 
-- **Known-load gaps**: exactly the existing held-value (LOCF) rule
-  applies - a known load that stops reporting (goes `unavailable`, or
-  simply has nothing new to say) keeps contributing its LAST seen value
-  to the sum indefinitely; a load that has never reported at all
-  contributes nothing (effectively 0). This sensor does not add any new
-  staleness handling of its own - it inherits the detector's.
+- **Known-load gaps (0.1.7)**: a known load whose HA state becomes
+  `unavailable`/`unknown` is removed from the deduction IMMEDIATELY (no
+  held value) and re-added when it next reports a numeric value. A load
+  that is merely quiet but still `available` keeps the held-value rule
+  (HA logs only on change). At add-on start any known load not restored
+  or not yet seen is treated as missing (a synthetic `lost` event with
+  `delta_w` 0 is recorded) until its first numeric value, which is then
+  a normal `regained` event.
+- **Discontinuity attributes**: every loss/regain is a discontinuity,
+  published retained on the sensor's `json_attributes_topic`
+  (`virtual_sensors/hot_water_residual_power/attributes`) with every
+  state: `missing_loads` (excluded entity ids), `discontinuity_seq`
+  (int, +1 per event), `last_discontinuity` and
+  `recent_discontinuities` (last 10 min), each event being `{at (UTC
+  ISO-8601), entity, kind: "lost"|"regained", delta_w}` where `delta_w`
+  is the signed residual change caused by the event alone (+last value
+  on loss, -new value on regain). A consumer should not treat a jump
+  coincident with a new `discontinuity_seq` as a real load change.
+- **Detector**: uses the same residual. A candidate on/off step with a
+  non-zero-`delta_w` discontinuity within its reject window is rejected
+  by `rejectOK` (same window as the load-movement check), and the
+  floor/tentative-off comparisons subtract the discontinuities seen
+  since the cycle was opened/re-anchored.
+- **Leak while missing**: while a load is missing, any real change in
+  its draw is invisible and shows up in the residual. This is expected.
+- **Blind spot**: a plug that freezes while still reporting `available`
+  (stale value, no unavailable state) cannot be detected; its last value
+  keeps being deducted.
 - **Grid unavailable**: this is the one case this sensor DOES react to
   on its own. When the grid input (`grid_meter_power`) itself reports
   `unavailable`/`unknown`, `hot_water_residual_power` (only) goes

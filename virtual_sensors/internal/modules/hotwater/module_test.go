@@ -1,6 +1,7 @@
 package hotwater
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
@@ -83,6 +84,40 @@ func lastResidual(outs []modules.OutputUpdate) (val float64, unavailable bool, f
 		}
 	}
 	return
+}
+
+// lastResidualAttributes parses the last non-empty AttributesJSON for
+// OutResidualObjectID in outs - fails the test if there isn't one.
+func lastResidualAttributes(t *testing.T, outs []modules.OutputUpdate) residualAttributes {
+	t.Helper()
+	var raw string
+	for _, u := range outs {
+		if u.ObjectID == OutResidualObjectID && u.AttributesJSON != "" {
+			raw = u.AttributesJSON
+		}
+	}
+	if raw == "" {
+		t.Fatalf("no %s attributes published in %+v", OutResidualObjectID, outs)
+	}
+	var attrs residualAttributes
+	if err := json.Unmarshal([]byte(raw), &attrs); err != nil {
+		t.Fatalf("could not parse residual attributes JSON %q: %v", raw, err)
+	}
+	return attrs
+}
+
+// containsMissing reports whether entity is in attrs.MissingLoads. Every
+// known load not explicitly pushed a real value in a given test is
+// missing from module start (see logStartupMissingLoadsOnce) - tests
+// check membership, not the exact set, so they don't need to enumerate
+// every OTHER known load they never touch.
+func containsMissing(attrs residualAttributes, entity string) bool {
+	for _, e := range attrs.MissingLoads {
+		if e == entity {
+			return true
+		}
+	}
+	return false
 }
 
 func anyPowerZero(outs [][]modules.OutputUpdate) bool {
@@ -278,11 +313,15 @@ func TestResidualConvertsLoaverKwToW(t *testing.T) {
 	}
 }
 
-// TestResidualHoldsLastKnownLoadValueWhenUnavailable: a known load going
-// unavailable must NOT make the residual unavailable or drop it from the
-// sum - the existing held-value (LOCF) rule applies, same as the
-// detector's own knownSum.
-func TestResidualHoldsLastKnownLoadValueWhenUnavailable(t *testing.T) {
+// TestKnownLoadLossRemovesImmediatelyFromResidual (0.1.7): this
+// supersedes 0.1.6's held-value claim for an EXPLICIT unavailable/
+// unknown state. A known load going unavailable must be excluded from
+// knownSum IMMEDIATELY - no held value at all - so the residual jumps
+// up by exactly that load's last value, and the loss is recorded as a
+// discontinuity. The residual SENSOR itself stays available throughout
+// (only the grid going unavailable does that - see
+// TestResidualGoesUnavailableWhenGridUnavailableDetectorUnaffected).
+func TestKnownLoadLossRemovesImmediatelyFromResidual(t *testing.T) {
 	m := newTestModule(t)
 	pushLoad(t, m, "fridge_power", 1, 150)
 	outs := pushGrid(t, m, 5, 1150)
@@ -290,17 +329,279 @@ func TestResidualHoldsLastKnownLoadValueWhenUnavailable(t *testing.T) {
 		t.Fatalf("setup: residual = %v found=%v, want 1000", val, found)
 	}
 
-	pushLoadUnavailable(t, m, "fridge_power", 10)
+	lossOuts := pushLoadUnavailable(t, m, "fridge_power", 10)
+	attrs := lastResidualAttributes(t, lossOuts)
+	if !containsMissing(attrs, "fridge_power") {
+		t.Fatalf("missing_loads = %v, want fridge_power in it", attrs.MissingLoads)
+	}
+	if attrs.LastDiscontinuity == nil || attrs.LastDiscontinuity.Kind != "lost" ||
+		attrs.LastDiscontinuity.Entity != "fridge_power" || attrs.LastDiscontinuity.DeltaW != 150 {
+		t.Fatalf("last_discontinuity = %+v, want {lost fridge_power +150}", attrs.LastDiscontinuity)
+	}
+
 	outs = pushGrid(t, m, 15, 1150)
 	val, unavailable, found := lastResidual(outs)
 	if !found {
 		t.Fatalf("no %s output published after a known load went unavailable", OutResidualObjectID)
 	}
 	if unavailable {
-		t.Fatalf("residual marked unavailable because a KNOWN LOAD (not the grid) went unavailable - the held-value rule should apply instead")
+		t.Fatalf("residual itself must stay available - only the GRID going unavailable does that")
 	}
-	if val != 1000 {
-		t.Fatalf("residual = %v, want 1000 (fridge_power's held/last-known 150W still subtracted)", val)
+	if val != 1150 {
+		t.Fatalf("residual = %v, want 1150 (fridge_power's 150W no longer held/subtracted - 0.1.7)", val)
+	}
+}
+
+// TestQuietButAvailableLoadStillKeepsHeldValue: a load that simply has
+// nothing NEW to report (Home Assistant only logs a sensor on change) -
+// as opposed to one that explicitly reports unavailable/unknown - still
+// keeps contributing its last numeric value, exactly as before 0.1.7.
+func TestQuietButAvailableLoadStillKeepsHeldValue(t *testing.T) {
+	m := newTestModule(t)
+	pushLoad(t, m, "fridge_power", 1, 150)
+	for _, s := range []struct{ t, v float64 }{{5, 1150}, {100, 1150}, {400, 1180}} {
+		outs := pushGrid(t, m, s.t, s.v)
+		val, unavailable, found := lastResidual(outs)
+		if !found || unavailable {
+			t.Fatalf("t=%.0f: residual missing/unavailable (found=%v unavailable=%v)", s.t, found, unavailable)
+		}
+		if val != s.v-150 {
+			t.Fatalf("t=%.0f: residual = %v, want %v (fridge_power's held 150W - quiet, never unavailable)", s.t, val, s.v-150)
+		}
+	}
+}
+
+// TestKnownLoadRegainDropsResidualByNewValue: a known load's first
+// numeric sample after being missing (or never seen) is a "regained"
+// discontinuity, and resumes being subtracted from the residual
+// immediately.
+func TestKnownLoadRegainDropsResidualByNewValue(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 1150)
+	// Already missing since module start (never seen) - explicitly
+	// reporting unavailable again here is a no-op, not a new event.
+	pushLoadUnavailable(t, m, "fridge_power", 15)
+	outs := pushLoad(t, m, "fridge_power", 20, 150) // first real value -> "regained"
+	attrs := lastResidualAttributes(t, outs)
+	if attrs.LastDiscontinuity == nil || attrs.LastDiscontinuity.Kind != "regained" ||
+		attrs.LastDiscontinuity.Entity != "fridge_power" || attrs.LastDiscontinuity.DeltaW != -150 {
+		t.Fatalf("last_discontinuity = %+v, want {regained fridge_power -150}", attrs.LastDiscontinuity)
+	}
+	residOuts := pushGrid(t, m, 30, 1150)
+	val, _, found := lastResidual(residOuts)
+	if !found || val != 1000 {
+		t.Fatalf("residual = %v found=%v, want 1000 (1150 grid - 150W fridge_power, subtracted again)", val, found)
+	}
+}
+
+// TestEVLossInKwRecordedAsWattsAndDoesNotFireDetector: loaver_power (the
+// EV charger) reports kW, like every other input - a loss/regain's
+// delta_w must be recorded in W (matching the already-converted value),
+// and losing its signal must not, by itself, make the detector think
+// the heater stepped - the grid itself hasn't moved at all (the EV is
+// still really drawing the same power; only its OWN sensor went dark).
+func TestEVLossInKwRecordedAsWattsAndDoesNotFireDetector(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 3500)
+	pushLoad(t, m, "loaver_power", 15, 2.5) // kW -> held as 2500W
+	outs := pushGrid(t, m, 20, 3500)
+	if val, _, found := lastResidual(outs); !found || val != 1000 {
+		t.Fatalf("setup: residual = %v found=%v, want 1000 (3500 grid - 2500W EV)", val, found)
+	}
+
+	lossOuts := pushLoadUnavailable(t, m, "loaver_power", 25)
+	attrs := lastResidualAttributes(t, lossOuts)
+	if attrs.LastDiscontinuity == nil || attrs.LastDiscontinuity.Kind != "lost" ||
+		attrs.LastDiscontinuity.Entity != "loaver_power" || attrs.LastDiscontinuity.DeltaW != 2500 {
+		t.Fatalf("last_discontinuity = %+v, want {lost loaver_power +2500} (W, not kW)", attrs.LastDiscontinuity)
+	}
+
+	outs = pushGrid(t, m, 30, 3500) // grid unchanged - EV is still really drawing 2.5kW
+	if val, _, _ := lastResidual(outs); val != 3500 {
+		t.Fatalf("residual = %v, want 3500 (grid unchanged, EV's 2500W no longer subtracted)", val)
+	}
+	if m.open {
+		t.Fatalf("the administrative jump alone must not open a cycle")
+	}
+}
+
+// TestRealLoadChangeWhileMissingLeaksIntoResidual: once a known load is
+// flagged missing, any further REAL change in its consumption shows up
+// in the grid reading as always, but there is no sensor value to
+// subtract it with - so it leaks straight through into the residual.
+// This is expected and documented (DOCS.md), not corrected by this
+// release: the detector cannot tell "the invisible load's own draw
+// changed" apart from "something else did".
+func TestRealLoadChangeWhileMissingLeaksIntoResidual(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 1150)
+	pushLoad(t, m, "fridge_power", 15, 150)
+	pushGrid(t, m, 20, 1150) // residual settles at 1000
+	pushLoadUnavailable(t, m, "fridge_power", 25)
+
+	outs := pushGrid(t, m, 30, 1400) // the fridge's real draw rose while missing
+	val, unavailable, found := lastResidual(outs)
+	if !found || unavailable {
+		t.Fatalf("residual output missing/unavailable: val=%v unavailable=%v found=%v", val, unavailable, found)
+	}
+	if val != 1400 {
+		t.Fatalf("residual = %v, want 1400 (grid's real rise leaks straight through while fridge_power is missing)", val)
+	}
+	attrs := lastResidualAttributes(t, outs)
+	if !containsMissing(attrs, "fridge_power") {
+		t.Fatalf("missing_loads = %v, want fridge_power still in it", attrs.MissingLoads)
+	}
+}
+
+// TestSeveralDiscontinuitiesWithinTenMinutes: a consumer whose own check
+// window spans several loss/regain events must be able to sum delta_w
+// across all of them from recent_discontinuities.
+func TestSeveralDiscontinuitiesWithinTenMinutes(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 1150)
+	pushLoad(t, m, "fridge_power", 15, 150)
+	pushLoad(t, m, "washing_machine_power", 16, 500)
+	setupOuts := pushGrid(t, m, 20, 1150)
+	seqBefore := lastResidualAttributes(t, setupOuts).DiscontinuitySeq
+
+	pushLoadUnavailable(t, m, "fridge_power", 30)                 // A: fridge lost (+150)
+	pushLoad(t, m, "fridge_power", 60, 160)                       // B: fridge regained (-160)
+	pushLoadUnavailable(t, m, "washing_machine_power", 90)        // C: wm lost (+500)
+	finalOuts := pushLoad(t, m, "washing_machine_power", 120, 520) // D: wm regained (-520)
+
+	attrs := lastResidualAttributes(t, finalOuts)
+	if gotNew := attrs.DiscontinuitySeq - seqBefore; gotNew != 4 {
+		t.Fatalf("discontinuity_seq advanced by %d, want 4 (one per loss/regain above)", gotNew)
+	}
+	if len(attrs.RecentDiscontinuities) < 4 {
+		t.Fatalf("recent_discontinuities has only %d entries, want at least the 4 just recorded (well within the 10-minute window)", len(attrs.RecentDiscontinuities))
+	}
+	last4 := attrs.RecentDiscontinuities[len(attrs.RecentDiscontinuities)-4:]
+	wantKinds := []string{"lost", "regained", "lost", "regained"}
+	wantEntities := []string{"fridge_power", "fridge_power", "washing_machine_power", "washing_machine_power"}
+	wantDeltas := []float64{150, -160, 500, -520}
+	for i, ev := range last4 {
+		if ev.Kind != wantKinds[i] || ev.Entity != wantEntities[i] || ev.DeltaW != wantDeltas[i] {
+			t.Fatalf("event %d = %+v, want {%s %s %v}", i, ev, wantKinds[i], wantEntities[i], wantDeltas[i])
+		}
+	}
+	var sum float64
+	for _, ev := range last4 {
+		sum += ev.DeltaW
+	}
+	if sum != 150-160+500-520 {
+		t.Fatalf("sum of the 4 delta_w = %v, want %v", sum, 150-160+500-520)
+	}
+	if attrs.LastDiscontinuity == nil || *attrs.LastDiscontinuity != last4[3] {
+		t.Fatalf("last_discontinuity = %+v, want the most recent event %+v", attrs.LastDiscontinuity, last4[3])
+	}
+}
+
+// TestDiscontinuitiesOlderThanTenMinutesArePruned: recent_discontinuities
+// only covers the last discontinuityWindowS (10 minutes);
+// discontinuity_seq is unaffected by pruning (it is a monotonic "how
+// many ever" counter).
+func TestDiscontinuitiesOlderThanTenMinutesArePruned(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 1150)
+	pushLoad(t, m, "fridge_power", 15, 150)
+	lossOuts := pushLoadUnavailable(t, m, "fridge_power", 20)
+	seqAtLoss := lastResidualAttributes(t, lossOuts).DiscontinuitySeq
+
+	laterOuts := pushGrid(t, m, 20+discontinuityWindowS+60, 1150)
+	attrs := lastResidualAttributes(t, laterOuts)
+	if attrs.DiscontinuitySeq != seqAtLoss {
+		t.Fatalf("discontinuity_seq = %d, want unchanged %d (nothing new happened)", attrs.DiscontinuitySeq, seqAtLoss)
+	}
+	for _, ev := range attrs.RecentDiscontinuities {
+		if ev.Entity == "fridge_power" && ev.Kind == "lost" {
+			t.Fatalf("the fridge_power loss is still in recent_discontinuities %.0fs later, want pruned", discontinuityWindowS+60)
+		}
+	}
+}
+
+// TestCandidateStepCoincidentWithDiscontinuityIsRejected: the DETECTOR
+// must not count a discontinuity as an on/off step. A candidate step
+// that falls within RejectWindowS of a known-load loss/regain is
+// rejected by rejectOK (0.1.7's extension of its existing coincident-
+// load-swing check), same as a too-big a swing in the load's own
+// reported values would be.
+func TestCandidateStepCoincidentWithDiscontinuityIsRejected(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 500)
+	pushLoad(t, m, "fridge_power", 15, 150)
+	pushGrid(t, m, 20, 500)
+	pushLoadUnavailable(t, m, "fridge_power", 25) // real loss, within 60s of the step below
+	pushGrid(t, m, 30, 3500)  // +3000, in-band
+	pushGrid(t, m, 130, 3480) // flush the chain into an event
+	if m.open {
+		t.Fatalf("a candidate step coincident with a known-load discontinuity must be rejected, not opened")
+	}
+}
+
+// TestCandidateStepFarFromDiscontinuityStillOpens is the control for the
+// test above: the SAME kind of step, far enough from any discontinuity,
+// must still be detected normally.
+func TestCandidateStepFarFromDiscontinuityStillOpens(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 500)
+	pushLoad(t, m, "fridge_power", 15, 150)
+	pushGrid(t, m, 20, 500)
+	pushLoadUnavailable(t, m, "fridge_power", 25) // loss well before the window below
+	pushGrid(t, m, 300, 500)                      // let plenty of time pass
+	pushGrid(t, m, 320, 3500)                     // +3000, in-band
+	pushGrid(t, m, 420, 3480)                      // flush
+	if !m.open {
+		t.Fatalf("a step far from any discontinuity must still be detected normally")
+	}
+}
+
+// TestRegainMidCycleDoesNotFalselyCloseViaFloorCheck: the DETECTOR must
+// not count a discontinuity as an on/off step - this is the continuous
+// (floor/pendingOff-ceiling) half of that requirement, protected by
+// correctedResidual rather than rejectOK's window exclusion (see that
+// field's doc comment for why). A known load's first-ever sample
+// arriving mid-cycle (a "regained" event) can be large enough to blow
+// straight through FloorTol on its own; it must not force-close a cycle
+// the heater never actually left.
+func TestRegainMidCycleDoesNotFalselyCloseViaFloorCheck(t *testing.T) {
+	m := newTestModule(t)
+	pushGrid(t, m, 10, 500)
+	pushGrid(t, m, 20, 500)
+	pushGrid(t, m, 40, 3500)  // +3000 on-step
+	pushGrid(t, m, 140, 3480) // flush -> cycle opens, onBaseline~500, onMagnitude=3000
+	if !m.open {
+		t.Fatalf("setup: cycle did not open")
+	}
+
+	// The EV starts reporting for the first time, mid-cycle: DeltaW is
+	// -2500W, far more than FloorTol (600W) - left uncorrected this
+	// would read as a floor violation.
+	regainOuts := pushLoad(t, m, "loaver_power", 150, 2.5) // kW -> 2500W
+	attrs := lastResidualAttributes(t, regainOuts)
+	if attrs.LastDiscontinuity == nil || attrs.LastDiscontinuity.Kind != "regained" ||
+		attrs.LastDiscontinuity.Entity != "loaver_power" || attrs.LastDiscontinuity.DeltaW != -2500 {
+		t.Fatalf("last_discontinuity = %+v, want {regained loaver_power -2500}", attrs.LastDiscontinuity)
+	}
+
+	for _, tt := range []float64{160, 200, 260, 300} {
+		pushGrid(t, m, tt, 3480) // flat - the heater is still genuinely on
+	}
+	if !m.open {
+		t.Fatalf("cycle closed due to the EV regain's administrative jump - should have been corrected")
+	}
+	if m.energyKwh != 0 {
+		t.Fatalf("energyKwh = %v, want 0 (nothing should have closed yet)", m.energyKwh)
+	}
+
+	pushGrid(t, m, 360, 500) // -2980 real off-step
+	pushGrid(t, m, 460, 500)
+	pushGrid(t, m, 560, 500)
+	if m.open {
+		t.Fatalf("cycle never closed on the real off-step")
+	}
+	if m.energyKwh <= 0 {
+		t.Fatalf("energyKwh = %v, want > 0", m.energyKwh)
 	}
 }
 

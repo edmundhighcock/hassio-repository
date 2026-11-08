@@ -62,6 +62,13 @@ const (
 // right at the edge.
 const activityRetentionS = 45 * 60.0
 
+// discontinuityWindowS is how long a known-load loss/regain event stays
+// in the published recent_discontinuities attribute (0.1.7) - see
+// residualAttributesJSON. Comfortably longer than RejectWindowS (60s),
+// which is the only other place discontinuities are consulted
+// internally (rejectOK), so this one prune covers both uses.
+const discontinuityWindowS = 600.0
+
 func init() {
 	modules.Register("hot_water", func() modules.Module { return New() })
 }
@@ -126,6 +133,40 @@ func (r *loadRing) stable(loT, hiT, anchor, tol float64) bool {
 	return true
 }
 
+// DiscontinuityEvent (0.1.7) records one known-load loss/regain
+// transition: a jump in the published residual caused ENTIRELY by
+// removing/re-adding that load from the live sum (knownSum), not by any
+// real change in consumption - see OnStateUpdate's load-availability
+// handling and DOCS.md "Entities published". Published (as part of
+// residualAttributes, below) via hot_water_residual_power's
+// json_attributes_topic so a consumer can tell a real jump apart from
+// this administrative one.
+type DiscontinuityEvent struct {
+	At     time.Time `json:"at"`
+	Entity string    `json:"entity"`
+	Kind   string    `json:"kind"` // "lost" | "regained"
+	// DeltaW is the signed change in the published residual that this
+	// event ALONE caused: +the load's last known value on loss (it
+	// stops being subtracted, so residual jumps up by that much), -the
+	// load's newly reported value on regain (it starts being subtracted
+	// again, so residual drops by that much). Zero for the synthetic
+	// "lost" events recorded for a load that has simply never reported
+	// yet (see logStartupMissingLoadsOnce) - nothing has actually
+	// changed yet, so there is no real jump to flag; this also means
+	// such startup-only events are invisible to rejectOK's and
+	// handleEvent's discontinuity checks (see there), on purpose.
+	DeltaW float64 `json:"delta_w"`
+}
+
+// residualAttributes is hot_water_residual_power's json_attributes_topic
+// payload shape - see residualAttributesJSON.
+type residualAttributes struct {
+	MissingLoads          []string             `json:"missing_loads"`
+	DiscontinuitySeq      int                  `json:"discontinuity_seq"`
+	LastDiscontinuity     *DiscontinuityEvent  `json:"last_discontinuity,omitempty"`
+	RecentDiscontinuities []DiscontinuityEvent `json:"recent_discontinuities"`
+}
+
 // persistedMergedEvent is the JSON shape of one detect.MergedEvent, used to
 // persist the pending staged-reheat buffer below.
 type persistedMergedEvent struct {
@@ -163,6 +204,14 @@ type persistedState struct {
 	PendingOff         *persistedMergedEvent `json:"pending_off,omitempty"`
 	PendingOffDeadline float64               `json:"pending_off_deadline,omitempty"`
 	OnBaseline         float64               `json:"on_baseline,omitempty"`
+	// OnLoadCorrection (0.1.7) - see Module.onLoadCorrection's doc
+	// comment. Persisted alongside OnBaseline/OnMagnitude so a restart
+	// mid-cycle doesn't lose a correction already accumulated for THIS
+	// open cycle. Deliberately NOT extended to the discontinuity log
+	// itself (discontinuities/discontinuitySeq/missing-tracking all
+	// begin fresh every start - see logStartupMissingLoadsOnce's doc
+	// comment and DOCS.md "Entities published" for why).
+	OnLoadCorrection float64 `json:"on_load_correction,omitempty"`
 }
 
 // Module is the hot_water virtual sensor.
@@ -211,6 +260,31 @@ type Module struct {
 	maxDeficit   float64
 	dipTolerated bool
 
+	// onLoadCorrection (0.1.7) is the running sum of DeltaW for every
+	// known-load discontinuity (loss/regain) seen WHILE this cycle has
+	// been open, reset to 0 every time onBaseline is (re)anchored (a
+	// fresh open or a re-anchor on a later on-step - see handleEvent).
+	// correctedResidual (OnStateUpdate) subtracts it from the published
+	// residual before comparing against floor/ceiling, so those
+	// comparisons stay on the SAME known-load basis onBaseline/
+	// onMagnitude were captured on, instead of being fooled by a jump
+	// that is administrative, not physical - see OnStateUpdate's
+	// correctedResidual doc comment for the full rationale and why this
+	// is the chosen alternative to rejectOK-style window exclusion for
+	// this (continuous, not discrete-candidate) check.
+	onLoadCorrection float64
+
+	// discontinuities is every known-load loss/regain event (and the
+	// synthetic startup "lost" ones - see logStartupMissingLoadsOnce)
+	// still within discontinuityWindowS, oldest first. discontinuitySeq
+	// is a monotonic counter, incremented on every event regardless of
+	// pruning (so a consumer can detect a gap in its own polling).
+	// Neither is persisted - see persistedState.OnLoadCorrection's doc
+	// comment.
+	discontinuities      []DiscontinuityEvent
+	discontinuitySeq     int
+	startupMissingLogged bool
+
 	// pendingOff holds a tentative off-candidate awaiting PostOffDwellS of
 	// confirmation that the residual actually stays down - the live,
 	// streaming equivalent of detect.go's post-off dwell check
@@ -237,6 +311,7 @@ func (m *Module) Name() string { return "hot_water" }
 // (the open cycle's step, or 0) as soon as MQTT is connected.
 func (m *Module) InitialStates() []modules.OutputUpdate {
 	now := time.Now().UTC()
+	nowT := epochSeconds(now)
 	power := 0.0
 	if m.open {
 		power = m.onMagnitude
@@ -245,13 +320,18 @@ func (m *Module) InitialStates() []modules.OutputUpdate {
 		{ObjectID: OutPowerObjectID, Time: now, Value: power},
 		{ObjectID: OutEnergyObjectID, Time: now, Value: m.energyKwh},
 	}
+	// The discontinuity LOG is always empty at this point (it is never
+	// persisted - see persistedState.OnLoadCorrection's doc comment),
+	// but missing_loads is already accurate from whatever lastLoad
+	// restored (or didn't).
+	attrs := m.residualAttributesJSON(nowT)
 	if m.haveLastGrid {
 		out = append(out, modules.OutputUpdate{
 			ObjectID: OutResidualObjectID, Time: now,
-			Value: math.Round(m.lastGrid.V - m.knownSum()),
+			Value: math.Round(m.lastGrid.V - m.knownSum()), AttributesJSON: attrs,
 		})
 	} else {
-		out = append(out, modules.OutputUpdate{ObjectID: OutResidualObjectID, Time: now, Unavailable: true})
+		out = append(out, modules.OutputUpdate{ObjectID: OutResidualObjectID, Time: now, Unavailable: true, AttributesJSON: attrs})
 	}
 	return out
 }
@@ -286,6 +366,10 @@ func (m *Module) Outputs() []modules.OutputSpec {
 			// which keep publishing from held/last-known values exactly
 			// as before - see DOCS.md "Entities published".
 			PerEntityAvailability: true,
+			// json_attributes_topic (0.1.7): missing_loads/discontinuity
+			// bookkeeping - see residualAttributesJSON and DOCS.md
+			// "Entities published".
+			HasAttributes: true,
 		},
 	}
 }
@@ -318,6 +402,7 @@ func (m *Module) Init(persisted []byte) error {
 		m.pendingStage = append(m.pendingStage, detect.MergedEvent{TStart: pe.TStart, TEnd: pe.TEnd, Magnitude: pe.Magnitude})
 	}
 	m.onBaseline = ps.OnBaseline
+	m.onLoadCorrection = ps.OnLoadCorrection
 	m.pendingOffDeadline = ps.PendingOffDeadline
 	if ps.PendingOff != nil {
 		ev := detect.MergedEvent{TStart: ps.PendingOff.TStart, TEnd: ps.PendingOff.TEnd, Magnitude: ps.PendingOff.Magnitude}
@@ -343,6 +428,7 @@ func (m *Module) Persist() ([]byte, error) {
 		ps.PendingStage = append(ps.PendingStage, persistedMergedEvent{TStart: pe.TStart, TEnd: pe.TEnd, Magnitude: pe.Magnitude})
 	}
 	ps.OnBaseline = m.onBaseline
+	ps.OnLoadCorrection = m.onLoadCorrection
 	ps.PendingOffDeadline = m.pendingOffDeadline
 	if m.pendingOff != nil {
 		ps.PendingOff = &persistedMergedEvent{TStart: m.pendingOff.TStart, TEnd: m.pendingOff.TEnd, Magnitude: m.pendingOff.Magnitude}
@@ -365,9 +451,33 @@ func (m *Module) isOff(mag float64) bool { return -m.params.StepHi <= mag && mag
 // rejectOK checks every known load for movement > RejectLoadDelta within
 // RejectWindowS of [tStart, tEnd] - the live equivalent of detect's
 // MakeArrayRejectCheck, against the short rolling ring buffers instead of
-// the full series (see loadRing).
+// the full series (see loadRing) - AND (0.1.7) also rejects if any REAL
+// known-load discontinuity (a loss or regain edge with a nonzero DeltaW -
+// see DiscontinuityEvent) falls in that same window.
+//
+// This is the chosen way to satisfy "a discontinuity must not count as
+// an on/off step" for candidate steps specifically (the continuous
+// floor/pendingOff-ceiling checks are handled separately - see
+// correctedResidual in OnStateUpdate): a load whose signal just vanished
+// or just came back is, for that moment, an unverifiable swing of
+// unknown size in the RAW GRID series too (its real consumption doesn't
+// stop just because its sensor did) - exactly the kind of ambiguity
+// rejectOK already exists to reject, so this reuses its window and
+// verdict rather than inventing a second mechanism. The synthetic
+// startup "lost" events (DeltaW==0 - see logStartupMissingLoadsOnce) are
+// deliberately excluded: nothing has actually changed at module start,
+// so there is nothing for a step to be confused with.
 func (m *Module) rejectOK(tStart, tEnd float64) bool {
 	loT, hiT := tStart-m.params.RejectWindowS, tEnd+m.params.RejectWindowS
+	for _, ev := range m.discontinuities {
+		if ev.DeltaW == 0 {
+			continue
+		}
+		evT := epochSeconds(ev.At)
+		if evT >= loT && evT <= hiT {
+			return false
+		}
+	}
 	names := make([]string, 0, len(m.loads))
 	for n := range m.loads {
 		names = append(names, n)
@@ -578,6 +688,142 @@ func abs(v float64) float64 {
 	return v
 }
 
+// epochSeconds is the inverse of unixTime: fractional Unix seconds for a
+// time.Time, matching how every other timestamp in this module (t) is
+// computed from a modules.StateUpdate.Time.
+func epochSeconds(tm time.Time) float64 {
+	return float64(tm.UnixNano()) / 1e9
+}
+
+// pruneDiscontinuities drops anything older than discontinuityWindowS
+// relative to nowT from m.discontinuities. discontinuitySeq is NOT
+// affected - it is a monotonic "how many events ever" counter, not a
+// count of what's currently buffered.
+func (m *Module) pruneDiscontinuities(nowT float64) {
+	cut := nowT - discontinuityWindowS
+	i := 0
+	for i < len(m.discontinuities) && epochSeconds(m.discontinuities[i].At) < cut {
+		i++
+	}
+	if i > 0 {
+		m.discontinuities = m.discontinuities[i:]
+	}
+}
+
+// recordDiscontinuity appends one known-load loss/regain event, prunes
+// the log, bumps discontinuitySeq, and - while a cycle is open - folds
+// deltaW into onLoadCorrection (see that field's doc comment). Returns
+// an attributes-only OutputUpdate for hot_water_residual_power so a
+// consumer sees the new missing_loads list/event immediately, without
+// waiting for the next grid sample.
+func (m *Module) recordDiscontinuity(t float64, entity, kind string, deltaW float64) []modules.OutputUpdate {
+	m.discontinuities = append(m.discontinuities, DiscontinuityEvent{
+		At: unixTime(t).UTC(), Entity: entity, Kind: kind, DeltaW: deltaW,
+	})
+	m.pruneDiscontinuities(t)
+	m.discontinuitySeq++
+	if m.open && deltaW != 0 {
+		m.onLoadCorrection += deltaW
+	}
+	return []modules.OutputUpdate{{
+		ObjectID: OutResidualObjectID, Time: unixTime(t),
+		AttributesOnly: true, AttributesJSON: m.residualAttributesJSON(t),
+	}}
+}
+
+// residualAttributesJSON builds hot_water_residual_power's
+// json_attributes_topic payload: which known loads are currently
+// excluded from knownSum (missing_loads), and the discontinuity log
+// (see DiscontinuityEvent, residualAttributes). missing_loads is
+// computed fresh from m.lastLoad every call, so it is always accurate
+// even if recordDiscontinuity was never called (e.g. right at Init,
+// before logStartupMissingLoadsOnce has run).
+func (m *Module) residualAttributesJSON(nowT float64) string {
+	m.pruneDiscontinuities(nowT)
+	missing := make([]string, 0, len(KnownLoadEntities))
+	for _, name := range KnownLoadEntities {
+		if _, ok := m.lastLoad[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	attrs := residualAttributes{
+		MissingLoads:          missing,
+		DiscontinuitySeq:      m.discontinuitySeq,
+		RecentDiscontinuities: append([]DiscontinuityEvent{}, m.discontinuities...),
+	}
+	if len(m.discontinuities) > 0 {
+		last := m.discontinuities[len(m.discontinuities)-1]
+		attrs.LastDiscontinuity = &last
+	}
+	b, err := json.Marshal(attrs)
+	if err != nil {
+		log.Printf("hot_water: WARNING could not marshal residual attributes: %v", err)
+		return ""
+	}
+	return string(b)
+}
+
+// logStartupMissingLoadsOnce runs exactly once per process start, on the
+// very first OnStateUpdate call (whichever entity triggers it - grid or
+// a known load). For every known load NOT already in m.lastLoad (either
+// genuinely never seen, e.g. a fresh install, or already excluded at
+// the moment state was last persisted, since a missing load is never
+// written back into LastLoadT/LastLoadV - see persistedState's doc
+// comment), it records a synthetic "lost" event with DeltaW=0 (nothing
+// has actually jumped yet - see DiscontinuityEvent's doc comment).
+//
+// Chosen design (0.1.7, "Restored state at add-on start"): the
+// discontinuity LOG and missing-tracking always begin fresh - this is
+// what makes an ordinary restart (where most/all known loads WERE
+// restored into lastLoad) silent here, while a load that is new or was
+// already excluded is flagged as missing from the very first published
+// residual, and its eventual first real sample is then a normal
+// "regained" transition (see the load branch of OnStateUpdate) -
+// completing a coherent lost-then-regained lifecycle rather than
+// silently starting "already known".
+func (m *Module) logStartupMissingLoadsOnce(t float64) []modules.OutputUpdate {
+	if m.startupMissingLogged {
+		return nil
+	}
+	m.startupMissingLogged = true
+	var out []modules.OutputUpdate
+	for _, name := range KnownLoadEntities {
+		if _, ok := m.lastLoad[name]; !ok {
+			out = append(out, m.recordDiscontinuity(t, name, "lost", 0)...)
+		}
+	}
+	return out
+}
+
+// handleLoadUpdate applies one known-load (non-grid) state update: the
+// existing held-value rule for a quiet-but-available load (HA only logs
+// on change, so simply not updating lastLoad already holds it), and
+// (0.1.7) immediate removal from knownSum - no held value at all - the
+// moment this load's own state explicitly reports unavailable/unknown,
+// restored the moment it next reports a numeric value. Each such
+// transition is a discontinuity (see recordDiscontinuity); a quiet
+// available->available update (even a real value change) is not.
+func (m *Module) handleLoadUpdate(t float64, u modules.StateUpdate) []modules.OutputUpdate {
+	prev, wasPresent := m.lastLoad[u.EntityID]
+	if u.Available {
+		m.lastLoad[u.EntityID] = detect.Point{T: t, V: u.Value}
+		if m.loads[u.EntityID] == nil {
+			m.loads[u.EntityID] = &loadRing{}
+		}
+		m.loads[u.EntityID].push(t, u.Value, activityRetentionS)
+		if !wasPresent {
+			return m.recordDiscontinuity(t, u.EntityID, "regained", -u.Value)
+		}
+		return nil
+	}
+	if wasPresent {
+		delete(m.lastLoad, u.EntityID)
+		return m.recordDiscontinuity(t, u.EntityID, "lost", prev.V)
+	}
+	// Already missing (another unavailable/unknown update) - no change.
+	return nil
+}
+
 // OnStateUpdate implements modules.Module.
 func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	t := float64(u.Time.UnixNano()) / 1e9
@@ -586,6 +832,9 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	}
 	m.processedUntil = t
 
+	var out []modules.OutputUpdate
+	out = append(out, m.logStartupMissingLoadsOnce(t)...)
+
 	// loaver_power (the EV charger) reports kW; every other input is W.
 	// The backfill converts by InfluxDB measurement; live has no unit, so
 	// it is fixed here.
@@ -593,18 +842,14 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		u.Value *= 1000
 	}
 	if u.EntityID != GridEntity {
-		if u.Available {
-			m.lastLoad[u.EntityID] = detect.Point{T: t, V: u.Value}
-			if m.loads[u.EntityID] == nil {
-				m.loads[u.EntityID] = &loadRing{}
-			}
-			m.loads[u.EntityID].push(t, u.Value, activityRetentionS)
-		}
 		// A known load changing does not, on its own, step the grid
 		// residual - only a fresh grid sample re-evaluates the residual
 		// below. The reject-check rings above are consulted when a grid
-		// step is later seen.
-		return nil
+		// step is later seen. handleLoadUpdate may still return an
+		// attributes-only update of its own, e.g. this load just went
+		// missing/came back (0.1.7).
+		out = append(out, m.handleLoadUpdate(t, u)...)
+		return out
 	}
 
 	if !u.Available {
@@ -613,24 +858,59 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		// residual sensor reacts to a grid outage, going unavailable so a
 		// downstream consumer can fail safe rather than read a stale or
 		// fabricated number.
-		return []modules.OutputUpdate{{ObjectID: OutResidualObjectID, Time: u.Time, Unavailable: true}}
+		out = append(out, modules.OutputUpdate{
+			ObjectID: OutResidualObjectID, Time: u.Time, Unavailable: true,
+			AttributesJSON: m.residualAttributesJSON(t),
+		})
+		return out
 	}
 
-	var out []modules.OutputUpdate
+	// residual (0.1.7): grid minus the LIVE sum of every CURRENTLY
+	// PRESENT known load - a load explicitly reporting
+	// unavailable/unknown is excluded immediately, not held at its last
+	// value (see handleLoadUpdate); this is the one, single residual
+	// definition, used both for the published sensor below and for the
+	// detector's own floor/pendingOff-ceiling checks further down (via
+	// correctedResidual) - see OnStateUpdate's correctedResidual doc
+	// comment for why those need a correction rather than using residual
+	// directly, even though it is "the same residual semantics".
 	residual := u.Value - m.knownSum()
 	m.residual.push(t, residual, m.params.StageWindowS)
 
 	// Published on every fresh grid sample, independent of step
-	// detection/pairing below: the live residual (grid minus every known
-	// load's held/LOCF value - see knownSum) rounded to the nearest
-	// whole W. A known load with no recent sample simply keeps
-	// contributing its last-seen value here too, same held-value rule
-	// the detector itself relies on (see KnownLoadEntities/m.lastLoad) -
-	// see DOCS.md "Entities published" for why this is not a defect.
+	// detection/pairing below: the live residual rounded to the nearest
+	// whole W, plus the current missing_loads/discontinuity attributes
+	// (0.1.7) - see residualAttributesJSON. A known load that is merely
+	// QUIET but still available keeps contributing its last-seen value
+	// here (handleLoadUpdate's held-value rule); one that has explicitly
+	// gone unavailable/unknown does not, and is flagged in missing_loads
+	// instead - see DOCS.md "Entities published".
 	out = append(out, modules.OutputUpdate{
 		ObjectID: OutResidualObjectID, Time: u.Time,
-		Value: math.Round(residual),
+		Value: math.Round(residual), AttributesJSON: m.residualAttributesJSON(t),
 	})
+
+	// correctedResidual (0.1.7): residual with every known-load
+	// discontinuity since the CURRENT open cycle's on-step/re-anchor
+	// backed out (see onLoadCorrection's doc comment) - used ONLY for
+	// the floor/pendingOff-ceiling comparisons below, which are
+	// continuous (evaluated every sample, not at discrete candidate-step
+	// boundaries) and compare against a threshold (onBaseline/
+	// onMagnitude) captured under a specific, earlier known-load-
+	// exclusion basis. Without this correction, a load regaining signal
+	// mid-cycle (residual drops by its newly-reported value) could blow
+	// through FloorTol and force-close a cycle the heater never actually
+	// left, and a load LOSING signal while a tentative off is pending
+	// (residual rises) could likewise be mistaken for the bounce-back
+	// that cancels it. The PUBLISHED residual above is never corrected -
+	// only this internal comparison is, so a consumer still sees the
+	// true (documented) jump. Candidate on/off STEPS themselves are
+	// protected separately, by rejectOK (see its doc comment) - this is
+	// the chosen alternative to that same window-exclusion approach for
+	// a continuous check, where a single short window cannot undo an
+	// administrative shift that, unlike a step, does not resolve itself
+	// a few samples later.
+	correctedResidual := residual - m.onLoadCorrection
 
 	m.onNewGridSample(t, u.Value, func(e detect.MergedEvent) {
 		m.admitMergedEvent(e, func(staged detect.MergedEvent) {
@@ -645,7 +925,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	// baseline, not the generic "did the ON plateau dip" one.
 	if m.pendingOff != nil {
 		ceiling := m.onBaseline + m.params.FloorTol
-		if residual > ceiling {
+		if correctedResidual > ceiling {
 			// Bounce-back within the dwell window: this wasn't the
 			// heater turning off, just a dip in a different load's own
 			// activity (see detect.go's MakePostOffLookup). Cancel and
@@ -676,7 +956,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	// power promptly rather than waiting for the next step.
 	if m.open {
 		floor := m.onMagnitude - m.params.FloorTol
-		deficit := floor - residual
+		deficit := floor - correctedResidual
 		if deficit > m.maxDeficit {
 			m.maxDeficit = deficit
 		}
@@ -712,6 +992,7 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 			m.onTime = e.TEnd
 			m.onMagnitude = e.Magnitude
 			m.onBaseline = m.residualAt(e.TStart)
+			m.onLoadCorrection = 0
 			m.maxDeficit = 0
 			m.belowFloor = false
 			m.dipTolerated = false
@@ -745,6 +1026,7 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 			m.onTime = e.TEnd
 			m.onMagnitude = e.Magnitude
 			m.onBaseline = m.residualAt(e.TStart)
+			m.onLoadCorrection = 0
 			m.pendingOff = nil
 			out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(e.TEnd), Value: e.Magnitude})
 		}

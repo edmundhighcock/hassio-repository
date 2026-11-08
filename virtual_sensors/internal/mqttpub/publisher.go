@@ -58,6 +58,12 @@ func perEntityAvailabilityTopic(objectID string) string {
 	return fmt.Sprintf("%s/%s/availability", nodeID, objectID)
 }
 
+// attributesTopic is the retained topic for one output that has
+// OutputSpec.HasAttributes set - see that field's doc comment.
+func attributesTopic(objectID string) string {
+	return fmt.Sprintf("%s/%s/attributes", nodeID, objectID)
+}
+
 // Connect blocks (with the caller's own retry loop expected around it -
 // see main.go) until the broker accepts the connection, then publishes
 // the LWT "online", discovery configs for every output, and subscribes to
@@ -128,7 +134,10 @@ type discoveryConfig struct {
 	UnitOfMeasurement string         `json:"unit_of_measurement,omitempty"`
 	StateTopic        string         `json:"state_topic"`
 	AvailabilityTopic string         `json:"availability_topic"`
-	Device            map[string]any `json:"device"`
+	// JSONAttributesTopic (0.1.7): set only when OutputSpec.HasAttributes
+	// is true - see that field's doc comment.
+	JSONAttributesTopic string         `json:"json_attributes_topic,omitempty"`
+	Device              map[string]any `json:"device"`
 }
 
 func stateTopic(objectID string) string {
@@ -161,6 +170,9 @@ func (p *Publisher) publishDiscovery() error {
 			StateTopic: stateTopic(o.ObjectID), AvailabilityTopic: avTopic,
 			Device: Device,
 		}
+		if o.HasAttributes {
+			cfg.JSONAttributesTopic = attributesTopic(o.ObjectID)
+		}
 		b, err := json.Marshal(cfg)
 		if err != nil {
 			return err
@@ -179,8 +191,25 @@ func (p *Publisher) publishDiscovery() error {
 // output's own availability topic instead of (Unavailable=true) or in
 // addition to (Unavailable=false, i.e. back online) publishing a state
 // value - see OutputSpec.PerEntityAvailability and OutputUpdate.Unavailable.
+// For an output with OutputSpec.HasAttributes set, a non-empty
+// u.AttributesJSON is published retained to its json_attributes_topic
+// alongside whatever else this call does; u.AttributesOnly=true means
+// THAT is all this call does (no state/availability topic is touched) -
+// used when a module has a fresh attributes snapshot to publish (e.g. a
+// known load newly lost/regained) without a fresh value of its own.
 func (p *Publisher) PublishState(u modules.OutputUpdate) error {
-	if spec, ok := p.outputByID[u.ObjectID]; ok && spec.PerEntityAvailability {
+	spec, known := p.outputByID[u.ObjectID]
+
+	if u.AttributesOnly {
+		if known && spec.HasAttributes && u.AttributesJSON != "" {
+			if tok := p.client.Publish(attributesTopic(u.ObjectID), 1, true, u.AttributesJSON); tok.Wait() && tok.Error() != nil {
+				return fmt.Errorf("publish attributes for %s: %w", u.ObjectID, tok.Error())
+			}
+		}
+		return nil
+	}
+
+	if known && spec.PerEntityAvailability {
 		payload := "online"
 		if u.Unavailable {
 			payload = "offline"
@@ -188,9 +217,16 @@ func (p *Publisher) PublishState(u modules.OutputUpdate) error {
 		if tok := p.client.Publish(perEntityAvailabilityTopic(u.ObjectID), 1, true, payload); tok.Wait() && tok.Error() != nil {
 			return fmt.Errorf("publish availability for %s: %w", u.ObjectID, tok.Error())
 		}
-		if u.Unavailable {
-			return nil // no state payload while unavailable
+	}
+
+	if known && spec.HasAttributes && u.AttributesJSON != "" {
+		if tok := p.client.Publish(attributesTopic(u.ObjectID), 1, true, u.AttributesJSON); tok.Wait() && tok.Error() != nil {
+			return fmt.Errorf("publish attributes for %s: %w", u.ObjectID, tok.Error())
 		}
+	}
+
+	if known && spec.PerEntityAvailability && u.Unavailable {
+		return nil // no state payload while unavailable
 	}
 	tok := p.client.Publish(stateTopic(u.ObjectID), 1, true, fmt.Sprintf("%g", u.Value))
 	tok.Wait()
