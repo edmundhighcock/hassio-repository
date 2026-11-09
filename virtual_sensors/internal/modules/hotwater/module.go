@@ -310,6 +310,11 @@ type Module struct {
 
 	energyKwh      float64
 	processedUntil float64
+
+	// sink/replay (0.2.0): the in-process signal hook (signals.go). Not
+	// persisted; never consulted by the module's own logic.
+	sink   func(any)
+	replay bool
 }
 
 func New() *Module {
@@ -741,6 +746,7 @@ func (m *Module) recordDiscontinuity(t float64, entity, kind string, deltaW floa
 	if m.open && deltaW != 0 {
 		m.onLoadCorrection += deltaW
 	}
+	m.signal(Discontinuity{T: unixTime(t).UTC(), Entity: entity, Kind: kind, DeltaW: deltaW, Seq: m.discontinuitySeq, Replay: m.replay})
 	return []modules.OutputUpdate{{
 		ObjectID: OutResidualObjectID, Time: unixTime(t),
 		AttributesOnly: true, AttributesJSON: m.residualAttributesJSON(t),
@@ -847,6 +853,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		return nil // already applied (warm-up replay overlapping persisted state)
 	}
 	m.processedUntil = t
+	m.replay = u.Replay
 
 	var out []modules.OutputUpdate
 	out = append(out, m.logStartupMissingLoadsOnce(t)...)
@@ -878,6 +885,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			ObjectID: OutResidualObjectID, Time: u.Time, Unavailable: true,
 			AttributesJSON: m.residualAttributesJSON(t),
 		})
+		m.signal(ResidualSample{T: u.Time, Available: false, MissingLoads: m.missingLoads(), DiscontinuitySeq: m.discontinuitySeq, Replay: m.replay})
 		return out
 	}
 
@@ -905,6 +913,9 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		ObjectID: OutResidualObjectID, Time: u.Time,
 		Value: math.Round(residual), AttributesJSON: m.residualAttributesJSON(t),
 	})
+	if m.sink != nil {
+		m.signal(ResidualSample{T: u.Time, W: math.Round(residual), Available: true, MissingLoads: m.missingLoads(), DiscontinuitySeq: m.discontinuitySeq, Replay: m.replay})
+	}
 
 	// correctedResidual (0.1.7): residual with every known-load
 	// discontinuity since the CURRENT open cycle's on-step/re-anchor
@@ -930,6 +941,10 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 
 	m.onNewGridSample(t, u.Value, func(e detect.MergedEvent) {
 		m.admitMergedEvent(e, func(staged detect.MergedEvent) {
+			if m.sink != nil && abs(staged.Magnitude) >= m.params.StepLo {
+				m.signal(MergedStep{TStart: unixTime(staged.TStart).UTC(), TEnd: unixTime(staged.TEnd).UTC(),
+					Magnitude: staged.Magnitude, Rejected: !m.rejectOK(staged.TStart, staged.TEnd), Replay: m.replay})
+			}
 			out = append(out, m.handleEvent(staged)...)
 		})
 	})
@@ -956,11 +971,15 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			off := *m.pendingOff
 			dur := off.TStart - m.onTime
 			out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(off.TStart), Value: 0})
+			closed := CycleClosed{OnTime: unixTime(m.onTime).UTC(), OffTime: unixTime(off.TStart).UTC(), Reason: "short", Replay: m.replay}
 			if dur >= m.params.MinOnDurationS {
 				power := (abs(m.onMagnitude) + abs(off.Magnitude)) / 2.0
-				m.energyKwh += power * (dur / 3600.0) / 1000.0
+				kwh := power * (dur / 3600.0) / 1000.0
+				m.energyKwh += kwh
 				out = append(out, modules.OutputUpdate{ObjectID: OutEnergyObjectID, Time: unixTime(off.TStart), Value: m.energyKwh})
+				closed.Accepted, closed.Kwh, closed.Reason = true, kwh, "dwell_confirmed"
 			}
+			m.signal(closed)
 			m.open = false
 			m.pendingOff = nil
 		}
@@ -983,6 +1002,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			} else if t-m.belowSince > m.params.FloorDipMaxS {
 				// Floor violated: reject the open cycle now, live.
 				out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: u.Time, Value: 0})
+				m.signal(CycleClosed{OnTime: unixTime(m.onTime).UTC(), OffTime: u.Time.UTC(), Reason: "floor", Replay: m.replay})
 				m.open = false
 				m.belowFloor = false
 			}
@@ -1014,6 +1034,7 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 			m.dipTolerated = false
 			m.pendingOff = nil
 			out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(e.TEnd), Value: e.Magnitude})
+			m.signal(CycleOpened{OnTime: unixTime(e.TEnd).UTC(), Magnitude: e.Magnitude, Replay: m.replay})
 		}
 		return out
 	}
@@ -1025,6 +1046,7 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 		// matches detect.PairEvents, which never retroactively credits a
 		// cycle it's about to force-close for running too long.
 		out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(m.onTime + m.params.MaxOnDurationS), Value: 0})
+		m.signal(CycleClosed{OnTime: unixTime(m.onTime).UTC(), OffTime: unixTime(m.onTime + m.params.MaxOnDurationS).UTC(), Reason: "timeout", Replay: m.replay})
 		m.open = false
 		m.pendingOff = nil
 		// Fall through: still evaluate e fresh, as if from OFF (matches
