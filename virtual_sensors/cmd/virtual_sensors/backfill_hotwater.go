@@ -37,7 +37,7 @@ func runHotWaterBackfill(influxURL, org, token, bucket string, from, to time.Tim
 	gridT, gridV := pointsToArrays(gridPoints)
 
 	loadArrays := map[string]detect.LoadSeries{}
-	for _, name := range hotwater.KnownLoadEntities {
+	for _, name := range hotwater.BackfillLoadEntities() {
 		pts, err := client.QueryEntity(ctx, bucket, name, from, to)
 		if err != nil {
 			return fmt.Errorf("querying %s: %w", name, err)
@@ -53,7 +53,7 @@ func runHotWaterBackfill(influxURL, org, token, bucket string, from, to time.Tim
 	}
 
 	knownSum := make([]float64, len(gridT))
-	for _, name := range hotwater.KnownLoadEntities {
+	for _, name := range hotwater.BackfillLoadEntities() {
 		ls := loadArrays[name]
 		merged := backfill.LocfMerge(gridT, ls.Times, ls.Values)
 		for i, v := range merged {

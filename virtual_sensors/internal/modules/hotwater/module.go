@@ -31,14 +31,30 @@ const (
 	GridEntity = "grid_meter_power"
 )
 
+// KnownLoadEntities are the metered loads the LIVE residual subtracts.
 var KnownLoadEntities = []string{
 	"loaver_power",
 	"washing_machine_power",
 	"sonoff_100168af89_power",
-	"sonoff_1001721983_power",
 	"guest_house_oil_heater_power",
 	"heat_pump_power_power",
 	"fridge_power",
+}
+
+// LegacyLoadEntities (0.2.0) are metered loads that have left Home
+// Assistant but still have history in the older InfluxDB buckets. The live
+// residual no longer subscribes to them (a departed device would sit in
+// missing_loads forever), but the backfill CLI still subtracts them so a
+// re-run over the period when they reported reproduces the same figures.
+// sonoff_1001721983_power is the spa floor-heating Sonoff, gone since 2024.
+var LegacyLoadEntities = []string{
+	"sonoff_1001721983_power",
+}
+
+// BackfillLoadEntities is every load the backfill subtracts: the live set
+// plus the legacy ones.
+func BackfillLoadEntities() []string {
+	return append(append([]string{}, KnownLoadEntities...), LegacyLoadEntities...)
 }
 
 const (

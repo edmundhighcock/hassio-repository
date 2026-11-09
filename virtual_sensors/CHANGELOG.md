@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- hot_water: `sonoff_1001721983_power` (the spa floor-heating Sonoff,
+  which left Home Assistant in 2024) is no longer a known load of the
+  live residual, so it stops sitting permanently in `missing_loads`. The
+  backfill CLI still subtracts it, so re-runs over the years when it
+  reported are unchanged.
+
 ## 0.1.7
 
 - hot_water: a known load reporting `unavailable`/`unknown` is dropped
