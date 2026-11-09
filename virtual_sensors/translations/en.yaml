@@ -32,3 +32,55 @@ configuration:
       GOMEMLIMIT - the Go runtime's soft heap limit, in MiB. Default 24
       targets well under 30MB resident on a memory-tight Raspberry Pi -
       see DOCS.md "Memory".
+  hwc_mode:
+    name: "Hot-water controller mode"
+    description: >-
+      shadow (default) runs the whole controller but never moves the
+      switch. live is the first of two keys: the controller acts only when
+      input_boolean.hot_water_controller_armed is also on. Needs the
+      hot_water_control module enabled. See DOCS.md "Hot-water controller".
+  hwc_off_limit_since_reheat_end_h:
+    name: "Tank clock (h)"
+    description: >-
+      OFF is allowed only while the last finished reheat ended at most
+      this long ago. Default 14; never more than 16.
+  hwc_evening_off_from:
+    name: "Evening from (HH:MM)"
+    description: >-
+      An OFF starting at or after this local time needs a finished reheat
+      earlier the same day. Default 18:00.
+  hwc_evening_off_requires_finished_reheat_today:
+    name: "Evening rule"
+    description: "Switch for the evening rule above. Default on."
+  hwc_stale_after_min:
+    name: "Input stale after (min)"
+    description: >-
+      The residual counts as stale after this long with no update (held
+      values count until then). Default 30.
+  hwc_boost_no_start_timeout_min:
+    name: "Boost: no-start timeout (min)"
+    description: "A boost ends if no reheat starts within this time. Default 30."
+  hwc_boost_max_h:
+    name: "Boost: maximum (h)"
+    description: "The cap on any boost. Default 2."
+  hwc_backstop_probe_h:
+    name: "Backstop probe (h of ON time)"
+    description: "Probe after this much switch-ON time with no genuine heater start. Default 10."
+  hwc_backstop_alert_h:
+    name: "Backstop alert (h of ON time)"
+    description: "Alert and hold ON after this much switch-ON time with no genuine start. Default 18."
+  hwc_max_moves_day:
+    name: "Maximum moves per 24 h"
+    description: "Default 8."
+  hwc_battery_floor_pct:
+    name: "Battery floor (%)"
+    description: "Below this the controller holds ON. Default 30."
+  hwc_planner_max_block_min:
+    name: "Planner: longest OFF period (min)"
+    description: "An optimisation choice, not a safety limit. Default 180."
+  hwc_min_saving_ore:
+    name: "Planner: minimum saving (öre/kWh)"
+    description: "Default 20."
+  hwc_price_adder_ore:
+    name: "Price adder (öre/kWh)"
+    description: "Transfer + energy tax + supplier fee, excl. VAT. Update each January. Default 55.1."

@@ -1,0 +1,118 @@
+# Hot-water controller watchdog (PLAN.md §6, virtual_sensors 0.2.0).
+#
+# NOT DEPLOYED. This file lives in the add-on repository for review; it is
+# not copied into the add-on image (the Dockerfile copies cmd/, internal/
+# and rootfs/ only). Deploying it is a hass change that needs Edmund's
+# go-ahead (rollout R1: deployed DISARMED).
+#
+# Contract (PLAN §6.1): the Go controller publishes
+# sensor.hot_water_controller_heartbeat (Unix seconds) every 60 s, ONLY
+# while healthy. This watchdog trips when the heartbeat is more than
+# 10 min stale, or unavailable (the add-on's MQTT LWT) for 5 min, but only
+# while input_boolean.hot_water_controller_armed is on. On a trip it
+# latches input_boolean.hot_water_watchdog_tripped (the Go controller then
+# makes no moves at all, row 31), forces the cover to 99 with one retry,
+# and notifies. Edmund clears the latch to hand control back (D6: manual
+# for the first month).
+#
+# Pitfalls avoided (PLAN §6.2): each automation's alias slugifies to its
+# intended id; no template entities, no scripts, no `fields`, no
+# script.turn_off; explicit mode; as_timestamp(), never
+# now() - as_datetime(...).
+#
+# Before deploying: test on a booted HA whose registry still holds the old
+# hwc_* and hot_water_* entries (a clean registry hides id pinning), and
+# check that automation.hot_water_watchdog and
+# automation.hot_water_watchdog_off_long are free in the entity registry.
+
+input_boolean:
+  hot_water_controller_armed:
+    name: "Hot water controller armed" # the 2nd key for LIVE (D8)
+  hot_water_watchdog_tripped:
+    name: "Hot water watchdog tripped" # latch, cleared by Edmund
+
+input_button:
+  hot_water_boost:
+    name: "Hot water boost" # ON now, overriding cost saving until one reheat (§4.7)
+
+automation:
+  - id: hot_water_watchdog
+    alias: hot_water_watchdog # entity id automation.hot_water_watchdog
+    description: >-
+      Forces the hot-water switch ON and latches if the Go controller's
+      heartbeat goes stale (10 min) or unavailable (5 min) while armed.
+    mode: single
+    max_exceeded: silent # the per-minute trigger may fire during the 1-min retry delay
+    trigger:
+      - trigger: time_pattern
+        minutes: "/1"
+      - trigger: state
+        entity_id: sensor.hot_water_controller_heartbeat
+        to: "unavailable"
+        for: "00:05:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.hot_water_controller_armed # only when Go is meant to be live
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.hot_water_watchdog_tripped # once tripped, no repeats until cleared
+        state: "off"
+      - condition: template
+        value_template: >
+          {% set hb = states.sensor.hot_water_controller_heartbeat %}
+          {{ hb is none
+             or (hb.state == 'unavailable'
+                 and (as_timestamp(now()) - as_timestamp(hb.last_changed)) > 300)
+             or (hb.state != 'unavailable'
+                 and (as_timestamp(now()) - as_timestamp(hb.last_changed)) > 600) }}
+    action:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.hot_water_watchdog_tripped
+      - if:
+          - condition: template
+            value_template: "{{ (state_attr('cover.hot_water_switch', 'current_position') | float(0)) < 90 }}"
+        then:
+          - action: cover.set_cover_position
+            target:
+              entity_id: cover.hot_water_switch
+            data:
+              position: 99
+          - delay: "00:01:00"
+          - if:
+              - condition: template
+                value_template: "{{ (state_attr('cover.hot_water_switch', 'current_position') | float(0)) < 90 }}"
+            then:
+              - action: cover.set_cover_position # one retry, as a fresh full run
+                target:
+                  entity_id: cover.hot_water_switch
+                data:
+                  position: 99
+      - action: notify.mobile_app_edmund15max
+        data:
+          title: "Hot water watchdog"
+          message: >
+            Go controller silent; switch forced ON (position
+            {{ state_attr('cover.hot_water_switch', 'current_position') }}).
+            Clear input_boolean.hot_water_watchdog_tripped to hand control back.
+
+  # Optional, ALERT ONLY: independent of Go, never moves the cover. Notifies
+  # if the cover has read below 90 continuously for 16 h (the 14 h tank
+  # limit plus margin; confirmed by Edmund 2026-11-09). Note: an HA restart
+  # restarts the 16 h `for:` timer, so this can alert late, never early.
+  - id: hot_water_watchdog_off_long
+    alias: hot_water_watchdog_off_long # entity id automation.hot_water_watchdog_off_long
+    description: Alerts if the hot-water switch has been OFF (position < 90) for 16 h.
+    mode: single
+    trigger:
+      - trigger: template
+        value_template: "{{ (state_attr('cover.hot_water_switch', 'current_position') | float(100)) < 90 }}"
+        for: "16:00:00"
+    action:
+      - action: notify.mobile_app_edmund15max
+        data:
+          title: "Hot water switch OFF for 16 h"
+          message: >
+            The hot-water switch has read below 90 (position
+            {{ state_attr('cover.hot_water_switch', 'current_position') }})
+            for 16 hours. Nothing has been moved; check it.

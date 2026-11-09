@@ -196,6 +196,52 @@ http://supervisor/core/api/history/period/<4h ago>?filter_entity_id=...&minimal_
 and replays it - see "Restart semantics" above. Reconnects with
 exponential backoff (1s doubling to 60s cap), logged at every attempt.
 
+0.2.0: everything a module sees now goes through ONE event loop
+(`internal/host`): warm-up history (marked `Replay`), then, after
+subscribing, the current state of every input (`GET /api/states`,
+stream-decoded so only matching entities are kept; this fills held
+values for entities that have been quiet for days), then live events,
+5 s ticks, `call_service` results (matched by WS id, 10 s timeout) and
+link up/down. Attributes are passed through only for whitelisted
+entities (the cover's `current_position`, the nordpool price arrays).
+State files are written atomically (temp file, fsync, rename).
+
+## Hot-water controller (`hot_water_control`, 0.2.0)
+
+Design and every rule: `services/hot-water-switch/go-plan/PLAN.md` in the
+ham repository (rev 2026-11-09). Enable it by adding `hot_water_control`
+to `modules` beside `hot_water`; it reads the residual, its discontinuity
+flags and the detector's cycles in-process from `hot_water` (no HA round
+trip). Without `hot_water` it stays in shadow and reports
+`degraded:no_detector`.
+
+**Ships disarmed.** `hwc_mode` defaults to `shadow`: the whole state
+machine and policy run and publish what they would do
+(`sensor.hot_water_controller_shadow_would`), but the cover is never
+commanded and the only notification is a daily summary at 09:00. Going
+live needs two keys: `hwc_mode: live` AND
+`input_boolean.hot_water_controller_armed` on. Disarming (either key)
+commands ON first, then returns to shadow.
+
+Layout: `internal/modules/hwcontrol/core` is the pure decision core
+(state machine, policy, verification, backstop, persistence; no clock,
+no I/O, no price). `.../planner` is the separate first planner (the only
+code that reads prices; the core never imports it). `.../module.go` is
+the adapter. The watchdog package is `packages/hot_water_watchdog.yaml`
+(not deployed, not in the image).
+
+Published (MQTT discovery, prefix `hot_water_controller_`, never
+`hwc_`): `heartbeat` (Unix s, every 60 s only while healthy), `state`,
+`desired`, `verdict`, `on_hours_since_genuine_start`,
+`hours_since_reheat_end`, `moves_today`, `plan`, `shadow_would`, `alert`,
+`strikes`, `saving_month` (declared; not yet computed). State persists in
+`/data/hot_water_control-state.json`; a missing or corrupt file means
+every clock is unknown, so no OFF until a finished reheat is seen live or
+seeded from 24 h of detector history.
+
+Interpretations taken where PLAN is silent or inconsistent are listed in
+the 0.2.0 CHANGELOG entry.
+
 ## MQTT discovery
 
 Discovery configs are published retained to

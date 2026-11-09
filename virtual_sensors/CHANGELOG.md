@@ -2,6 +2,47 @@
 
 ## 0.2.0
 
+- New module `hot_water_control`: the hot-water immersion controller of
+  ham `services/hot-water-switch/go-plan/PLAN.md` (rev 2026-11-09). It
+  ships DISARMED: `hwc_mode` defaults to `shadow`, and live also needs
+  `input_boolean.hot_water_controller_armed` (two keys). Not enabled
+  unless `hot_water_control` is added to `modules`. Every `hwc_*` option
+  is optional with its default applied in Go.
+- Host refactor: one serial event loop, 5 s ticks, effects with
+  `call_service` results, string states, whitelisted attributes, a
+  replay flag, a current-state snapshot at connect, atomic state files.
+  The clock and the HA client are injectable (`internal/host`).
+- hot_water: an in-process signal hook for the controller (observation
+  only; parity and replay tests unchanged).
+- `packages/hot_water_watchdog.yaml`: the HA watchdog package, for
+  review; not deployed and not in the image.
+- Interpretations where PLAN is silent or inconsistent (each chosen to
+  keep the heater ON):
+  - The 30-min "no update" staleness rule applies to the residual only.
+    Event-driven entities (cover, target, select, battery...) are
+    stale only when `unavailable`/`unknown` or the HA link is down.
+    Residual, cover, select and target withhold the heartbeat; battery,
+    motor state, EV, arming and latch only block or end an OFF.
+  - Move verification (scenario suite D-2, D-3): needs a motor_state
+    report in a stopped state after the send, with the position within
+    ±5; the +10 s/+15 s checks read held values. A missing motor_state
+    entity blocks every OFF (option `hwc_motor_state_entity: ""` to use
+    an 8 s time fallback once M0 confirms there is none).
+  - call_service: 3 attempts (0, +5 s, +20 s). An ON retry runs to 0
+    first only if 2 moves remain in budget, so it never strands at 0.
+  - Probes and recycles need the move reserve like an OFF; probes run
+    under Override On and the backstop hold; an inconclusive probe
+    counts as no rise. The 10-min gap applies to OFF/probe starts only.
+  - Row 20's ON_FAILED hold clears when the cover reads ON with target
+    99; the strikes hold clears by the 24 h decay.
+  - Any discontinuity in an ON window gives `on_pending`. In an OFF
+    window DeltaW is subtracted: a drop gives `off_unverified`, no drop
+    gives `off_failed` (back ON).
+  - Condition G counts as met if the last reheat is unknown.
+  - Override Off is also refused on stale inputs, 3 strikes, low
+    battery or no move reserve, and is not re-honoured after expiry or
+    refusal until the select changes.
+  - HA link lost mid-command or while OFF gives DEGRADED, not a strike.
 - hot_water: `sonoff_1001721983_power` (the spa floor-heating Sonoff,
   which left Home Assistant in 2024) is no longer a known load of the
   live residual, so it stops sitting permanently in `missing_loads`. The

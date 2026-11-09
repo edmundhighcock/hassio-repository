@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.1.7"
+version: "0.2.0"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -32,13 +32,51 @@ options:
   go_memlimit_mib: 24
 schema:
   modules:
-    - "list(hot_water|example_passthrough)"
+    - "list(hot_water|hot_water_control|example_passthrough)"
   log_level: "list(debug|info|warning|error)"
   mqtt_host: "str?"
   mqtt_port: "port?"
   mqtt_username: "str?"
   mqtt_password: "password?"
   go_memlimit_mib: "int(16,512)"
+  # --- hot_water_control (0.2.0, PLAN.md §9). Every key is optional and
+  # has NO entry under options:, so an existing install gets nothing
+  # written; Go applies the default when a key is absent, and replaces an
+  # out-of-range value with the default (logged). The controller ships
+  # DISARMED: hwc_mode defaults to shadow, and live also needs
+  # input_boolean.hot_water_controller_armed on (two keys, D8). ---
+  hwc_mode: "list(shadow|live)?" # default shadow
+  hwc_notify_service: "str?" # default notify.mobile_app_edmund15max
+  hwc_cover_entity: "str?" # default cover.hot_water_switch
+  hwc_price_entity: "str?" # default sensor.nordpool_kwh_se3_sek_3_06_0
+  hwc_price_adder_ore: "float?" # default 55.1 (2026: 16.0 transfer + 36.0 tax + 3.10 Fortum)
+  hwc_vat_factor: "float?" # default 1.25
+  # controller (safety)
+  hwc_off_limit_since_reheat_end_h: "float?" # default 14 (the tank clock); clamped <= 16
+  hwc_evening_off_from: "str?" # default "18:00" local
+  hwc_evening_off_requires_finished_reheat_today: "bool?" # default true
+  hwc_stale_after_min: "int(5,240)?" # default 30 (held-value staleness)
+  hwc_boost_no_start_timeout_min: "int(5,120)?" # default 30
+  hwc_boost_max_h: "float?" # default 2; clamped <= 4
+  # planner (optimisation; none of these is a safety limit)
+  hwc_planner_max_block_min: "int(30,720)?" # default 180 (R4: 120)
+  hwc_max_blocks_per_period: "int(0,4)?" # default 2 (R4: 1)
+  hwc_min_saving_ore: "float?" # default 20
+  hwc_backstop_probe_h: "float?" # default 10 (of switch-ON time)
+  hwc_backstop_alert_h: "float?" # default 18 (of switch-ON time); clamped <= 24
+  hwc_genuine_min_w: "int(2500,3600)?" # default 2700
+  hwc_genuine_min_s: "int(60,1800)?" # default 300
+  hwc_g_off_h: "float?" # default 2
+  hwc_g_since_reheat_h: "float?" # default 4
+  hwc_max_moves_hour: "int(2,6)?" # default 6
+  hwc_max_moves_day: "int(2,24)?" # default 8
+  hwc_battery_floor_pct: "int(0,100)?" # default 30
+  hwc_battery_alert_pct: "int(0,100)?" # default 25
+  hwc_heartbeat_s: "int(15,300)?" # default 60
+  hwc_ev_guard_minutes: "str?" # default "22:00,23:00" (±10 min each)
+  # motor (beyond PLAN §9; set after M0 confirms the motor's entities)
+  hwc_motor_state_entity: "str?" # default sensor.hot_water_switch_motor_state; "" = none (time fallback)
+  hwc_motor_stopped_states: "str?" # default "stopped,stop,idle"
 # This add-on's own /data (energy totals, open-cycle state - see DOCS.md
 # "Restart semantics") is small; it is included in Home Assistant's
 # normal backups like any other add-on's /data, with no backup_exclude.
