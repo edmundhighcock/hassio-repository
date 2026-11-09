@@ -228,7 +228,11 @@ func (p *Publisher) PublishState(u modules.OutputUpdate) error {
 	if known && spec.PerEntityAvailability && u.Unavailable {
 		return nil // no state payload while unavailable
 	}
-	tok := p.client.Publish(stateTopic(u.ObjectID), 1, true, fmt.Sprintf("%g", u.Value))
+	payload := fmt.Sprintf("%g", u.Value)
+	if u.StateString != "" {
+		payload = u.StateString // 0.2.0: enum/text sensors
+	}
+	tok := p.client.Publish(stateTopic(u.ObjectID), 1, true, payload)
 	tok.Wait()
 	return tok.Error()
 }

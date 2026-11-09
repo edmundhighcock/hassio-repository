@@ -18,8 +18,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // 0.2.0: Europe/Stockholm for the controller, independent of the base image
 
 	"virtual_sensors/internal/haws"
+	"virtual_sensors/internal/host"
 	"virtual_sensors/internal/modules"
 	_ "virtual_sensors/internal/modules/example"  // side-effect: registers "example_passthrough"
 	_ "virtual_sensors/internal/modules/hotwater" // side-effect: registers "hot_water"
@@ -50,12 +52,14 @@ type addonOptions struct {
 	GoMemLimitMiB int      `json:"go_memlimit_mib"`
 }
 
-func loadOptions(path string) addonOptions {
+// loadOptions returns the parsed options and the raw JSON (handed to
+// modules.Configurable modules, which read their own keys).
+func loadOptions(path string) (addonOptions, []byte) {
 	opts := addonOptions{Modules: []string{"hot_water"}, LogLevel: "info", GoMemLimitMiB: 24}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		log.Printf("options: could not read %s (%v); using defaults %+v", path, err, opts)
-		return opts
+		return opts, nil
 	}
 	if err := json.Unmarshal(b, &opts); err != nil {
 		log.Printf("options: could not parse %s (%v); using defaults", path, err)
@@ -63,7 +67,7 @@ func loadOptions(path string) addonOptions {
 	if len(opts.Modules) == 0 {
 		opts.Modules = []string{"hot_water"}
 	}
-	return opts
+	return opts, b
 }
 
 // ---------------------------------------------------------------------------
@@ -132,14 +136,23 @@ func resolveMQTTCredentials(token string, opts addonOptions) (mqttpub.Credential
 
 // ---------------------------------------------------------------------------
 // Live mode.
+//
+// 0.2.0: one serial event loop. Every call into a module happens on the
+// loop goroutine, through internal/host: WS events, warm-up replay, the
+// connect-time state snapshot, 5 s ticks, service-call results and link
+// up/down all arrive as closures on one channel. The WS reader runs on its
+// own goroutine and only enqueues; service calls are written from the
+// loop (the WS client serialises writes).
 // ---------------------------------------------------------------------------
+
+type loopFn func(h *host.Host)
 
 func runLive() {
 	optsPath := os.Getenv("VIRTUAL_SENSORS_OPTIONS")
 	if optsPath == "" {
 		optsPath = "/data/options.json"
 	}
-	opts := loadOptions(optsPath)
+	opts, rawOpts := loadOptions(optsPath)
 	debug.SetMemoryLimit(int64(opts.GoMemLimitMiB) * 1024 * 1024)
 	log.Printf("virtual_sensors: starting, modules=%v log_level=%s GOMEMLIMIT=%dMiB",
 		opts.Modules, opts.LogLevel, opts.GoMemLimitMiB)
@@ -149,6 +162,7 @@ func runLive() {
 		log.Printf("ERROR: SUPERVISOR_TOKEN is not set - homeassistant_api must be true in config.yaml. Cannot reach Home Assistant or the Supervisor services API; will keep retrying so this failure is visible in the log rather than exiting silently.")
 	}
 
+	stateDir := envOr("VIRTUAL_SENSORS_DATA_DIR", "/data")
 	var active []modules.Module
 	for _, name := range opts.Modules {
 		ctor, ok := modules.Get(name)
@@ -157,8 +171,12 @@ func runLive() {
 			continue
 		}
 		m := ctor()
-		statePath := fmt.Sprintf("/data/%s-state.json", m.Name())
-		persisted, _ := os.ReadFile(statePath)
+		if c, ok := m.(modules.Configurable); ok {
+			if err := c.Configure(rawOpts); err != nil {
+				log.Printf("ERROR: %s: Configure: %v (defaults apply)", m.Name(), err)
+			}
+		}
+		persisted, _ := os.ReadFile(host.StatePath(stateDir, m.Name()))
 		if err := m.Init(persisted); err != nil {
 			log.Printf("ERROR: %s: Init failed: %v", m.Name(), err)
 			continue
@@ -171,12 +189,8 @@ func runLive() {
 	}
 
 	var outputs []modules.OutputSpec
-	entityToModules := map[string][]modules.Module{}
 	for _, m := range active {
 		outputs = append(outputs, m.Outputs()...)
-		for _, in := range m.Inputs() {
-			entityToModules[in.EntityID] = append(entityToModules[in.EntityID], m)
-		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -198,9 +212,7 @@ func runLive() {
 				return
 			case <-time.After(backoff):
 			}
-			if backoff < 60*time.Second {
-				backoff *= 2
-			}
+			backoff = nextBackoff(backoff)
 			continue
 		}
 	}
@@ -215,67 +227,70 @@ func runLive() {
 		}
 	}
 
-	persistAll := func() {
-		for _, m := range active {
-			b, err := m.Persist()
-			if err != nil {
-				log.Printf("ERROR: %s: Persist failed: %v", m.Name(), err)
-				continue
-			}
-			if err := os.WriteFile(fmt.Sprintf("/data/%s-state.json", m.Name()), b, 0o600); err != nil {
-				log.Printf("ERROR: %s: could not write state file: %v", m.Name(), err)
-			}
+	h := host.New(active, pub, host.SystemClock{}, stateDir)
+	loop := make(chan loopFn, 256)
+	enqueue := func(f loopFn) bool {
+		select {
+		case loop <- f:
+			return true
+		case <-ctx.Done():
+			return false
 		}
 	}
-	defer persistAll()
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
+
 	go func() {
+		t := time.NewTicker(modules.TickInterval)
+		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				persistAll()
+			case <-t.C:
+				if !enqueue(func(h *host.Host) { h.Tick() }) {
+					return
+				}
 			}
 		}
 	}()
 
-	// --- HA WebSocket: connect/subscribe with backoff; warm up from the
-	// last ~4h of history every (re)connect so a restart mid-cycle isn't
-	// lost - see DOCS.md "Live inputs". -------------------------------
-	var entityIDs []string
-	for e := range entityToModules {
-		entityIDs = append(entityIDs, e)
-	}
-
-	dispatch := func(ev haws.StateEvent) {
-		// Modules name inputs as the InfluxDB buckets do (no "sensor."
-		// prefix), so live and backfill share one set of ids.
-		id := strings.TrimPrefix(ev.EntityID, "sensor.")
-		ms, ok := entityToModules[id]
-		if !ok {
-			return
-		}
-		value, available := haws.ParseFloat(ev.State)
-		u := modules.StateUpdate{EntityID: id, Time: ev.Time, Value: value, Available: available}
-		for _, m := range ms {
-			for _, out := range m.OnStateUpdate(u) {
-				if err := pub.PublishState(out); err != nil {
-					log.Printf("ERROR: publishing %s: %v", out.ObjectID, err)
-				}
-			}
-		}
-	}
-
 	wsURL := envOr("VIRTUAL_SENSORS_HA_WS_URL", "ws://supervisor/core/websocket")
 	httpURL := envOr("VIRTUAL_SENSORS_HA_HTTP_URL", "http://supervisor/core/api")
-	backoff = time.Second
+	go connectionLoop(ctx, h, enqueue, wsURL, httpURL, token)
+
 	for {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
+			h.PersistAll()
 			return
+		case f := <-loop:
+			f(h)
 		}
+	}
+}
+
+// ask runs f on the loop goroutine and waits for it.
+func ask(enqueue func(loopFn) bool, f loopFn) bool {
+	done := make(chan struct{})
+	if !enqueue(func(h *host.Host) { f(h); close(done) }) {
+		return false
+	}
+	<-done
+	return true
+}
+
+// connectionLoop owns the HA connection: connect, warm-up replay, current
+// state snapshot, subscribe, link up, then read until the connection
+// drops (link down) and reconnect with backoff - see DOCS.md "Live inputs".
+func connectionLoop(ctx context.Context, h *host.Host, enqueue func(loopFn) bool, wsURL, httpURL, token string) {
+	var entityIDs []string
+	var match func(string) bool
+	var attrs func(string) []string
+	ask(enqueue, func(h *host.Host) { entityIDs, match, attrs = h.ExactEntityIDs(), h.Match, h.AttrWhitelist })
+	seeded := false
+	backoff := time.Second
+	for ctx.Err() == nil {
 		client := haws.New(wsURL, httpURL, token)
+		client.AttrWhitelist = attrs
 		if err := client.Connect(ctx); err != nil {
 			log.Printf("ERROR: connecting to Home Assistant at %s: %v - retrying in %s", wsURL, err, backoff)
 			sleepOrDone(ctx, backoff)
@@ -291,9 +306,26 @@ func runLive() {
 		} else {
 			log.Printf("warm-up: replaying %d history points since %s", len(hist), since.Format(time.RFC3339))
 			sortEventsByTime(hist)
-			for _, ev := range hist {
-				dispatch(ev)
+			ask(enqueue, func(h *host.Host) {
+				for _, ev := range hist {
+					h.HandleState(ev, true)
+				}
+			})
+		}
+		if !seeded {
+			var reqs []host.SeedReq
+			ask(enqueue, func(h *host.Host) { reqs = h.SeedRequests() })
+			for _, r := range reqs {
+				evs, err := client.History(ctx, r.Since, r.EntityIDs)
+				if err != nil {
+					log.Printf("ERROR: seed history fetch failed: %v - clocks stay unknown (no OFF)", err)
+					continue
+				}
+				sortEventsByTime(evs)
+				r := r
+				ask(enqueue, func(h *host.Host) { h.DeliverSeed(r, evs) })
 			}
+			seeded = true
 		}
 
 		if err := client.Subscribe(); err != nil {
@@ -303,18 +335,45 @@ func runLive() {
 			backoff = nextBackoff(backoff)
 			continue
 		}
+		// Current states AFTER subscribing, so nothing falls between the
+		// snapshot and the stream. Held values for quiet entities come from
+		// here (PLAN 2.1 "get_states at connect").
+		states, err := client.States(ctx, match)
+		if err != nil {
+			log.Printf("ERROR: current-state fetch failed: %v - held values fill from events only", err)
+		} else {
+			sortEventsByTime(states)
+			ask(enqueue, func(h *host.Host) {
+				for _, ev := range states {
+					h.HandleState(ev, false)
+				}
+			})
+		}
 		backoff = time.Second // reset after a successful connect+subscribe
+		ask(enqueue, func(h *host.Host) { h.LinkUp(client) })
 
 		for {
-			ev, ok, err := client.ReadEvent()
+			msg, ok, err := client.ReadMessage()
 			if err != nil {
 				log.Printf("ERROR: Home Assistant websocket read failed: %v - reconnecting", err)
 				break
 			}
-			if ok {
-				dispatch(ev)
+			if !ok {
+				continue
+			}
+			if msg.Event != nil {
+				ev := *msg.Event
+				if !enqueue(func(h *host.Host) { h.HandleState(ev, false) }) {
+					break
+				}
+			} else if msg.Result != nil {
+				r := *msg.Result
+				if !enqueue(func(h *host.Host) { h.HandleResult(r) }) {
+					break
+				}
 			}
 		}
+		ask(enqueue, func(h *host.Host) { h.LinkDown() })
 		client.Close()
 		sleepOrDone(ctx, time.Second)
 	}
