@@ -18,7 +18,10 @@ type Persisted struct {
 	LastGenuineQualifier string    `json:"last_genuine_qualifier"`
 	// OnSSinceGenuineStart is the probe/alert clock: seconds of believed-ON
 	// time since the last genuine start (§4.4).
-	OnSSinceGenuineStart    float64              `json:"on_s_since_genuine_start"`
+	OnSSinceGenuineStart float64 `json:"on_s_since_genuine_start"`
+	// OnClockAt is the time up to which ON time has been accounted, so a
+	// restart's warm-up replay continues the clock from there.
+	OnClockAt               time.Time            `json:"on_clock_at"`
 	NextProbeOnS            float64              `json:"next_probe_on_s"`
 	NextBackstopAlertOnS    float64              `json:"next_backstop_alert_on_s"`
 	LastFinishedReheatStart time.Time            `json:"last_finished_reheat_start"`
@@ -85,8 +88,20 @@ func LoadPersisted(b []byte) (Persisted, bool) {
 	if len(b) == 0 {
 		return p, false
 	}
+	// PLAN §2.6's own example writes "" for an unset time; null is the
+	// other natural spelling. Both mean unset: drop them before decoding
+	// (every field's zero value is "unset"), so they parse instead of
+	// failing the whole file.
+	var raw any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return p, false
+	}
+	clean, err := json.Marshal(dropUnset(raw))
+	if err != nil {
+		return p, false
+	}
 	var q Persisted
-	if err := json.Unmarshal(b, &q); err != nil || q.Schema != SchemaVersion {
+	if err := json.Unmarshal(clean, &q); err != nil || q.Schema != SchemaVersion {
 		return p, false
 	}
 	if q.AlertsSent == nil {
@@ -96,6 +111,32 @@ func LoadPersisted(b []byte) (Persisted, bool) {
 		q.OnSSinceGenuineStart = 0
 	}
 	return q, true
+}
+
+// dropUnset removes "" and null object members and array elements,
+// recursively.
+func dropUnset(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, e := range x {
+			if e == nil || e == "" {
+				delete(x, k)
+				continue
+			}
+			x[k] = dropUnset(e)
+		}
+		return x
+	case []any:
+		out := x[:0]
+		for _, e := range x {
+			if e == nil || e == "" {
+				continue
+			}
+			out = append(out, dropUnset(e))
+		}
+		return out
+	}
+	return v
 }
 
 // Marshal serialises the persisted state.

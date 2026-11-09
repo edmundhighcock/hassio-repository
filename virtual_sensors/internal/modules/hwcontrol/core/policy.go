@@ -112,7 +112,7 @@ func (c *Controller) MayGoOff(shadow bool) (bool, string) {
 		return false, "evening_no_reheat_today"
 	}
 	// 8. no probe due.
-	if c.probeDue() {
+	if (!shadow && c.probeDue()) || (shadow && c.shadowProbeDue()) {
 		return false, "probe_due"
 	}
 	// 9. EV guard.
@@ -123,6 +123,16 @@ func (c *Controller) MayGoOff(shadow bool) (bool, string) {
 		return false, "ev_moved"
 	}
 	return true, "plan_period"
+}
+
+// shadowProbeDue: the shadow "would probe" schedule, volatile and separate
+// from the persisted one.
+func (c *Controller) shadowProbeDue() bool {
+	next := c.P.NextProbeOnS
+	if c.shadowNextProbe > next {
+		next = c.shadowNextProbe
+	}
+	return c.P.OnSSinceGenuineStart >= next
 }
 
 func (c *Controller) inEVGuard() bool {
@@ -280,9 +290,19 @@ func (c *Controller) bootPath(reason string) {
 	c.setState(StBoot, reason)
 }
 
+// bootTimedOut: the boot timer (row 5) runs only once the inputs have
+// first been populated (the first link-up, which follows the snapshot).
+// Before that the controller holds quietly in BOOT: no DEGRADED, no
+// count, no alert (review fix 6). The heartbeat is withheld meanwhile
+// because inputs are stale, so the watchdog still covers a start-up that
+// never completes.
+func (c *Controller) bootTimedOut() bool {
+	return c.populated && c.now.Sub(c.bootSince) >= c.cfg.BootTimeout
+}
+
 func (c *Controller) runBoot() {
 	if s := c.bootStale(); s != "" {
-		if c.now.Sub(c.bootSince) >= c.cfg.BootTimeout {
+		if c.bootTimedOut() {
 			c.enterDegraded("boot_timeout_stale_" + s)
 		}
 		return
@@ -324,7 +344,8 @@ func (c *Controller) runIdleOn() {
 		c.enterDegraded("stale_" + s)
 		return
 	}
-	// Row 8: drift below 90, or target != 99 with no command of ours.
+	// Row 8: drift below 90, or the target no longer ON (< 99; 100 is ON,
+	// fix 2) with no command of ours.
 	if c.mv == nil && (!c.coverOn() || !c.targetIsOn()) {
 		c.P.Retreats++
 		c.logf("cover drifted (position/target no longer ON) with no command of ours")
@@ -908,7 +929,7 @@ func (c *Controller) evaluateShadow() {
 		c.bootPath("hold_cleared")
 	case c.P.State == StBoot:
 		if s := c.bootStale(); s != "" {
-			if c.now.Sub(c.bootSince) >= c.cfg.BootTimeout {
+			if c.bootTimedOut() {
 				c.setState(StDegraded, "boot_timeout_stale_"+s)
 			}
 		} else if c.coverOn() {
@@ -973,9 +994,12 @@ func (c *Controller) shadowDecide() {
 		}
 		return
 	}
-	if c.P.State == StIdleOn && c.probeDue() {
+	if c.P.State == StIdleOn && c.shadowProbeDue() {
+		// Shadow keeps its own schedule: advancing the persisted one here
+		// would swallow the real probe when the controller goes live
+		// (it is briefly shadow at every start, before the arming input).
 		c.shadowWould, c.shadowReason = "probe", "probe_due"
-		c.P.NextProbeOnS = c.P.OnSSinceGenuineStart + c.cfg.ProbeRepeat.Seconds()
+		c.shadowNextProbe = c.P.OnSSinceGenuineStart + c.cfg.ProbeRepeat.Seconds()
 		return
 	}
 	if ok, why := c.MayGoOff(true); ok {

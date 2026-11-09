@@ -34,6 +34,8 @@ type rig struct {
 	noEngage  bool // position reaches 99 but the contact stays open
 	// stuckClosed: position reaches 0 but the contact stays closed
 	stuckClosed bool
+	// restAt100: an ON command comes to rest at target/position 100
+	restAt100 bool
 
 	queue   []qev
 	effects []Effect
@@ -106,7 +108,10 @@ func (r *rig) onCover(e Effect) {
 	from := r.pos
 	r.at(300*time.Millisecond, func() {
 		r.target = float64(p)
-		r.pos = float64(p) // D-3: the position echo is immediate
+		if r.restAt100 && p == 99 {
+			r.target = 100 // the real switch rests at 100 when ON
+		}
+		r.pos = r.target // D-3: the position echo is immediate
 		r.motor = "moving"
 		r.pushTarget()
 		r.pushCover()

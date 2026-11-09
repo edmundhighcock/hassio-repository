@@ -68,6 +68,14 @@ type Controller struct {
 	// 29); the hold is re-entered when the probe ends.
 	probeUnderHold string
 
+	// populated: the first link-up (snapshot loaded) has happened.
+	populated bool
+	// histOn/histKnown: the switch state from replayed history, used for
+	// the ON-time clock while HA is not linked.
+	histOn, histKnown bool
+	// shadowNextProbe is SHADOW's own would-probe schedule (ON seconds).
+	shadowNextProbe float64
+
 	hold            string
 	bootSince       time.Time
 	healthySince    time.Time
@@ -173,6 +181,22 @@ func (c *Controller) Step(in Input) []Effect {
 		c.lastTick = c.now
 		c.setState(StBoot, "process start")
 	}
+	// The ON-time clock advances on data timestamps, replayed or live, so
+	// warm-up replay reconstructs it exactly as live data would (row 2,
+	// review fix 1). Ticks carry wall time and advance it only while HA
+	// is linked (before the first link-up the replay has not arrived yet).
+	switch v := in.(type) {
+	case EntityUpdate, Sample, Discontinuity, CycleOpened, CycleClosed:
+		c.advanceOnClock(in.When())
+	case Tick:
+		if c.linkUp {
+			c.advanceOnClock(v.At)
+		}
+	case Link:
+		if c.linkUp || v.Up {
+			c.advanceOnClock(v.At)
+		}
+	}
 	tick := false
 	switch v := in.(type) {
 	case EntityUpdate:
@@ -243,6 +267,19 @@ func (c *Controller) onEntity(u EntityUpdate) {
 	if u.Replay {
 		// Warm-up history carries no attributes and is older than the
 		// connect-time snapshot; held values come from live/snapshot data.
+		// It does tell the ON-time clock whether the switch was ON over
+		// the replayed window: the cover state (closed = OFF; history has
+		// no position attribute) and the numeric target.
+		switch u.Role {
+		case RoleCover:
+			c.histKnown, c.histOn = true, u.State != "closed"
+		case RoleTarget:
+			if u.NumOK {
+				c.histKnown, c.histOn = true, u.Num >= float64(c.cfg.OnPos)
+			} else {
+				c.histKnown, c.histOn = true, true // unknown counts as ON
+			}
+		}
 		return
 	}
 	if u.Role == RoleBoost {
@@ -375,8 +412,10 @@ func (c *Controller) onLink(l Link) {
 		c.mv = nil
 		c.ver = nil
 		c.onRetryAt = time.Time{}
+		c.histKnown = false // the next replay re-establishes it
 	}
 	if !was && l.Up {
+		c.populated = true // inputs first populated: the boot timer may run (fix 6)
 		// The boot timer runs from the link coming up, not from the
 		// (older) warm-up replay times.
 		c.bootSince = c.now
@@ -388,22 +427,35 @@ func (c *Controller) onLink(l Link) {
 }
 
 func (c *Controller) onTick() {
-	dt := c.now.Sub(c.lastTick)
 	c.lastTick = c.now
-	if dt < 0 {
-		dt = 0
+}
+
+// advanceOnClock accounts ON time from P.OnClockAt up to t (only ever
+// forward), using the believed switch state over that stretch. A stretch
+// with no data at all (the add-on down, before the replay window) counts
+// as ON when the state is unknown: the probe then comes earlier, the safe
+// direction (§4.4: unknown resolves to ON).
+func (c *Controller) advanceOnClock(t time.Time) {
+	if c.P.OnClockAt.IsZero() {
+		c.P.OnClockAt = t
+		return
 	}
-	if dt > 5*time.Minute {
-		dt = 5 * time.Minute // a gap in ticks is not ON time we observed
+	if !t.After(c.P.OnClockAt) {
+		return
 	}
 	if c.believedOn() {
-		c.P.OnSSinceGenuineStart += dt.Seconds()
+		c.P.OnSSinceGenuineStart += t.Sub(c.P.OnClockAt).Seconds()
 	}
+	c.P.OnClockAt = t
 }
 
 // believedOn: the cover is believed ON (or unknown, which counts as ON so
-// the probe comes earlier, the safe direction).
+// the probe comes earlier, the safe direction). While HA is not linked
+// (warm-up replay) the replayed cover/target history decides.
 func (c *Controller) believedOn() bool {
+	if !c.linkUp && c.histKnown {
+		return c.histOn
+	}
 	pos, ok := c.coverPosition()
 	return !ok || pos >= float64(c.cfg.OnPos)
 }
@@ -444,9 +496,22 @@ func (c *Controller) coverOn() bool {
 	return ok && p >= float64(c.cfg.OnPos)
 }
 
+// targetIsOn: HAM's ruling (review fix 2): any target >= 99 means ON. The
+// real switch rests at 100 when ON, so 100 must not read as a drift.
 func (c *Controller) targetIsOn() bool {
 	t, ok := c.num(RoleTarget)
-	return ok && int(math.Round(t)) == c.cfg.CmdOn
+	return ok && targetMatches(t, c.cfg.CmdOn, c.cfg.CmdOn)
+}
+
+// targetMatches: does a target reading satisfy a command? For the ON
+// command any value >= cmdOn (99 or 100) matches; otherwise it must equal
+// the command.
+func targetMatches(t float64, cmd, cmdOn int) bool {
+	ti := int(math.Round(t))
+	if cmd == cmdOn {
+		return ti >= cmdOn
+	}
+	return ti == cmd
 }
 
 // residualStale: unavailable/unknown, connection (WS or hook) lost, or no
@@ -523,7 +588,9 @@ func (c *Controller) housekeeping() {
 		c.logf("strike decayed, now %d", c.P.Strikes)
 	}
 	c.boostExits()
-	c.backstopAlerts()
+	if c.linkUp {
+		c.backstopAlerts() // after a replay, alert only once HA is reachable
+	}
 	if b, ok := c.num(RoleBattery); ok && b < c.cfg.BatteryAlert {
 		c.alert(AlertBatteryLow, fmt.Sprintf("Hot-water switch motor battery at %.0f%% (alert below %.0f%%).", b, c.cfg.BatteryAlert), 24*time.Hour)
 	}
@@ -590,7 +657,11 @@ func (c *Controller) setVerdict(v string, attrs map[string]any) {
 // ---- mode (two-key arming, D8; row 35) ----
 
 func (c *Controller) armed() bool {
-	return c.cfg.Live && c.detPresent && c.entityFresh(RoleArmed) && strings.EqualFold(c.str(RoleArmed), "on")
+	// The held value, not entityFresh: losing the HA link is staleness
+	// (DEGRADED, watchdog), not a disarm. Treating it as a disarm sent the
+	// row-35 ON into a dead link and struck the motor for it.
+	x := c.in[RoleArmed]
+	return c.cfg.Live && c.detPresent && x != nil && x.known && x.avail && strings.EqualFold(x.str, "on")
 }
 
 func (c *Controller) updateMode() {

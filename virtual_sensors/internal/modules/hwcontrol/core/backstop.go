@@ -53,8 +53,10 @@ func (c *Controller) stampGenuine(cy *CycleRec) {
 	cy.Genuine = true
 	c.P.LastGenuineStart = cy.OnTime
 	c.P.LastGenuineQualifier = fmt.Sprintf("detector_cycle>=%.1fkW,>=%dmin", c.cfg.GenuineMinW/1000, int(c.cfg.GenuineMinDur.Minutes()))
-	// Retroactive: the heater ran from OnTime, so the switch was ON since.
-	on := c.now.Sub(cy.OnTime).Seconds()
+	// Retroactive: the heater ran from OnTime, so the switch was ON since,
+	// up to where the ON-time clock has been accounted (the replay point
+	// during warm-up, now when live).
+	on := c.P.OnClockAt.Sub(cy.OnTime).Seconds()
 	if on < 0 {
 		on = 0
 	}

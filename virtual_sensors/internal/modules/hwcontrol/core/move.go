@@ -128,10 +128,11 @@ func (c *Controller) advanceMove() {
 		}
 		check := func() int {
 			t, ok := c.num(RoleTarget)
-			if ok && int(math.Round(t)) != m.target && m.echo {
+			match := ok && targetMatches(t, m.target, c.cfg.CmdOn)
+			if ok && !match && m.echo {
 				return mvRetreat
 			}
-			if !ok || int(math.Round(t)) != m.target || !c.posWithin(m.target) {
+			if !match || !c.posWithin(m.target) {
 				return mvStuck
 			}
 			return mvOK
@@ -154,9 +155,8 @@ func (c *Controller) retreated(m *move) bool {
 	if !ok {
 		return false
 	}
-	ti := int(math.Round(t))
-	if ti == m.target {
-		m.echo = true
+	if targetMatches(t, m.target, c.cfg.CmdOn) {
+		m.echo = true // for an ON, 99 or 100 both echo the command
 		return false
 	}
 	return m.echo
