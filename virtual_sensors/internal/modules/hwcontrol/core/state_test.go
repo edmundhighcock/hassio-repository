@@ -531,6 +531,25 @@ func TestOverrideOff(t *testing.T) {
 	}
 }
 
+// Override Off releases early when the selector goes back to Auto (or
+// anything else), without waiting for the tank limit.
+func TestOverrideOffReleasesEarly(t *testing.T) {
+	r := newRig(t, liveCfg(), nil)
+	r.boot(true)
+	r.tankRecent(time.Hour)
+	r.set(RoleSelect, SelectOverrideOff)
+	r.advance(time.Minute)
+	r.wantState("HOLD_OFF")
+	if r.switchOn {
+		t.Fatal("Override Off did not switch OFF")
+	}
+	r.set(RoleSelect, SelectAuto)
+	r.advance(2 * time.Minute)
+	if !r.switchOn || r.notifies(AlertOverrideExpired) != 0 {
+		t.Fatalf("Override Off not released early: on=%v state=%s", r.switchOn, r.state())
+	}
+}
+
 // Row 35: disarm while OFF -> ensure ON, then SHADOW.
 func TestRow35DisarmEnsuresOnThenShadow(t *testing.T) {
 	r := readyForOff(t)
