@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.1
+
+Heat-pump live executor (hpcontrol): fix a false manual override.
+
+- On 2026-11-10 arming turned the Dyson off and hass-dyson reported it `on`
+  again 150 ms later; the module took that for a hand change and held off
+  for 2 h. A state change within `hp_command_grace_s` (new, optional,
+  default 120 s, 10-900) of our own command to that device is no longer an
+  override; this covers `climate.heat_pump` too (IR, no feedback).
+- If the target is still not reached when the window ends the same command
+  is sent again, at most twice; after that a notification and
+  `hp_last_command` with `ok: false`. Never an override.
+- Turning `input_boolean.hp_controller_armed` off now clears any active
+  override, so off-then-on re-arms cleanly.
+- The HA event context is not exposed by the WebSocket layer, so the grace
+  window alone is used.
+
 ## 0.5.0
 
 Integrates the three phase-3 branches and adds the house planner.

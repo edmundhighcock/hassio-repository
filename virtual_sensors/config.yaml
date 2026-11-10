@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.5.0"
+version: "0.5.1"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -138,6 +138,7 @@ schema:
   hp_hold_setpoint_c: "float?" # default 22 (17-30); the IR set-point is a power dial
   hp_boost_setpoint_c: "float?" # default 30 (17-30)
   hp_override_hold_h: "float?" # default 2 (0.25-24): hold-off after a manual change
+  hp_command_grace_s: "int(10,900)?" # default 120: state changes this soon after our command are not a manual override
   hp_stale_after_min: "int(10,720)?" # default 90: no input event this long = stale = safe hold
   hp_sensor_stale_min: "int(30,1440)?" # default 180: a comfort sensor older than this is ignored
   hp_evening_penalty_kr: "float?" # default 3.0 per running slot

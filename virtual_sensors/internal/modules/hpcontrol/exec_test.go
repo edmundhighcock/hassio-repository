@@ -338,6 +338,7 @@ func TestManualOverrideHoldOff(t *testing.T) {
 	if r.hpState != "heat" {
 		t.Fatalf("setup: %s", r.hpState)
 	}
+	r.tick(3 * time.Minute) // past the grace window of the set-up commands
 	mk := r.mark()
 	// Someone switches the heat pump off with the remote / the HA card.
 	r.hpState = "off"
@@ -370,6 +371,7 @@ func TestManualOverrideHoldOff(t *testing.T) {
 
 func TestOverrideHoldIsAnOption(t *testing.T) {
 	r := newRig(t, "live", true, `,"hp_override_hold_h":0.5`, at(10, 12, 0), 18.6)
+	r.tick(3 * time.Minute) // past the grace window of the set-up commands
 	mk := r.mark()
 	r.fanOn, r.fanPct = "on", 30 // the Dyson turned by hand
 	r.pushFan()
@@ -504,15 +506,17 @@ func TestCommandFailureRetriesAndNotifies(t *testing.T) {
 		t.Fatalf("failure notifications: %d", r.notes(mk, "command_failed"))
 	}
 	r.advance(2*time.Minute, true, 18.6)
-	if es := r.devCalls(mk); len(es) != 0 {
-		t.Fatalf("retried too soon: %s", describe(es))
+	for _, e := range r.devCalls(mk) {
+		if e.Domain == "climate" {
+			t.Fatalf("retried too soon: %s", describe(r.devCalls(mk)))
+		}
 	}
 	r.advance(4*time.Minute, true, 18.6)
 	if es := r.devCalls(mk); len(es) == 0 {
 		t.Fatal("no retry after 5 minutes")
 	}
-	// A command that succeeds yet leaves the state different is not resent
-	// in a loop (it would beep every time).
+	// A command that succeeds yet leaves the state different is retried at
+	// most twice, then not resent in a loop (it would beep every time).
 	mk = r.mark()
 	r.advance(20*time.Minute, true, 18.6)
 	n := 0
@@ -521,7 +525,7 @@ func TestCommandFailureRetriesAndNotifies(t *testing.T) {
 			n++
 		}
 	}
-	if n != 0 {
+	if n > maxRetries {
 		t.Fatalf("looped %d climate calls", n)
 	}
 }
@@ -893,5 +897,94 @@ func TestReplayLambdaIsTheSweetSpot(t *testing.T) {
 	}
 	if math.Abs(b.mean-20.5) > math.Abs(a.mean-20.5)+1e-9 {
 		t.Fatalf("lambda 0.05 should keep the mean nearer desired than 0.002: %.2f vs %.2f", b.mean, a.mean)
+	}
+}
+
+// ---- 0.5.1: grace window, retries, disarm ----
+
+func fanCallsSince(r *rig, mk int) int {
+	n := 0
+	for _, e := range r.devCalls(mk) {
+		if e.Domain == "fan" {
+			n++
+		}
+	}
+	return n
+}
+
+// 2026-11-10: the module commands, the device flips and flips back.
+func TestBounceWithinGraceNotOverride(t *testing.T) {
+	r := newRig(t, "live", true, "", at(10, 12, 0), 18.6, func(r *rig) { r.noEcho = true })
+	// set-up sent the commands (noEcho: devices unchanged). Inside the window
+	// the device flips to something else and back: ours, no override.
+	r.hpState = "heat"
+	r.pushHP()
+	r.hpState = "off"
+	r.pushHP()
+	r.fanOn, r.fanPct = "on", 30
+	r.pushFan()
+	r.fanOn, r.fanPct = "off", 0
+	r.pushFan()
+	r.tick(10 * time.Second)
+	if st, _ := r.out(ObjOverride); st == "active" {
+		t.Fatal("a change inside the grace window must not be an override")
+	}
+	if r.notes(0, "override") != 0 {
+		t.Fatal("override notification inside the grace window")
+	}
+}
+
+func TestChangeAfterGraceIsOverride(t *testing.T) {
+	r := newRig(t, "live", true, "", at(10, 12, 0), 18.6)
+	r.tick(3 * time.Minute)
+	mk := r.mark()
+	r.fanOn, r.fanPct = "off", 0
+	r.pushFan()
+	r.tick(10 * time.Second)
+	if st, _ := r.out(ObjOverride); st != "active" {
+		t.Fatalf("override %q after a change outside the window", st)
+	}
+	if r.notes(mk, "override") != 1 {
+		t.Fatal("expected an override notification")
+	}
+}
+
+func TestRetryWhenTargetNotReached(t *testing.T) {
+	r := newRig(t, "live", true, "", at(10, 12, 0), 18.6, func(r *rig) { r.noEcho = true })
+	mk := 0
+	r.advance(10*time.Minute, true, 18.6)
+	if n := fanCallsSince(r, mk); n != 3 {
+		t.Fatalf("want 1 send + 2 retries of the fan command, got %d: %s", n, describe(r.devCalls(mk)))
+	}
+	if st, _ := r.out(ObjOverride); st == "active" {
+		t.Fatal("a device that does not respond is not an override")
+	}
+	if r.notes(mk, "not_applied") != 1 {
+		t.Fatalf("failure notifications %d", r.notes(mk, "not_applied"))
+	}
+	if _, a := r.out(ObjLastCmd); !strings.Contains(a, `"ok":false`) {
+		t.Fatalf("hp_last_command attrs %s", a)
+	}
+}
+
+func TestDisarmClearsOverride(t *testing.T) {
+	r := newRig(t, "live", true, "", at(10, 12, 0), 18.6)
+	r.tick(3 * time.Minute)
+	r.fanOn, r.fanPct = "off", 0
+	r.pushFan()
+	r.tick(10 * time.Second)
+	if st, _ := r.out(ObjOverride); st != "active" {
+		t.Fatalf("setup: override %q", st)
+	}
+	r.feedState(armedEnt, "off")
+	r.tick(time.Second)
+	if st, _ := r.out(ObjOverride); st != "none" {
+		t.Fatalf("override %q after disarm", st)
+	}
+	mk := r.mark()
+	r.feedState(armedEnt, "on")
+	r.advance(2*time.Minute, true, 18.6)
+	if r.fanOn != "on" || fanCallsSince(r, mk) == 0 {
+		t.Fatalf("re-arm did not resume: fan %s %s", r.fanOn, describe(r.devCalls(mk)))
 	}
 }

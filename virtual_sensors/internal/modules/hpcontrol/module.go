@@ -91,6 +91,7 @@ type options struct {
 	HoldSet       *float64 `json:"hp_hold_setpoint_c"`
 	BoostSet      *float64 `json:"hp_boost_setpoint_c"`
 	OverrideH     *float64 `json:"hp_override_hold_h"`
+	GraceS        *int     `json:"hp_command_grace_s"`
 	StaleMin      *int     `json:"hp_stale_after_min"`
 	SensorStale   *int     `json:"hp_sensor_stale_min"`
 }
@@ -141,6 +142,7 @@ type Module struct {
 	holdSet     float64
 	boostSet    float64
 	overrideFor time.Duration
+	cmdGrace    time.Duration
 	staleAfter  time.Duration
 	sensorStale time.Duration
 
@@ -459,6 +461,12 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		replan = old != m.presenceNow()
 	case u.EntityID == armedEnt:
 		m.ex.armed, m.ex.armedOK = u.State == "on", u.State == "on" || u.State == "off"
+		if u.State == "off" {
+			// Disarming clears the override so off-then-on re-arms cleanly.
+			m.ex.overrideUntil, m.ex.overrideWhy = time.Time{}, ""
+			m.ex.sent = map[string]*sentRec{}
+			m.ex.grace = map[string]*graceRec{}
+		}
 	case u.EntityID == tvTimerEnt:
 		m.ex.onTimer(u.State == "active", m.now)
 	case u.EntityID == tvActiveEnt:

@@ -13,7 +13,10 @@ package hpcontrol
 //     override: hold off for hp_override_hold_h and notify;
 //   - stale data, or a comfort temperature below the minimum, falls to heat
 //     at the hold set-point, never to off;
-//   - disarming leaves the devices as they are.
+//   - disarming leaves the devices as they are and clears any override;
+//   - a state change within hp_command_grace_s of our own command is not an
+//     override; if the target is still not reached after the window the
+//     command is repeated (twice at most), then reported as failed.
 
 import (
 	"encoding/json"
@@ -33,6 +36,7 @@ const (
 	retryAfterFail = 5 * time.Minute
 	repeatGuard    = 30 * time.Minute // same command again while the state still differs
 	notifyCooldown = time.Hour
+	maxRetries     = 2 // re-sends of an unapplied command
 	heartbeatEvery = 30 * time.Second
 	planStaleAfter = 45 * time.Minute
 
@@ -65,6 +69,14 @@ type sentRec struct {
 	warned       bool
 }
 
+// graceRec is the window after our command during which state changes of that
+// device are ours (SmartIR is optimistic, the Dyson echoes stale status).
+type graceRec struct {
+	until   time.Time
+	target  string // the signature the command should bring about
+	retries int
+}
+
 type executor struct {
 	armed, armedOK bool
 	wasActive      bool
@@ -80,6 +92,7 @@ type executor struct {
 	lastSig map[string]string
 	expect  map[string]time.Time
 	sent    map[string]*sentRec
+	grace   map[string]*graceRec
 	corr    map[uint64]string
 
 	effects  []modules.Effect
@@ -102,12 +115,14 @@ func (m *Module) applyExecDefaults() {
 	m.holdSet = 22 // a power dial: 22 C gave ~0.86 kW on 2026-11-10 (hold is 0.7 kW)
 	m.boostSet = 30
 	m.overrideFor = 2 * time.Hour
+	m.cmdGrace = 120 * time.Second
 	m.staleAfter = 90 * time.Minute
 	m.sensorStale = 180 * time.Minute
 	e := &m.ex
 	e.lastSig = map[string]string{}
 	e.expect = map[string]time.Time{}
 	e.sent = map[string]*sentRec{}
+	e.grace = map[string]*graceRec{}
 	e.corr = map[uint64]string{}
 	e.lastNotify = map[string]time.Time{}
 	e.pub = map[string]string{}
@@ -168,6 +183,13 @@ func (m *Module) configureExec(o options) []string {
 			m.overrideFor = time.Duration(*o.OverrideH * float64(time.Hour))
 		} else {
 			msgs = append(msgs, "hp_override_hold_h out of range (0.25-24); default applied")
+		}
+	}
+	if o.GraceS != nil {
+		if *o.GraceS >= 10 && *o.GraceS <= 900 {
+			m.cmdGrace = time.Duration(*o.GraceS) * time.Second
+		} else {
+			msgs = append(msgs, "hp_command_grace_s out of range (10-900); default applied")
 		}
 	}
 	if o.StaleMin != nil {
@@ -461,7 +483,7 @@ func (m *Module) sendDevice(now time.Time, dev string, calls []call) {
 		ds = append(ds, c.Desc)
 	}
 	key := strings.Join(ds, "+")
-	prevTries := 0
+	prevTries, retries := 0, 0
 	if r := e.sent[dev]; r != nil && r.key == key {
 		switch {
 		case r.pendingUntil.After(now):
@@ -476,19 +498,30 @@ func (m *Module) sendDevice(now time.Time, dev string, calls []call) {
 			}
 			prevTries = r.tries
 		default:
-			// Sent fine, yet the state still differs: never re-send in a
-			// loop (every IR command beeps). Say so once.
-			if now.Sub(r.at) < repeatGuard {
-				if !r.warned && now.Sub(r.at) > expectFor {
+			// Sent fine, yet the state still differs. Inside the grace
+			// window the device may simply not have caught up. After it:
+			// the same command again, at most twice; then give up (every IR
+			// command beeps) and say so.
+			g := e.grace[dev]
+			if g != nil && now.Before(g.until) {
+				return
+			}
+			if g != nil && g.retries < maxRetries {
+				retries = g.retries + 1
+				prevTries = r.tries
+			} else if now.Sub(r.at) < repeatGuard {
+				if !r.warned {
 					r.warned = true
+					e.lastCmdOK = false
 					m.notify(now, "not_applied", "Heat pump controller: command not applied",
-						fmt.Sprintf("%s was sent but the device still reports a different state. Not re-sending for %d min.", key, int(repeatGuard.Minutes())))
+						fmt.Sprintf("%s was sent (and retried %d times) but the device still reports a different state. Not re-sending for %d min.", key, maxRetries, int(repeatGuard.Minutes())))
 				}
 				return
 			}
 		}
 	}
 	e.sent[dev] = &sentRec{key: key, at: now, pendingUntil: now.Add(inFlight), tries: prevTries + 1}
+	e.grace[dev] = &graceRec{until: now.Add(m.cmdGrace), target: calls[len(calls)-1].Sig, retries: retries}
 	for _, c := range calls {
 		e.nextCorr++
 		id := e.nextCorr
@@ -515,6 +548,12 @@ func (m *Module) onDeviceChange(replay bool, now time.Time, name string) {
 		return
 	}
 	if exp, ok := e.expect[dev+":"+sig]; ok && now.Before(exp) {
+		return
+	}
+	// Inside the grace window after our own command nothing is a hand change:
+	// an IR pump has no feedback and the Dyson integration echoes stale
+	// status (2026-11-10: off, then on|30 150 ms later).
+	if g := e.grace[dev]; g != nil && now.Before(g.until) {
 		return
 	}
 	if !e.active(m) || !e.linkUp || e.quiet(now) {

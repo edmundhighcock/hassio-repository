@@ -392,6 +392,9 @@ percentage, or `fan.turn_off`, only on change.
   cause (and is not what the plan wants anyway) holds the module off both
   devices for `hp_override_hold_h` (2 h), with a notification. A below-minimum
   house during the hold-off is notified (hourly) but not fought.
+  Changes within `hp_command_grace_s` (120 s) of the module's own command to
+  that device are never an override; an unreached target is re-sent twice at
+  most, then reported. Disarming clears an active override.
 * **Safety**: no fresh comfort reading, no input event for `hp_stale_after_min`
   (90), no price for the current slot, no plan or no outdoor value: heat at the
   hold set-point (state `safe_hold`, notification). Comfort below the minimum:
