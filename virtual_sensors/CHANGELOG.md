@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- New module `hp_control` (Go package `hpcontrol`): SHADOW-ONLY heat-pump and
+  Dyson planner, per ham `services/hp-planner/PLAN.md`. Dynamic programming over
+  15-minute slots x 0.1 C house-mean grid x {off, hold, boost} against the
+  all-in spot price, with a floor (`input_number.house_minimum_temperature`),
+  desired average, evening penalty and night bedroom cap. Publishes
+  `hp_controller_state`, `hp_plan`, `hp_would_command`, `hp_model_error`,
+  `hp_shadow_cost`. It calls no service; there is no live mode. Not enabled
+  unless `hp_control` is added to `modules`. Every `hp_*` option is optional
+  with its default applied in Go. The thermal model defaults are PROVISIONAL
+  until `services/house-model/RESULTS.md`. Missing helpers fall back to
+  defaults (minimum 19.0, presence Home, auto off) and say so in `reason`.
+  hwcontrol and evcontrol are unchanged.
+
 ## 0.3.0
 
 - New module `ev_control` (Go package `evcontrol`): SHADOW-ONLY EV planner

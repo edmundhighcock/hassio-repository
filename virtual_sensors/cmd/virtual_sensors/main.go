@@ -26,6 +26,7 @@ import (
 	_ "virtual_sensors/internal/modules/evcontrol" // side-effect: registers "ev_control"
 	_ "virtual_sensors/internal/modules/example"   // side-effect: registers "example_passthrough"
 	_ "virtual_sensors/internal/modules/hotwater"  // side-effect: registers "hot_water"
+	_ "virtual_sensors/internal/modules/hpcontrol" // side-effect: registers "hp_control"
 	_ "virtual_sensors/internal/modules/hwcontrol" // side-effect: registers "hot_water_control"
 	"virtual_sensors/internal/mqttpub"
 )

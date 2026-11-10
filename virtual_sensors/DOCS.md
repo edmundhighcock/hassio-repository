@@ -305,6 +305,53 @@ Restart state is `/data/ev_control-state.json`.
 
 All options are optional with defaults in code (see config.yaml `ev_*`).
 
+## Heat-pump and Dyson planner (`hp_control`, shadow only)
+
+Design: `services/hp-planner/PLAN.md` in the ham repository. Enable it by
+adding `hp_control` to `modules`. **It is shadow only: it calls no Home
+Assistant or device service, and there is no live option in this build.**
+
+It reads `sensor.house_mean_temperature`, `sensor.outdoor_temperature_best`,
+`sensor.bedroom_midheight_sensor_temperature`, `sensor.heat_pump_power_power`,
+`input_number.house_target_temperature` (desired),
+`input_number.house_minimum_temperature` (floor),
+`input_select.house_presence`, `input_boolean.house_presence_auto`, `person.*`,
+`climate.heat_pump`, `fan.dyson_nn2_eu_nfa8623a` and the nordpool price sensor
+(`hwc_price_entity`, hwcontrol's `planner.ParseNordpool`, all-in price from
+`hwc_price_adder_ore` and `hwc_vat_factor`). **Missing helpers do not break
+it**: minimum falls back to `hp_min_default` (19.0), desired to
+`hp_desired_default` (20.5), presence to Home (auto off), and `reason` says so.
+
+Model (`model.go`): dT/dt = -u (T - Tout) + h(level, Tout) + gain; boost
+h = max(0, boost_rate + slope (Tout - 5)), hold = hold_frac x boost, bedroom =
+mean + offset. **Every default is PROVISIONAL until
+`services/house-model/RESULTS.md`**: `hp_model_u` 0.08 per hour,
+`hp_model_boost_rate` 0.9 C/h, `hp_model_rate_slope` 0.03, `hp_model_hold_frac`
+0.4 (hold 700 W, boost 1700 W: `hp_p_hold_w`, `hp_p_boost_w`),
+`hp_model_gain` 0.1 C/h (no sun term), `hp_model_bedroom_offset` -2.0 C. With
+these placeholders boost cannot hold 19 C at 3 C outdoor, so expect
+`floor_at_risk` until the fit replaces them.
+
+Planner (`plan.go`, pure): dynamic programming, backward, over slots x 0.1 C grid
+(floor - 1 to 26 C) x {off, hold, boost} x previous level (for the
+`hp_switch_penalty_kr` against IR beeps). Cost = price x electrical energy +
+`hp_lambda` (T - desired)^2 per slot + `hp_evening_penalty_kr` per running slot
+17:00-21:00 + 1000 kr per C below the floor or above the night bedroom cap
+(`hp_bedroom_cap`; hard unless infeasible, then boost and `floor_at_risk`).
+Outdoor temperature is held at today's reading; prices beyond the published
+ones are filled with their mean (flagged). Horizon 24-36 h; about 2 ms on a
+desktop. Re-plans every 15 minutes and on a price, set-point or presence change.
+
+Dyson (D28, D36): runs whenever the heat pump heats, speed cap by time and
+presence (`hp_dyson_*_pct`).
+
+Published: `sensor.hp_controller_state` (idle, would_off, would_hold,
+would_boost, floor_at_risk, degraded; attribute `reason`), `hp_plan` (planned kWh
+today; slots, cost, predicted mean and minimum), `hp_would_command`,
+`hp_model_error` (24 h MAE of the 1 h-ahead house mean, bias in attributes),
+`hp_shadow_cost` (plan cost today; actual cost in attributes). Restart state is
+`/data/hp_control-state.json`. All options optional (see config.yaml `hp_*`).
+
 ## MQTT discovery
 
 Discovery configs are published retained to

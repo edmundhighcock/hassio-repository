@@ -111,6 +111,72 @@ configuration:
   ev_hp_phase_a:
     name: "EV: heat pump maximum current on phase C (A)"
     description: "Default 7.4."
+  hp_model_u:
+    name: "HP model: loss coefficient (1/h)"
+    description: "Shadow only. PROVISIONAL until the house-model fit. Default 0.08."
+  hp_model_boost_rate:
+    name: "HP model: boost heating rate (C/h)"
+    description: "At 5 C outdoor. PROVISIONAL. Default 0.9."
+  hp_model_rate_slope:
+    name: "HP model: rate change per C colder (C/h)"
+    description: "PROVISIONAL. Default 0.03."
+  hp_model_hold_frac:
+    name: "HP model: hold as fraction of boost"
+    description: "PROVISIONAL. Default 0.4."
+  hp_model_gain:
+    name: "HP model: internal gain (C/h)"
+    description: "PROVISIONAL. Default 0.1."
+  hp_model_bedroom_offset:
+    name: "HP model: bedroom offset (C)"
+    description: "Bedroom minus house mean. PROVISIONAL. Default -2.0."
+  hp_p_hold_w:
+    name: "HP: electrical power at hold (W)"
+    description: "Default 700."
+  hp_p_boost_w:
+    name: "HP: electrical power at boost (W)"
+    description: "Default 1700."
+  hp_min_default:
+    name: "HP: minimum temperature if helper missing (C)"
+    description: "Default 19.0."
+  hp_desired_default:
+    name: "HP: desired temperature if helper missing (C)"
+    description: "Default 20.5."
+  hp_bedroom_cap:
+    name: "HP: bedroom night cap (C)"
+    description: "Default 23."
+  hp_night_start:
+    name: "HP: night start"
+    description: "Local HH:MM. Default 22:00."
+  hp_night_end:
+    name: "HP: night end"
+    description: "Local HH:MM. Default 07:00."
+  hp_evening_start:
+    name: "HP: evening window start"
+    description: "Local HH:MM. Default 17:00."
+  hp_evening_end:
+    name: "HP: evening window end"
+    description: "Local HH:MM. Default 21:00."
+  hp_dyson_night_pct:
+    name: "HP: Dyson cap at night (%)"
+    description: "Default 100."
+  hp_dyson_day_home_pct:
+    name: "HP: Dyson cap 09:00-17:00 with someone home (%)"
+    description: "Default 60."
+  hp_dyson_evening_pct:
+    name: "HP: Dyson cap in the evening (%)"
+    description: "Default 50."
+  hp_dyson_away_pct:
+    name: "HP: Dyson cap with nobody home (%)"
+    description: "Default 100."
+  hp_lambda:
+    name: "HP: comfort weight (kr per C^2 per slot)"
+    description: "Pulls the mean to desired. Default 0.1."
+  hp_evening_penalty_kr:
+    name: "HP: evening running penalty (kr per slot)"
+    description: "Default 3.0."
+  hp_switch_penalty_kr:
+    name: "HP: level change penalty (kr)"
+    description: "Every IR command beeps. Default 0.3."
   hwc_price_adder_ore:
     name: "Price adder (öre/kWh)"
     description: "Transfer + energy tax + supplier fee, excl. VAT. Update each January. Default 55.1."

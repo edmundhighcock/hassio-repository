@@ -32,7 +32,7 @@ options:
   go_memlimit_mib: 24
 schema:
   modules:
-    - "list(hot_water|hot_water_control|ev_control|example_passthrough)"
+    - "list(hot_water|hot_water_control|ev_control|hp_control|example_passthrough)"
   log_level: "list(debug|info|warning|error)"
   mqtt_host: "str?"
   mqtt_port: "port?"
@@ -95,6 +95,31 @@ schema:
   ev_min_block_min: "int(0,240)?" # default 30
   ev_heater_phase_a: "float?" # default 7.5
   ev_hp_phase_a: "float?" # default 7.4
+  # --- hp_control (SHADOW ONLY: no service is ever called). Every key is
+  # optional with NO entry under options:; Go applies the default. The model
+  # defaults are PROVISIONAL until services/house-model/RESULTS.md. ---
+  hp_model_u: "float?" # default 0.08 per hour (PROVISIONAL)
+  hp_model_boost_rate: "float?" # default 0.9 C/h at boost, 5 C outdoor (PROVISIONAL)
+  hp_model_rate_slope: "float?" # default 0.03 C/h per C colder (PROVISIONAL)
+  hp_model_hold_frac: "float?" # default 0.4 of boost (PROVISIONAL)
+  hp_model_gain: "float?" # default 0.1 C/h internal gain (PROVISIONAL)
+  hp_model_bedroom_offset: "float?" # default -2.0 C from the house mean (PROVISIONAL)
+  hp_p_hold_w: "float?" # default 700
+  hp_p_boost_w: "float?" # default 1700
+  hp_min_default: "float?" # default 19.0 (helper missing)
+  hp_desired_default: "float?" # default 20.5 (helper missing)
+  hp_bedroom_cap: "float?" # default 23
+  hp_night_start: "str?" # default "22:00"
+  hp_night_end: "str?" # default "07:00"
+  hp_evening_start: "str?" # default "17:00"
+  hp_evening_end: "str?" # default "21:00"
+  hp_dyson_night_pct: "int(0,100)?" # default 100
+  hp_dyson_day_home_pct: "int(0,100)?" # default 60
+  hp_dyson_evening_pct: "int(0,100)?" # default 50
+  hp_dyson_away_pct: "int(0,100)?" # default 100
+  hp_lambda: "float?" # default 0.1 kr per C^2 per slot
+  hp_evening_penalty_kr: "float?" # default 3.0 per running slot
+  hp_switch_penalty_kr: "float?" # default 0.3 per level change
 # This add-on's own /data (energy totals, open-cycle state - see DOCS.md
 # "Restart semantics") is small; it is included in Home Assistant's
 # normal backups like any other add-on's /data, with no backup_exclude.
