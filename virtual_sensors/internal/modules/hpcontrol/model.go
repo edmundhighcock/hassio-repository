@@ -1,9 +1,10 @@
-// Package hpcontrol is the "hp_control" module: a SHADOW-ONLY planner for
-// the heat pump and the Dyson fan (ham services/hp-planner/PLAN.md). It
-// reads Home Assistant entities, plans 15-minute slots by dynamic
-// programming over the house-mean temperature, publishes what it WOULD do
-// and how well its model predicts. It never calls a Home Assistant or
-// device service: there is deliberately no live mode in this build.
+// Package hpcontrol is the "hp_control" module: a planner for the heat pump
+// and the Dyson fan (ham services/hp-planner/PLAN.md). It reads Home
+// Assistant entities, plans 15-minute slots by dynamic programming over the
+// comfort temperature (the mean of two room sensors out of the pump's
+// airstream), and publishes what it WOULD do and how well its model
+// predicts. SHADOW by default; with hp_mode live AND
+// input_boolean.hp_controller_armed on, exec.go also drives the devices.
 package hpcontrol
 
 import (
@@ -36,7 +37,7 @@ func (l Level) String() string { return [...]string{"off", "hold", "boost"}[l] }
 //	dT/dt = -U (T - Tout) + h(level, Tout) + Gain
 //
 // h(boost, Tout) = max(0, Boost5 + Slope (Tout - 5)); h(hold) = HoldFrac * h(boost).
-// The bedroom is house mean + BedroomOffset.
+// The bedroom is the comfort temperature + BedroomOffset.
 type Model struct {
 	U             float64 // loss coefficient, 1/h
 	Boost5        float64 // h*COP at boost, 5 deg C outdoor, deg C/h
@@ -46,17 +47,24 @@ type Model struct {
 	BedroomOffset float64 // bedroom minus house mean, deg C
 }
 
-// DefaultModel returns the model parameters.
-// PROVISIONAL until services/house-model/RESULTS.md: every number below is
-// a placeholder, not a fit.
+// DefaultModel returns the fitted parameters: services/house-model
+// RESULTS.md (2026-11-10), the "kitchen+bedroom" column, which is the
+// default comfort sensor (the official house mean carries the heat-pump
+// intake and Dyson sensors, ~2.4 K/kW high while the pump runs, so the
+// "official mean" column is NOT used). 1R1C, free-run fit over 3.7 days:
+// u 0.027 /h, a0 0.55 K/h per kW electrical (x 1.7 kW boost = 0.935 K/h),
+// internal gain g 0.17 K/h per kW x the 0.30 kW median = 0.05 K/h; the
+// bedroom is -0.2 K (pump on) to -0.46 K (off 2 h) below the kitchen+bedroom
+// mean, so -0.3. The COP slope is not identifiable from the data
+// (a1 = -0.00 +/- 0.01): it stays 0 until a cold spell pins it.
 func DefaultModel() Model {
 	return Model{
-		U:             0.08, // PROVISIONAL until services/house-model/RESULTS.md (time constant ~12.5 h)
-		Boost5:        0.9,  // PROVISIONAL until services/house-model/RESULTS.md (h*COP at 5 C outdoor)
-		Slope:         0.03, // PROVISIONAL until services/house-model/RESULTS.md (per C colder, rate falls)
-		HoldFrac:      0.4,  // PROVISIONAL until services/house-model/RESULTS.md (700 W gives 40 % of boost)
-		Gain:          0.1,  // PROVISIONAL until services/house-model/RESULTS.md (internal gain, no sun term)
-		BedroomOffset: -2.0, // PROVISIONAL until services/house-model/RESULTS.md
+		U:             0.027, // RESULTS.md kitchen+bedroom u = 0.027 +/- 0.002 /h (tau 38 h)
+		Boost5:        0.935, // RESULTS.md a0 0.55 K/h/kW x 1.7 kW (p_boost); extrapolated, the pump seldom ran >1.2 kW
+		Slope:         0,     // RESULTS.md: a1 not identifiable (-0.00 +/- 0.01)
+		HoldFrac:      0.41,  // 0.7 kW / 1.7 kW (heating is linear in electrical power in the fit)
+		Gain:          0.05,  // RESULTS.md g 0.17 K/h/kW x 0.30 kW median internal power
+		BedroomOffset: -0.3,  // RESULTS.md (4): -0.2 on, -0.46 off, vs kitchen+bedroom
 	}
 }
 
@@ -89,7 +97,7 @@ type Params struct {
 	NightEnd        int
 	EveStart        int
 	EveEnd          int
-	Lambda          float64 // kr per deg C^2 per slot around desired
+	Lambda          float64 // kr per deg C^2 per slot around desired (0.05: replay-tuned, see TestReplayMorningPeak)
 	EveningPenKr    float64 // kr per slot of running in the evening window
 	SwitchPenaltyKr float64 // kr per change of level (every IR command beeps, D38)
 	Dyson           DysonCaps
@@ -105,7 +113,7 @@ func DefaultParams() Params {
 	}
 	return Params{Model: DefaultModel(), PHoldW: 700, PBoostW: 1700, MinDefault: 19.0, DesiredDef: 20.5,
 		BedroomCap: 23, NightStart: 22 * 60, NightEnd: 7 * 60, EveStart: 17 * 60, EveEnd: 21 * 60,
-		Lambda: 0.1, EveningPenKr: 3.0, SwitchPenaltyKr: 0.3, Dyson: DefaultDysonCaps(), Price: planner.DefaultConfig(), Loc: loc}
+		Lambda: 0.05, EveningPenKr: 3.0, SwitchPenaltyKr: 0.3, Dyson: DefaultDysonCaps(), Price: planner.DefaultConfig(), Loc: loc}
 }
 
 // PowerW is the electrical power of a level.

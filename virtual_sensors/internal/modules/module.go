@@ -88,6 +88,10 @@ type Effect struct {
 	Service string
 	Data    map[string]any
 	CorrID  uint64
+	// ReturnResponse asks HA to return the service's response data (for
+	// services such as weather.get_forecasts); it arrives in
+	// CommandResult.Response.
+	ReturnResponse bool
 }
 
 // EffectKind enumerates Effect kinds.
@@ -107,6 +111,9 @@ type CommandResult struct {
 	OK     bool
 	Err    string
 	At     time.Time
+	// Response is the service's response data (the "response" member of the
+	// WS result), nil unless Effect.ReturnResponse was set and HA sent one.
+	Response json.RawMessage
 }
 
 // Ticker (0.2.0) is optional: the host calls OnTick every TickInterval

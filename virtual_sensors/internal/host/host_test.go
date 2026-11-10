@@ -184,3 +184,33 @@ func TestAtomicPersist(t *testing.T) {
 		t.Fatalf("temp files left behind: %v", ents)
 	}
 }
+
+type respHA struct {
+	fakeHA
+	respCalls []string
+}
+
+func (f *respHA) CallServiceResponse(domain, service string, data, target map[string]any) (int, error) {
+	f.respCalls = append(f.respCalls, domain+"."+service)
+	f.nextID++
+	return f.nextID, nil
+}
+
+func TestReturnResponsePassthrough(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	a := &actor{}
+	h := New([]modules.Module{a}, &fakePub{}, clk, "")
+	ha := &respHA{}
+	h.LinkUp(ha)
+	a.effects = []modules.Effect{{Kind: modules.EffectCallService, Domain: "weather", Service: "get_forecasts",
+		Data: map[string]any{"entity_id": "weather.x", "type": "hourly"}, CorrID: 5, ReturnResponse: true},
+		{Kind: modules.EffectCallService, Domain: "climate", Service: "turn_off", CorrID: 6}}
+	h.Tick()
+	if len(ha.respCalls) != 1 || ha.respCalls[0] != "weather.get_forecasts" || len(ha.calls) != 1 || ha.calls[0] != "climate.turn_off" {
+		t.Fatalf("%v %v", ha.respCalls, ha.calls)
+	}
+	h.HandleResult(haws.Result{ID: 1, Success: true, Response: []byte(`{"weather.x":{"forecast":[]}}`)})
+	if len(a.results) != 1 || string(a.results[0].Response) != `{"weather.x":{"forecast":[]}}` {
+		t.Fatalf("%+v", a.results)
+	}
+}

@@ -18,13 +18,21 @@ const (
 
 // Input is everything the pure planner needs.
 type Input struct {
-	Now     time.Time         // quarter-aligned slot start of the first slot
-	T0      float64           // house mean now
-	Tout    float64           // outdoor temperature, held over the horizon (v1)
-	Min     float64           // floor
-	Desired float64           // desired mean
-	Prices  map[int64]float64 // quarter start (unix) -> all-in kr/kWh
-	Prev    Level             // level in force now (Off if unknown); changing it costs SwitchPenaltyKr
+	Now  time.Time // quarter-aligned slot start of the first slot
+	T0   float64   // house mean now
+	Tout float64   // outdoor temperature now; used where Forecast has no value
+	// Forecast is the hourly outdoor forecast (hour start, unix -> deg C),
+	// linearly interpolated per slot; before its first point the first value
+	// holds, after its last the last. Empty: Tout is held over the horizon.
+	Forecast map[int64]float64
+	// BedOffset, when BedOffsetOK, is the measured bedroom-minus-comfort
+	// temperature, used in place of the model's BedroomOffset for the night cap.
+	BedOffset   float64
+	BedOffsetOK bool
+	Min         float64           // floor
+	Desired     float64           // desired mean
+	Prices      map[int64]float64 // quarter start (unix) -> all-in kr/kWh
+	Prev        Level             // level in force now (Off if unknown); changing it costs SwitchPenaltyKr
 }
 
 // Slot is one planned 15-minute slot.
@@ -38,6 +46,7 @@ type Slot struct {
 	CostKr   float64
 	Priced   bool // false: price extrapolated
 	BedroomT float64
+	Tout     float64 // outdoor temperature used for the slot
 }
 
 // Result is a plan.
@@ -51,6 +60,44 @@ type Result struct {
 	Extrapolated  bool
 	NoPrices      bool
 	RuntimeMicros int64
+}
+
+// outdoorAt is the outdoor temperature at time t: the interpolated
+// forecast, else the current reading.
+func (in Input) outdoorAt(t time.Time) float64 {
+	if len(in.Forecast) == 0 {
+		return in.Tout
+	}
+	var lo, hi int64
+	var vlo, vhi float64
+	var haveLo, haveHi bool
+	u := t.Unix()
+	var first, last int64
+	var vfirst, vlast float64
+	for k, v := range in.Forecast {
+		if first == 0 || k < first {
+			first, vfirst = k, v
+		}
+		if k > last {
+			last, vlast = k, v
+		}
+		if k <= u && (!haveLo || k > lo) {
+			lo, vlo, haveLo = k, v, true
+		}
+		if k > u && (!haveHi || k < hi) {
+			hi, vhi, haveHi = k, v, true
+		}
+	}
+	switch {
+	case !haveLo:
+		return vfirst
+	case !haveHi:
+		return vlast
+	case hi-lo > 6*3600: // a hole in the forecast: do not interpolate across it
+		return vlo
+	}
+	f := float64(u-lo) / float64(hi-lo)
+	return vlo*(1-f) + vhi*f
 }
 
 // Plan runs the DP. Pure: no clock, no I/O.
@@ -96,6 +143,14 @@ func Plan(in Input, p Params) Result {
 	}
 	N := int(math.Round((hi-lo)/gridStep)) + 1
 	mod := p.Model
+	bedOff := mod.BedroomOffset
+	if in.BedOffsetOK {
+		bedOff = in.BedOffset
+	}
+	tout := make([]float64, K)
+	for k := 0; k < K; k++ {
+		tout[k] = in.outdoorAt(start.Add(time.Duration(k)*quarter + quarter/2))
+	}
 
 	night := make([]bool, K)
 	eve := make([]bool, K)
@@ -107,13 +162,13 @@ func Plan(in Input, p Params) Result {
 	// slot evaluates a transition: next temperature (clamped to the grid)
 	// and the slot's cost, including penalties.
 	slot := func(k int, prev, l Level, t float64) (float64, float64) {
-		tn := mod.Step(t, l, in.Tout)
+		tn := mod.Step(t, l, tout[k])
 		c := slotPrice[k] * p.PowerW(l) / 1000 * dtH
 		if tn < in.Min {
 			c += bigM * (in.Min - tn)
 		}
 		if night[k] {
-			if b := tn + mod.BedroomOffset; b > p.BedroomCap {
+			if b := tn + bedOff; b > p.BedroomCap {
 				c += bigM * (b - p.BedroomCap)
 			}
 		}
@@ -194,10 +249,10 @@ func Plan(in Input, p Params) Result {
 				bestV, bestL = v, l
 			}
 		}
-		raw := mod.Step(t, bestL, in.Tout)
+		raw := mod.Step(t, bestL, tout[k])
 		kwh := p.PowerW(bestL) / 1000 * dtH
 		s := Slot{Start: start.Add(time.Duration(k) * quarter), Level: bestL, T: t, TEnd: raw,
-			PriceKr: slotPrice[k], KWh: kwh, CostKr: kwh * slotPrice[k], Priced: priced[k], BedroomT: raw + mod.BedroomOffset}
+			PriceKr: slotPrice[k], KWh: kwh, CostKr: kwh * slotPrice[k], Priced: priced[k], BedroomT: raw + bedOff, Tout: tout[k]}
 		res.Slots = append(res.Slots, s)
 		res.CostKr += s.CostKr
 		res.KWh += kwh
