@@ -254,12 +254,11 @@ planner (no planned OFF), so only test moves switch OFF.
 Interpretations taken where PLAN is silent or inconsistent are listed in
 the 0.2.0 CHANGELOG entry.
 
-## EV planner and guard (`ev_control`, shadow only)
+## EV planner, guard and live executor (`ev_control`)
 
 Design: `services/ev-planner/PLAN.md` in the ham repository. Enable it by
-adding `ev_control` to `modules`. **It is shadow only: it calls no Home
-Assistant or Easee service, and there is no live option in this build.**
-The existing 22:00 `Car Start Charging` automation keeps charging the car.
+adding `ev_control` to `modules`. **It ships in shadow: it calls no Home
+Assistant or Easee service until armed live** (see "Live executor" below).
 
 It reads `sensor.loaver_status`, `_power` (kW), `_session_energy`,
 `sensor.grid_meter_power`, `sensor.heat_pump_power_power`, hot water's
@@ -487,3 +486,70 @@ in your package's `init()`, import the package for its side effect from
 `modules` schema enum. `internal/modules/example/module.go` is a
 deliberately trivial second module (off by default) that exists only to
 prove this interface isn't secretly hot_water-shaped.
+
+### Live executor (phase 3)
+
+Two keys, like hot water: option `ev_mode: live` AND
+`input_boolean.ev_controller_armed` on (create the helper; absent or
+unavailable counts as off). In shadow, or live without the key, no
+service is called , except that a pause or
+limit this module still holds from an earlier live period is released.
+
+**Before arming, disable the `Car Start Charging` automation** (22:00,
+`start` then `resume`): it fights the planner. The module publishes
+`sensor.ev_controller_armed` (`on` only when live AND armed; attributes
+`mode`, `armed_key`) for a condition or a check, and `sensor.ev_controller_mode`
+(shadow/live).
+
+Services (Easee integration v2026.11.0), targeted with `charger_id`, the
+`id` attribute of `sensor.loaver_status` (override: `ev_charger_id`):
+`easee.action_command` (`action_command`: `pause`, `resume`, and `start`
+before `resume` when the status is awaiting_start/awaiting_authorization),
+`easee.set_charger_dynamic_limit` (`current`, `time_to_live` in minutes)
+and `easee.set_circuit_dynamic_limit` (`current_p1..p3`, `time_to_live`).
+Limits are written only on change plus a refresh every `ev_limit_ttl_min`/3
+(TTL default 15 min), so a dead add-on lets them lapse. The circuit limit is
+per phase: the budget less the estimated other load on that phase. The
+charger limit is the smaller of the plan's amps and the guard's limit;
+below `ev_min_a` the charger is paused. Resume is sent only after fresh
+limits are written, except in a fallback where limit writes keep failing.
+
+Safety rules: (1) deadline backstop: if the plan cannot finish by
+departure, charge continuously at the guard's maximum allowed. (2) Stale
+data (no grid or Equalizer reading for `ev_stale_after_min`, link down for
+more than 2 min, no price for the current quarter, tomorrow's prices still
+missing at 14:00, no session plan) falls back to charge now at the guard
+limit (the forecast ceiling when the guard is stale). (3) The phase budget
+`ev_phase_budget_a` less other load is never exceeded by the limits sent; if
+there is no headroom for `ev_min_a` the charger pauses. (4) Disarming (or
+leaving live) while paused resumes the charger, then writes a 32 A
+limit with a 1 minute TTL on charger and circuit, handing control back to
+Easee's defaults.
+
+**Pause has no TTL.** If the add-on dies while the car is paused, nothing
+resumes it. Mitigation: `sensor.ev_controller_heartbeat` (Unix seconds,
+refreshed every 30 s, attribute `paused_by_us`). An HA-side watchdog
+automation should resume the charger if the heartbeat is older than a few
+minutes while the car is connected and paused.
+
+Notifications (`notify.mobile_app_edmund15max`, `ev_notify_service`, plus
+a persistent notification): armed, disarmed, deadline or stale fallback
+(once per session), guard breach, command failure (each rate limited to
+once per 15 min).
+
+Published by the executor: `ev_controller_mode`, `ev_controller_armed`,
+`ev_last_command` (state: the command; attributes result, error, at),
+`ev_limit_in_force` (charger A last written; attributes circuit_a, paused,
+ttl_min, desired, reason, fallback), `ev_controller_heartbeat`.
+
+### Guard inputs: Equalizer
+
+When `binary_sensor.equalizer_online` is on and `sensor.equalizer_current`
+was updated within `ev_equalizer_fresh_min` (2 min), the guard uses its real
+per-phase currents (`state_currentL1..L3`, at the house fuse). Other load per
+phase is that reading minus the charger's own current: the smaller of
+`loaver_power`/(3x230) and `sensor.loaver_current` (whose per-phase mapping
+is not documented, so the smaller value is subtracted, never overstating the
+charger and so never understating other load). Otherwise it falls back to the
+grid-power estimate above. Entities are options `ev_equalizer_entity` and
+`ev_equalizer_online_entity`.

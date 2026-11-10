@@ -81,7 +81,8 @@ schema:
   # input_button.hot_water_test_move / _test_probe, LIVE only, within the move caps
   hwc_test_moves_only: "bool?" # default false; true = planner overridden, no planned OFF
   hwc_test_off_min: "int(2,60)?" # default 10: how long a test OFF lasts
-  # --- ev_control (SHADOW ONLY: no service is ever called). Every key is
+  # --- ev_control (shadow by default: live needs ev_mode: live AND
+  # input_boolean.ev_controller_armed on). Every key is
   # optional with NO entry under options:; Go applies the default. The
   # price keys are hwcontrol's own (hwc_price_entity, hwc_price_adder_ore,
   # hwc_vat_factor). Enable via the `modules` list. ---
@@ -95,6 +96,14 @@ schema:
   ev_min_block_min: "int(0,240)?" # default 30
   ev_heater_phase_a: "float?" # default 7.5
   ev_hp_phase_a: "float?" # default 7.4
+  ev_mode: "list(shadow|live)?" # default shadow; live also needs input_boolean.ev_controller_armed on
+  ev_notify_service: "str?" # default notify.mobile_app_edmund15max
+  ev_charger_id: "str?" # default: the id attribute of sensor.<prefix>_status
+  ev_limit_ttl_min: "int(3,120)?" # default 15: dynamic-limit time-to-live; refreshed every third of it
+  ev_stale_after_min: "int(2,120)?" # default 10: grid reading older than this = stale, charge now
+  ev_equalizer_entity: "str?" # default sensor.equalizer_current (attrs state_currentL1..L3)
+  ev_equalizer_online_entity: "str?" # default binary_sensor.equalizer_online
+  ev_equalizer_fresh_min: "int(1,60)?" # default 2
   # --- hp_control (SHADOW ONLY: no service is ever called). Every key is
   # optional with NO entry under options:; Go applies the default. The model
   # defaults are PROVISIONAL until services/house-model/RESULTS.md. ---
