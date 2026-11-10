@@ -21,26 +21,29 @@ type Persisted struct {
 	OnSSinceGenuineStart float64 `json:"on_s_since_genuine_start"`
 	// OnClockAt is the time up to which ON time has been accounted, so a
 	// restart's warm-up replay continues the clock from there.
-	OnClockAt               time.Time            `json:"on_clock_at"`
-	NextProbeOnS            float64              `json:"next_probe_on_s"`
-	NextBackstopAlertOnS    float64              `json:"next_backstop_alert_on_s"`
-	LastFinishedReheatStart time.Time            `json:"last_finished_reheat_start"`
-	LastFinishedReheatEnd   time.Time            `json:"last_finished_reheat_end"`
-	Boost                   BoostState           `json:"boost"`
-	LastCommand             LastCommand          `json:"last_command"`
-	LastKnownPosition       float64              `json:"last_known_position"`
-	LastKnownTarget         float64              `json:"last_known_target"`
-	Moves                   []time.Time          `json:"moves"`
-	Strikes                 int                  `json:"strikes"`
-	LastStrikeAt            time.Time            `json:"last_strike_at"`
-	Hold                    HoldState            `json:"hold"`
-	CurrentOffPeriod        *OffPeriod           `json:"current_off_period,omitempty"`
-	OffSince                time.Time            `json:"off_since"`
-	AlertsSent              map[string]time.Time `json:"alerts_sent"`
-	BatteryLast             float64              `json:"battery_last"`
-	BatterySeries           []float64            `json:"battery_series"`
-	BatteryDay              string               `json:"battery_day"`
-	BootCount               int                  `json:"boot_count"`
+	OnClockAt               time.Time   `json:"on_clock_at"`
+	NextProbeOnS            float64     `json:"next_probe_on_s"`
+	NextBackstopAlertOnS    float64     `json:"next_backstop_alert_on_s"`
+	LastFinishedReheatStart time.Time   `json:"last_finished_reheat_start"`
+	LastFinishedReheatEnd   time.Time   `json:"last_finished_reheat_end"`
+	Boost                   BoostState  `json:"boost"`
+	LastCommand             LastCommand `json:"last_command"`
+	LastKnownPosition       float64     `json:"last_known_position"`
+	LastKnownTarget         float64     `json:"last_known_target"`
+	Moves                   []time.Time `json:"moves"`
+	Strikes                 int         `json:"strikes"`
+	LastStrikeAt            time.Time   `json:"last_strike_at"`
+	Hold                    HoldState   `json:"hold"`
+	CurrentOffPeriod        *OffPeriod  `json:"current_off_period,omitempty"`
+	OffSince                time.Time   `json:"off_since"`
+	// AbandonedUntil: the end of the last abandoned OFF period; the next
+	// OFF needs a planned period starting at or after it (review fix 5).
+	AbandonedUntil time.Time            `json:"abandoned_until"`
+	AlertsSent     map[string]time.Time `json:"alerts_sent"`
+	BatteryLast    float64              `json:"battery_last"`
+	BatterySeries  []float64            `json:"battery_series"`
+	BatteryDay     string               `json:"battery_day"`
+	BootCount      int                  `json:"boot_count"`
 	// Cycle is the detector cycle currently open, as the core saw it open.
 	Cycle *CycleRec `json:"cycle,omitempty"`
 	// Retreats counts drifts seen in IDLE_ON (telemetry only).

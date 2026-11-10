@@ -171,6 +171,122 @@ func TestFix6NoDegradedBeforeFirstPopulate(t *testing.T) {
 	r.wantState("DEGRADED")
 }
 
+// Review fix 3: a dip-and-recover in another load just before the OFF
+// reads as a ~2.6 kW up-step; unsustained, it is not "drawing", so no
+// spurious off_failed: off_unverified and the OFF continues.
+func TestFix3UnsustainedStepIsNotDrawing(t *testing.T) {
+	r := newRig(t, liveCfg(), nil)
+	r.baseW = 3000 // a steady non-heater load; the heater is idle
+	r.boot(true)
+	r.tankRecent(time.Hour)
+	r.planNow(16*time.Minute, 2*time.Hour)
+	r.advance(15 * time.Minute)
+	r.baseW = 400
+	r.emitResidual(true)
+	r.advance(20 * time.Second)
+	r.baseW = 3000
+	r.emitResidual(true)
+	r.advance(3 * time.Minute)
+	if r.c.verdict != VOffUnverified || r.state() != "IDLE_OFF" {
+		t.Fatalf("verdict %s state %s, want off_unverified IDLE_OFF", r.c.verdict, r.state())
+	}
+	if !r.c.P.AbandonedUntil.IsZero() {
+		t.Fatal("block abandoned on an unsustained step")
+	}
+}
+
+// Fix 3, safe direction kept: the heater genuinely drawing (sustained),
+// no drop, and the window inconclusive (EV moved): back ON, never left
+// OFF on doubt; no strike.
+func TestFix3AmbiguousDrawingReturnsOn(t *testing.T) {
+	r := readyForOff(t)
+	r.calling = true
+	r.stuckClosed = true
+	r.emitResidual(true)
+	r.advance(16*time.Minute + 2*time.Second) // OFF just commanded
+	r.set(RoleEV, "7000")
+	r.advance(3 * time.Minute)
+	if r.c.verdict == VOffConfirmed || r.countCmds(99) != 1 || r.c.P.Strikes != 0 {
+		t.Fatalf("verdict %s cmds %v strikes %d", r.c.verdict, r.cmds, r.c.P.Strikes)
+	}
+	// A sustained step with a discontinuity near it is ambiguous too.
+	r = readyForOff(t)
+	r.advance(14 * time.Minute)
+	r.calling = true
+	// A load lost at the same moment: the residual also jumps by its
+	// DeltaW (the core subtracts it back out).
+	r.step(Discontinuity{At: r.now, Entity: "heat_pump_power_power", DeltaW: 900, Seq: 1})
+	r.baseW += 900
+	r.emitResidual(true)
+	r.c.cfg.GenuineMinDur = time.Minute // make the step "sustained" by the OFF
+	r.stuckClosed = true
+	// Rule 4 holds the OFF for 5 min after the discontinuity (~19 min),
+	// then the verification window runs.
+	r.advance(8 * time.Minute)
+	if r.countCmds(0) != 1 || r.countCmds(99) != 1 || r.c.verdict != VOffUnverified {
+		t.Fatalf("flagged step: verdict %s cmds %v", r.c.verdict, r.cmds)
+	}
+}
+
+// Review fix 4: once an OFF period has started, a re-plan may shorten it
+// but never extend or move it.
+func TestFix4RunningPeriodFrozen(t *testing.T) {
+	r := readyForOff(t) // period [16 min, 2 h 16 min]
+	r.advance(18 * time.Minute)
+	r.wantState("IDLE_OFF")
+	orig := *r.c.offPeriod
+	// A rolling re-plan slides the period: later start, later end.
+	r.plan(&Plan{PlannerID: "t", GeneratedAt: r.now, ValidUntil: r.now.Add(48 * time.Hour),
+		OffPeriods: []OffPeriod{{Start: r.now.Add(-time.Minute), End: orig.End.Add(time.Hour)}}})
+	r.advance(time.Minute)
+	if !r.c.offPeriod.End.Equal(orig.End) || !r.c.offPeriod.Start.Equal(orig.Start) {
+		t.Fatalf("running period moved: %+v, was %+v", *r.c.offPeriod, orig)
+	}
+	// A re-plan ending earlier is adopted, and the OFF ends there.
+	early := r.now.Add(10 * time.Minute)
+	r.plan(&Plan{PlannerID: "t", GeneratedAt: r.now, ValidUntil: r.now.Add(48 * time.Hour),
+		OffPeriods: []OffPeriod{{Start: orig.Start, End: early}}})
+	r.advance(time.Minute)
+	if !r.c.offPeriod.End.Equal(early) {
+		t.Fatalf("shortening not adopted: %+v", *r.c.offPeriod)
+	}
+	r.advance(11 * time.Minute)
+	if !r.switchOn {
+		t.Fatal("OFF ran past the shortened end")
+	}
+}
+
+// Review fix 5: after a row-14 return to ON the rest of the period is
+// abandoned; the next OFF needs a new planned period.
+func TestFix5NoReOffAfterRow14(t *testing.T) {
+	r := readyForOff(t) // period [16 min, 2 h 16 min]
+	periodEnd := r.now.Add(2*time.Hour + 16*time.Minute)
+	r.calling = true
+	r.stuckClosed = true
+	r.emitResidual(true)
+	r.advance(18 * time.Minute)
+	if r.c.verdict != VOffFailed {
+		t.Fatalf("verdict %s", r.c.verdict)
+	}
+	r.stuckClosed = false
+	r.calling = false
+	r.emitResidual(true)
+	r.advance(time.Hour)
+	if r.countCmds(0) != 1 {
+		t.Fatalf("re-OFF within the abandoned period: %v", r.cmds)
+	}
+	if ok, why := r.c.MayGoOff(false); ok || why != "period_abandoned" {
+		t.Fatalf("MayGoOff %v %s", ok, why)
+	}
+	// A new planned period after the abandoned end permits OFF again.
+	r.plan(&Plan{PlannerID: "t", GeneratedAt: r.now, ValidUntil: r.now.Add(48 * time.Hour),
+		OffPeriods: []OffPeriod{{Start: periodEnd.Add(10 * time.Minute), End: periodEnd.Add(2 * time.Hour)}}})
+	r.advance(periodEnd.Add(11 * time.Minute).Sub(r.now))
+	if r.countCmds(0) != 2 {
+		t.Fatalf("no OFF in the new period: %v (%s)", r.cmds, r.c.reason)
+	}
+}
+
 // Found during the fix round: losing the HA link while LIVE is
 // staleness, not a disarm. No ON is sent into the dead link and no strike
 // is counted; on reconnect the controller is still live.

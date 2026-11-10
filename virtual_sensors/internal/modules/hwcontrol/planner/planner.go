@@ -82,10 +82,9 @@ type block struct {
 }
 
 // Plan builds the plan at now from known prices. It never permits a
-// quarter whose price is unknown. facts are accepted for future planners
-// and ignored by this one.
+// quarter whose price is unknown. Of the facts, only CurrentOff is used:
+// a running period is kept exactly as started (review fix 4).
 func Plan(now time.Time, prices []Price, cfg Config, facts core.Facts) *core.Plan {
-	_ = facts
 	q := quarters(prices)
 	plan := &core.Plan{PlannerID: ID, GeneratedAt: now}
 	if len(q) == 0 {
@@ -145,6 +144,13 @@ func Plan(now time.Time, prices []Price, cfg Config, facts core.Facts) *core.Pla
 		return cands[i].end.Before(cands[j].end)
 	})
 	var chosen []block
+	// A running OFF period is frozen (review fix 4): keep it exactly, and
+	// plan any further periods around it. Unstarted periods may move.
+	pinned := map[int64]bool{}
+	if op := facts.CurrentOff; op != nil && now.Before(op.End) && !now.Before(op.Start) {
+		chosen = append(chosen, block{start: op.Start, end: op.End})
+		pinned[op.Start.Unix()] = true
+	}
 	for _, b := range cands {
 		if !compatible(b, chosen, cfg) {
 			continue
@@ -153,8 +159,19 @@ func Plan(now time.Time, prices []Price, cfg Config, facts core.Facts) *core.Pla
 	}
 	sort.Slice(chosen, func(i, j int) bool { return chosen[i].start.Before(chosen[j].start) })
 	for _, b := range chosen {
-		plan.OffPeriods = append(plan.OffPeriods, core.OffPeriod{Start: b.start, End: b.end,
-			Why: fmt.Sprintf("mean %.1f öre/kWh vs %.1f within 4 h after: saving %.1f öre/kWh", b.price, b.after, b.saving)})
+		why := fmt.Sprintf("mean %.1f öre/kWh vs %.1f within 4 h after: saving %.1f öre/kWh", b.price, b.after, b.saving)
+		if pinned[b.start.Unix()] {
+			why = "running period, kept as started"
+		}
+		plan.OffPeriods = append(plan.OffPeriods, core.OffPeriod{Start: b.start, End: b.end, Why: why})
+	}
+	if len(pinned) > 0 && plan.ValidUntil.Before(chosen[0].end) {
+		// Keep the plan valid for as long as the pinned period runs.
+		for _, b := range chosen {
+			if pinned[b.start.Unix()] && plan.ValidUntil.Before(b.end) {
+				plan.ValidUntil = b.end
+			}
+		}
 	}
 	return plan
 }

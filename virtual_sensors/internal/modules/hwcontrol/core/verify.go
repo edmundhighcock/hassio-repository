@@ -153,7 +153,8 @@ type verification struct {
 	evMoved    bool
 	stale      bool
 	seqGap     bool
-	drawing    bool // OFF: heater drawing at baseline
+	drawing    bool // OFF: heater drawing at baseline (step sustained >= 5 min, no discontinuity)
+	ambiguous  bool // OFF: an up-step at baseline with a discontinuity near it
 	stop       time.Time
 	started    bool
 	aboveSince time.Time
@@ -180,4 +181,5 @@ const (
 	vrDrop
 	vrNoDrop
 	vrIdle
+	vrAmbiguous // OFF: drawing or flagged step, no drop, window or step in doubt: return ON
 )

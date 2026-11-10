@@ -18,7 +18,21 @@ func (c *Controller) beginVerification(on bool) {
 		v.baseline, v.baselineOK = c.res.median(c.now, c.cfg.BaselineWindow)
 	}
 	v.baseEV, v.baseEVOK = c.num(RoleEV)
-	v.drawing = c.tracker.drawing
+	// Review fix 3: an up-step counts as "drawing" only once SUSTAINED for
+	// the D3 genuine-start duration (5 min). A step not yet sustained (a
+	// dip-and-recover reads as one) does not count: the heater is idle or
+	// unclear (row 13), so no spurious off_failed. A step with a
+	// discontinuity within ±60 s cannot be told from an administrative
+	// jump: it is ambiguous (see offResult: no drop returns ON).
+	k := &c.tracker
+	if k.drawing {
+		switch {
+		case c.discNear(k.upAt):
+			v.ambiguous = true
+		case c.now.Sub(k.upAt) >= c.cfg.GenuineMinDur:
+			v.drawing = true
+		}
+	}
 	c.ver = v
 }
 
@@ -87,17 +101,24 @@ func (c *Controller) offResult() int {
 	if v == nil || !v.started {
 		return vrPending
 	}
-	if !v.drawing {
-		return vrIdle
+	if !v.drawing && !v.ambiguous {
+		return vrIdle // row 13: idle, off_unverified, stays OFF
+	}
+	// No drop after a sustained step is row 14 (off_failed, back ON). With
+	// an inconclusive window, or a discontinuity-flagged step, it is
+	// genuinely ambiguous: back ON too (never left OFF on doubt).
+	noDrop := vrNoDrop
+	if v.ambiguous || v.inconclusive() {
+		noDrop = vrAmbiguous
 	}
 	if !v.baselineOK {
-		return vrNoDrop
+		return noDrop
 	}
 	if v.maxDrop >= c.cfg.ConfirmW {
 		return vrDrop
 	}
 	if c.now.Sub(v.stop) >= c.cfg.OffWindow {
-		return vrNoDrop
+		return noDrop
 	}
 	return vrPending
 }
@@ -108,6 +129,7 @@ func (c *Controller) verAttrs(v *verification) map[string]any {
 		"rise_w": math.Round(v.maxRise), "drop_w": math.Round(v.maxDrop),
 		"ev_moved": v.evMoved, "disc_in_window": v.discAny, "residual_stale": v.stale,
 		"seq_gap": v.seqGap, "burst": v.burst, "drawing_at_baseline": v.drawing,
+		"step_ambiguous_at_baseline": v.ambiguous,
 	}
 }
 

@@ -65,4 +65,8 @@ type Facts struct {
 	LastFinishedReheatStart time.Time
 	TankHeadroom            time.Duration // until the tank clock forbids OFF; 0 if unknown/exceeded
 	OffLimitSinceReheatEnd  time.Duration
+	// CurrentOff is the OFF period running now (nil if none). It is frozen
+	// in the core (review fix 4); a planner should keep it so rolling
+	// re-plans do not cut it short.
+	CurrentOff *OffPeriod
 }

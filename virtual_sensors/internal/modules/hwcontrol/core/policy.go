@@ -59,11 +59,17 @@ func (c *Controller) MayGoOff(shadow bool) (bool, string) {
 		return false, "boost"
 	}
 	// 2. inside a permitted period of a valid plan.
-	if _, ok := c.plan.PeriodAt(c.now); !ok {
+	period, ok := c.plan.PeriodAt(c.now)
+	if !ok {
 		if c.plan == nil || !c.plan.Valid(c.now) {
 			return false, "no_valid_plan"
 		}
 		return false, "outside_plan_period"
+	}
+	// Review fix 5: after an OFF was abandoned (row 14 etc.) the next OFF
+	// needs a new planned period, starting at or after the abandoned end.
+	if period.Start.Before(c.P.AbandonedUntil) {
+		return false, "period_abandoned"
 	}
 	// 3. IDLE_ON settled; strikes < 3; no hold.
 	if c.P.State != StIdleOn {
@@ -193,22 +199,36 @@ func (c *Controller) offRevoked(override bool) string {
 	if !c.now.Before(c.offPeriod.End) {
 		return "period_end"
 	}
-	p, ok := c.plan.PeriodAt(c.now)
-	if !ok {
-		if c.plan == nil || !c.plan.Valid(c.now) {
-			return "plan_expired"
-		}
-		return "plan_revised" // the revised plan no longer covers now
+	end, why := c.frozenEnd(*c.offPeriod)
+	if why != "" {
+		return why
 	}
-	if !p.End.Equal(c.offPeriod.End) {
-		// A revision that still covers now: its end now governs (it can
-		// only shorten or lengthen the permission; the tank clock is
-		// checked above regardless).
-		pp := p
+	if end.Before(c.offPeriod.End) {
+		pp := *c.offPeriod
+		pp.End = end
 		c.offPeriod = &pp
 		c.P.CurrentOffPeriod = &pp
 	}
 	return ""
+}
+
+// frozenEnd applies a (re)plan to an OFF period that has STARTED (review
+// fix 4): its start and end are frozen; a revision may only shorten it.
+// The plan's period covering now may end earlier (adopted); a later end
+// or a moved start is ignored. A plan that no longer covers now at all
+// shortens it to now (why != "").
+func (c *Controller) frozenEnd(cur OffPeriod) (time.Time, string) {
+	p, ok := c.plan.PeriodAt(c.now)
+	if !ok {
+		if c.plan == nil || !c.plan.Valid(c.now) {
+			return cur.End, "plan_expired"
+		}
+		return cur.End, "plan_revised" // the revised plan no longer covers now
+	}
+	if p.End.Before(cur.End) {
+		return p.End, ""
+	}
+	return cur.End, ""
 }
 
 // ---- the state machine ----
@@ -392,11 +412,11 @@ func (c *Controller) runCmdOff() {
 		c.setState(StVerifyOff, "motor_ok")
 	case mvRetreat, mvStuck:
 		c.strike("off_" + map[int]string{mvRetreat: "retreat", mvStuck: "stuck"}[m.outcome]) // row 10
-		c.abandonOff()
+		c.abandonPeriod("off_motor_failure")
 		c.startOn("off_motor_failure", false)
 	case mvCmdFailed:
 		c.strike("off_call_failed_x3") // row 11, C11
-		c.abandonOff()
+		c.abandonPeriod("off_call_failed")
 		c.startOn("off_call_failed", false)
 	}
 }
@@ -413,12 +433,21 @@ func (c *Controller) runVerifyOff() {
 		return
 	case vrDrop:
 		c.ver = nil
-		if v.inconclusive() || v.discAny {
+		if v.inconclusive() || v.discAny || v.ambiguous {
 			c.setVerdict(VOffUnverified, c.verAttrs(v)) // row 26: never confirmed
 		} else {
 			c.setVerdict(VOffConfirmed, c.verAttrs(v)) // row 12
 		}
 		c.setState(StIdleOff, "verified")
+	case vrAmbiguous:
+		// Fix 3: heater drawing (or a discontinuity-flagged step) at
+		// baseline, no drop, and the window or the step in doubt: genuinely
+		// ambiguous, so return ON (the safe direction), no strike; the
+		// rest of the period is abandoned (fix 5).
+		c.ver = nil
+		c.setVerdict(VOffUnverified, c.verAttrs(v))
+		c.abandonPeriod("off_ambiguous")
+		c.setState(StIdleOn, "off_ambiguous")
 	case vrIdle:
 		c.ver = nil
 		c.setVerdict(VOffUnverified, c.verAttrs(v)) // row 13, no recycle
@@ -430,9 +459,10 @@ func (c *Controller) runVerifyOff() {
 			c.setState(StIdleOff, "inconclusive")
 			return
 		}
-		// Row 14: off_failed; no strike, no recycle; block abandoned.
+		// Row 14: off_failed; no strike, no recycle; block abandoned, and
+		// with it the rest of the period (fix 5).
 		c.setVerdict(VOffFailed, c.verAttrs(v))
-		c.abandonOff()
+		c.abandonPeriod("off_failed")
 		c.setState(StIdleOn, "off_failed")
 	}
 }
@@ -448,6 +478,9 @@ func (c *Controller) runIdleOff() {
 		if !c.linkUp {
 			c.enterDegraded("off_but_ha_lost") // row 17: ON cannot be commanded
 			return
+		}
+		if why == "heat_while_off" {
+			c.abandonPeriod(why) // the tank is calling: no re-OFF in this period
 		}
 		c.startOn("end_off_"+why, true)
 	}
@@ -466,6 +499,18 @@ func (c *Controller) heatWhileOff() {
 	c.heatOffCounted = k.upAt
 	c.heatOffCount++
 	c.logf("heat_while_off #%d (step %.0f W at %s)", c.heatOffCount, k.step, k.upAt.Format(time.RFC3339))
+}
+
+// abandonPeriod (review fix 5) abandons the rest of the running OFF
+// period: no further OFF until a planned period starting at or after its
+// end. Used where the OFF failed or was cut short by the heater itself
+// (rows 10, 11, 14, an ambiguous verification, heat while OFF).
+func (c *Controller) abandonPeriod(why string) {
+	if c.offPeriod != nil && c.offPeriod.End.After(c.P.AbandonedUntil) {
+		c.P.AbandonedUntil = c.offPeriod.End
+		c.logf("rest of OFF period abandoned until %s (%s)", c.offPeriod.End.Format(time.RFC3339), why)
+	}
+	c.abandonOff()
 }
 
 // abandonOff clears the running OFF period's bookkeeping.
@@ -984,8 +1029,12 @@ func (c *Controller) shadowDecide() {
 		case c.offInputsStale() != "":
 			why = "stale_" + c.offInputsStale()
 		default:
-			if p, ok := c.plan.PeriodAt(c.now); !ok || !p.Start.Equal(c.shadowOff.Start) {
-				why = "plan_revised"
+			// Same frozen-period rule as live (fix 4).
+			end, w := c.frozenEnd(*c.shadowOff)
+			if w != "" {
+				why = w
+			} else {
+				c.shadowOff.End = end
 			}
 		}
 		if why != "" {

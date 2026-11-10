@@ -160,6 +160,10 @@ func (c *Controller) Facts() Facts {
 			f.TankHeadroom = h
 		}
 	}
+	if c.offPeriod != nil {
+		op := *c.offPeriod
+		f.CurrentOff = &op
+	}
 	return f
 }
 

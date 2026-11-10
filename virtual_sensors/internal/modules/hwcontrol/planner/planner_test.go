@@ -204,3 +204,28 @@ func TestParseNordpoolDSTAndHourly(t *testing.T) {
 		t.Fatalf("raw_today not preferred: %+v", ps)
 	}
 }
+
+// Review fix 4: a running period is kept exactly as started by rolling
+// re-plans, even when a different block would now score higher.
+func TestRunningPeriodPinned(t *testing.T) {
+	now := time.Date(2026, 12, 10, 17, 20, 0, 0, sto)
+	shape := func(h int) float64 {
+		if h >= 17 && h < 20 {
+			return 3.0
+		}
+		return 0.4
+	}
+	prices := append(day(now, shape), day(now.AddDate(0, 0, 1), shape)...)
+	running := core.OffPeriod{Start: time.Date(2026, 12, 10, 17, 0, 0, 0, sto), End: time.Date(2026, 12, 10, 17, 45, 0, 0, sto)}
+	p := Plan(now, prices, DefaultConfig(), core.Facts{CurrentOff: &running})
+	checkPlan(t, p, now)
+	got, ok := p.PeriodAt(now)
+	if !ok || !got.Start.Equal(running.Start) || !got.End.Equal(running.End) {
+		t.Fatalf("running period not kept: %+v (plan %+v)", got, p.OffPeriods)
+	}
+	for _, op := range p.OffPeriods {
+		if op.Start.Before(running.End.Add(2*time.Hour)) && !op.Start.Equal(running.Start) {
+			t.Fatalf("a new period within 2 h of the running one: %+v", op)
+		}
+	}
+}
