@@ -287,6 +287,68 @@ func TestFix5NoReOffAfterRow14(t *testing.T) {
 	}
 }
 
+// Review fix 8: PLAN §8 R3's manual test move. With no plan (the planner
+// overridden), a press of the test-move button runs one OFF for
+// TestOffDuration and returns ON with verification. A test probe runs
+// 0 -> 99 and leaves the backstop schedule alone. Both need LIVE; the
+// move reserve gates them.
+func TestFix8ManualTestMoves(t *testing.T) {
+	r := newRig(t, liveCfg(), nil)
+	r.boot(true)
+	r.set(RoleTestMove, "2026-01-01T00:00:00+00:00") // snapshot: not a press
+	r.set(RoleTestProbe, "2026-01-01T00:00:00+00:00")
+	r.advance(time.Minute)
+	if len(r.cmds) != 0 {
+		t.Fatal("the button snapshot acted")
+	}
+	r.set(RoleTestMove, r.now.Format(time.RFC3339))
+	r.advance(time.Minute)
+	if r.countCmds(0) != 1 || r.state() != "IDLE_OFF" {
+		t.Fatalf("test move did not go OFF: %v %s (%s)", r.cmds, r.state(), r.c.reason)
+	}
+	r.advance(10 * time.Minute)
+	if r.countCmds(99) != 1 || !r.switchOn {
+		t.Fatalf("test move did not return ON at its end: %v %s", r.cmds, r.state())
+	}
+	r.advance(3 * time.Minute)
+	r.wantState("IDLE_ON")
+
+	next := r.c.P.NextProbeOnS
+	r.set(RoleTestProbe, r.now.Format(time.RFC3339))
+	r.advance(3 * time.Minute)
+	if r.countCmds(0) != 2 || r.countCmds(99) != 2 || r.state() != "IDLE_ON" {
+		t.Fatalf("test probe: %v %s", r.cmds, r.state())
+	}
+	if r.c.P.NextProbeOnS != next {
+		t.Fatal("a test probe moved the backstop probe schedule")
+	}
+
+	// Move reserve: 4 moves used of 8/day; another test needs 1 + 3 in
+	// reserve, so with the day cap at 7 it is refused.
+	r.c.cfg.MaxMovesDay = 7
+	r.set(RoleTestMove, r.now.Add(time.Second).Format(time.RFC3339))
+	r.advance(time.Minute)
+	if r.countCmds(0) != 2 || r.notifies(AlertTestRefused) != 1 {
+		t.Fatalf("test beyond the reserve: cmds %v refusals %d", r.cmds, r.notifies(AlertTestRefused))
+	}
+}
+
+func TestFix8TestMoveNeedsLive(t *testing.T) {
+	cfg := liveCfg()
+	cfg.Live = false // shadow
+	r := newRig(t, cfg, nil)
+	r.boot(true)
+	r.set(RoleTestMove, "2026-01-01T00:00:00+00:00")
+	r.set(RoleTestMove, r.now.Format(time.RFC3339))
+	r.advance(5 * time.Minute)
+	if len(r.cmds) != 0 {
+		t.Fatalf("shadow test move commanded %v", r.cmds)
+	}
+	if e, ok := r.lastPublished(ObjAlert); !ok || e.State != AlertTestRefused {
+		t.Fatalf("no refusal published: %+v", e)
+	}
+}
+
 // Found during the fix round: losing the HA link while LIVE is
 // staleness, not a disarm. No ON is sent into the dead link and no strike
 // is counted; on reconnect the controller is still live.

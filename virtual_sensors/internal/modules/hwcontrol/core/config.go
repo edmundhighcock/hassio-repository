@@ -94,6 +94,9 @@ type Config struct {
 	// suppressed in SHADOW, §3).
 	ShadowSummaryHour int
 
+	// R3 manual test moves (PLAN §8): how long a test OFF lasts.
+	TestOffDuration time.Duration // 10 min; clamped to 2-60 min
+
 	// Version is published with the heartbeat.
 	Version string
 }
@@ -167,6 +170,7 @@ func Defaults() Config {
 		BurstWindow:     10 * time.Second,
 
 		ShadowSummaryHour: 9,
+		TestOffDuration:   10 * time.Minute,
 		Version:           "0.2.0",
 	}
 }
@@ -203,6 +207,7 @@ func (c *Config) Clamp() []string {
 	fix(c.BatteryFloor < 0 || c.BatteryFloor > 100, "hwc_battery_floor_pct", func() { c.BatteryFloor = d.BatteryFloor })
 	fix(c.BatteryAlert < 0 || c.BatteryAlert > 100, "hwc_battery_alert_pct", func() { c.BatteryAlert = d.BatteryAlert })
 	fix(c.Heartbeat < 15*time.Second || c.Heartbeat > 300*time.Second, "hwc_heartbeat_s", func() { c.Heartbeat = d.Heartbeat })
+	fix(c.TestOffDuration < 2*time.Minute || c.TestOffDuration > time.Hour, "hwc_test_off_min", func() { c.TestOffDuration = d.TestOffDuration })
 	return msgs
 }
 

@@ -77,6 +77,10 @@ schema:
   # motor (beyond PLAN §9; set after M0 confirms the motor's entities)
   hwc_motor_state_entity: "str?" # default sensor.hot_water_switch_motor_state; "" = none (time fallback)
   hwc_motor_stopped_states: "str?" # default "stopped,stop,idle"
+  # R3 supervised live actuation (PLAN §8): manual test moves via
+  # input_button.hot_water_test_move / _test_probe, LIVE only, within the move caps
+  hwc_test_moves_only: "bool?" # default false; true = planner overridden, no planned OFF
+  hwc_test_off_min: "int(2,60)?" # default 10: how long a test OFF lasts
 # This add-on's own /data (energy totals, open-cycle state - see DOCS.md
 # "Restart semantics") is small; it is included in Home Assistant's
 # normal backups like any other add-on's /data, with no backup_exclude.

@@ -43,6 +43,22 @@
     battery or no move reserve, and is not re-honoured after expiry or
     refusal until the select changes.
   - HA link lost mid-command or while OFF gives DEGRADED, not a strike.
+- Review rulings (HAM, 2026-11-10):
+  - Warm-up replay reconstructs the ON-time clock and restamps genuine
+    starts from history; replay never actuates.
+  - Any target or position >= 99 is ON (the switch rests at 100).
+  - The OFF "heater drawing" test needs a step sustained 5 min; an
+    unsustained step is idle (no spurious `off_failed`). A sustained step
+    with an inconclusive window, or with a discontinuity near it, and no
+    drop returns ON.
+  - A started OFF period is frozen: a re-plan may only shorten it.
+  - After an OFF is abandoned (rows 10, 11, 14, an ambiguous check, heat
+    while OFF) the next OFF needs a new planned period.
+  - No DEGRADED before the first snapshot; `""`/null persisted times read
+    as unset.
+  - R3 manual test moves (`input_button.hot_water_test_move`,
+    `_test_probe`; options `hwc_test_moves_only`, `hwc_test_off_min`).
+  - `saving_month` is not published (no estimate is computed yet).
 - hot_water: `sonoff_1001721983_power` (the spa floor-heating Sonoff,
   which left Home Assistant in 2024) is no longer a known load of the
   live residual, so it stops sitting permanently in `missing_loads`. The

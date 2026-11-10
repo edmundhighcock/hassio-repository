@@ -2,6 +2,7 @@ package hwcontrol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,5 +219,46 @@ func TestOptionsClampAndParse(t *testing.T) {
 	}
 	if m.cfg.Live {
 		t.Fatal("live without hwc_mode")
+	}
+}
+
+// Nothing publishes a value that is never computed: saving_month is not
+// declared (no saving estimate exists yet).
+func TestNoSavingMonthEntity(t *testing.T) {
+	for _, o := range New().Outputs() {
+		if strings.Contains(o.ObjectID, "saving") {
+			t.Fatalf("declared %s, which is never computed", o.ObjectID)
+		}
+	}
+}
+
+// Review fix 8: hwc_test_moves_only overrides the planner (PLAN §8 R3): a
+// price update yields no plan, so only manual test moves can switch OFF.
+func TestTestMovesOnlyOverridesPlanner(t *testing.T) {
+	prices := func() map[string]any {
+		var raw []map[string]any
+		base := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 96; i++ {
+			v := 0.4
+			if i >= 68 && i < 80 {
+				v = 3.0 // a 17:00-20:00 UTC peak
+			}
+			s := base.Add(time.Duration(i) * 15 * time.Minute)
+			raw = append(raw, map[string]any{"start": s.Format(time.RFC3339), "end": s.Add(15 * time.Minute).Format(time.RFC3339), "value": v})
+		}
+		return map[string]any{"raw_today": raw, "tomorrow_valid": false}
+	}
+	for _, tc := range []struct {
+		opts    string
+		planner bool
+	}{{`{"hwc_mode":"live"}`, true}, {`{"hwc_mode":"live","hwc_test_moves_only":true}`, false}} {
+		w := newWorld(t, tc.opts)
+		w.bootInputs("on", 99)
+		w.state("sensor.nordpool_kwh_se3_sek_3_06_0", "0.4", prices())
+		w.run(time.Minute, 500)
+		attrs := w.pub.last["hot_water_controller_plan"].AttributesJSON
+		if got := strings.Contains(attrs, `"planner":"greedy_v1"`); got != tc.planner {
+			t.Fatalf("%s: plan attributes %s", tc.opts, attrs)
+		}
 	}
 }

@@ -34,6 +34,12 @@ input_boolean:
 input_button:
   hot_water_boost:
     name: "Hot water boost" # ON now, overriding cost saving until one reheat (§4.7)
+  # R3 supervised live actuation (§8): manual test moves. They act only
+  # when the controller is LIVE (both keys), within the move caps.
+  hot_water_test_move:
+    name: "Hot water test move" # one OFF for hwc_test_off_min (10 min), then ON + verify
+  hot_water_test_probe:
+    name: "Hot water test probe" # one 0 -> 99 probe, then look for a rise
 
 automation:
   - id: hot_water_watchdog

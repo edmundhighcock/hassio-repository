@@ -31,6 +31,7 @@ func init() {
 type Entities struct {
 	Cover, Target, MotorState, Battery, Charging string
 	Select, Armed, Latch, Boost                  string
+	TestMove, TestProbe                          string // R3 manual test buttons (PLAN §8)
 	EV, TankTemp, Price                          string
 	Conflicts                                    []string
 	ConflictPrefix                               string
@@ -44,6 +45,7 @@ func entitiesFor(cover, price, notify string) Entities {
 		Battery: obj + "_battery", Charging: "binary_sensor." + obj + "_charging",
 		Select: "input_select.hot_water", Armed: "input_boolean.hot_water_controller_armed",
 		Latch: "input_boolean.hot_water_watchdog_tripped", Boost: "input_button.hot_water_boost",
+		TestMove: "input_button.hot_water_test_move", TestProbe: "input_button.hot_water_test_probe",
 		EV: "loaver_power", TankTemp: "hot_water_tank_sensor_device_temperature",
 		Price:          strings.TrimPrefix(price, "sensor."),
 		Conflicts:      []string{"automation.hot_water", "automation.hot_water_on", "automation.hot_water_on_2"},
@@ -64,6 +66,7 @@ type Module struct {
 
 	prices     []planner.Price
 	lastPlanAt time.Time
+	testOnly   bool // hwc_test_moves_only: R3 planner override, never a plan
 	now        time.Time
 
 	outs    []modules.OutputUpdate
@@ -86,6 +89,7 @@ func (m *Module) buildRoles() {
 		e.Battery: core.RoleBattery, e.Charging: core.RoleCharging, e.Select: core.RoleSelect,
 		e.Armed: core.RoleArmed, e.Latch: core.RoleLatch, e.Boost: core.RoleBoost,
 		e.EV: core.RoleEV, e.TankTemp: core.RoleTankTemp,
+		e.TestMove: core.RoleTestMove, e.TestProbe: core.RoleTestProbe,
 	}
 	for _, a := range e.Conflicts {
 		m.roles[a] = core.RoleConflict
@@ -102,6 +106,7 @@ func (m *Module) Inputs() []modules.InputSpec {
 		{EntityID: e.Cover, Attributes: []string{"current_position"}},
 		{EntityID: e.Target}, {EntityID: e.MotorState}, {EntityID: e.Battery}, {EntityID: e.Charging},
 		{EntityID: e.Select}, {EntityID: e.Armed}, {EntityID: e.Latch}, {EntityID: e.Boost},
+		{EntityID: e.TestMove}, {EntityID: e.TestProbe},
 		{EntityID: e.EV}, {EntityID: e.TankTemp},
 		{EntityID: e.Price, Attributes: []string{"today", "tomorrow", "raw_today", "raw_tomorrow", "tomorrow_valid"}},
 		{EntityID: e.ConflictPrefix, Prefix: true},
@@ -133,7 +138,6 @@ func (m *Module) Outputs() []modules.OutputSpec {
 		core.ObjShadowWould:   {"Hot water controller shadow would", "", ""},
 		core.ObjAlert:         {"Hot water controller alert", "", ""},
 		core.ObjStrikes:       {"Hot water controller strikes", "", "measurement"},
-		core.ObjSavingMonth:   {"Hot water controller saving this month", "kr", ""},
 	}
 	var out []modules.OutputSpec
 	for _, obj := range core.TelemetryObjects {
@@ -176,6 +180,8 @@ type options struct {
 	EVGuardMinutes     *string  `json:"hwc_ev_guard_minutes"`
 	MotorStateEntity   *string  `json:"hwc_motor_state_entity"`
 	MotorStoppedStates *string  `json:"hwc_motor_stopped_states"`
+	TestMovesOnly      *bool    `json:"hwc_test_moves_only"` // R3: no planned OFF, only manual test moves
+	TestOffMin         *int     `json:"hwc_test_off_min"`
 }
 
 func hours(v float64) time.Duration { return time.Duration(v * float64(time.Hour)) }
@@ -281,6 +287,13 @@ func (m *Module) Configure(raw []byte) error {
 	}
 	if o.HeartbeatS != nil {
 		c.Heartbeat = time.Duration(*o.HeartbeatS) * time.Second
+	}
+	if o.TestOffMin != nil {
+		c.TestOffDuration = time.Duration(*o.TestOffMin) * time.Minute
+	}
+	m.testOnly = o.TestMovesOnly != nil && *o.TestMovesOnly
+	if m.testOnly {
+		msgs = append(msgs, "hwc_test_moves_only: the planner is overridden, no planned OFF (R3 manual test moves only)")
 	}
 	msgs = append(msgs, c.Clamp()...)
 
@@ -420,7 +433,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 // replan runs the planner on the known prices and hands the core the plan.
 func (m *Module) replan(now time.Time) {
 	m.lastPlanAt = now
-	if len(m.prices) == 0 {
+	if len(m.prices) == 0 || m.testOnly {
 		m.step(core.PlanUpdate{At: now, Plan: nil})
 		return
 	}

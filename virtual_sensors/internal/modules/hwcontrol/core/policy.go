@@ -169,8 +169,8 @@ func (c *Controller) offRevoked(override bool) string {
 	if !c.actuating() {
 		return "disarm"
 	}
-	if !c.tankOK() {
-		return "tank_limit"
+	if !c.tankOK() && !c.testOff {
+		return "tank_limit" // a test OFF is bounded by its own short end instead
 	}
 	if s := c.offInputsStale(); s != "" {
 		return "stale_" + s
@@ -198,6 +198,9 @@ func (c *Controller) offRevoked(override bool) string {
 	}
 	if !c.now.Before(c.offPeriod.End) {
 		return "period_end"
+	}
+	if c.testOff {
+		return "" // a test OFF is not a plan period: its fixed end governs
 	}
 	end, why := c.frozenEnd(*c.offPeriod)
 	if why != "" {
@@ -372,6 +375,12 @@ func (c *Controller) runIdleOn() {
 		c.startOn("drift", false)
 		return
 	}
+	// R3 manual test move / probe (PLAN §8), behind the same arming, move
+	// caps and reserve.
+	if c.testPending != "" && c.mv == nil {
+		c.startTest()
+		return
+	}
 	// Row 7: backstop probe.
 	if c.probeDue() && c.mv == nil && c.reserveAfter(1) && c.offInputsStale() == "" {
 		c.subStep = 0
@@ -501,6 +510,55 @@ func (c *Controller) heatWhileOff() {
 	c.logf("heat_while_off #%d (step %.0f W at %s)", c.heatOffCount, k.step, k.upAt.Format(time.RFC3339))
 }
 
+// startTest runs a pending R3 test from IDLE_ON (PLAN §8: supervised live
+// actuation, "manual-trigger test moves"). It needs LIVE (both keys),
+// select Auto, no hold (we are in IDLE_ON), every OFF input fresh, the
+// battery at or above the floor, the cover ON and the move reserve. It
+// does not need a plan period, the settle, the tank clock or the evening
+// rule: a human asked, with the test OFF bounded by TestOffDuration.
+func (c *Controller) startTest() {
+	kind := c.testPending
+	c.testPending = ""
+	why := ""
+	switch {
+	case !c.live:
+		why = "not LIVE"
+	case !c.entityFresh(RoleSelect) || c.str(RoleSelect) != SelectAuto:
+		why = "selector not on Auto"
+	case c.offInputsStale() != "":
+		why = "input stale: " + c.offInputsStale()
+	case c.batteryLow():
+		why = "battery below the floor"
+	case !c.coverOn() || !c.targetIsOn():
+		why = "cover not ON"
+	case !c.reserveAfter(1):
+		why = "move reserve not available"
+	}
+	if why != "" {
+		c.alert(AlertTestRefused, "Hot water: test "+kind+" refused: "+why+".", 0)
+		return
+	}
+	if kind == "probe" {
+		c.testProbe = true
+		c.subStep = 0
+		c.setState(StProbe, "test_probe")
+		c.runProbe()
+		return
+	}
+	op := OffPeriod{Start: c.now, End: c.now.Add(c.cfg.TestOffDuration), Why: "manual test move (R3)"}
+	c.offPeriod = &op
+	c.P.CurrentOffPeriod = &op
+	c.testOff = true
+	c.beginVerification(false)
+	if !c.startMove(c.cfg.CmdOff, "test_off") {
+		c.ver = nil
+		c.offPeriod, c.P.CurrentOffPeriod, c.testOff = nil, nil, false
+		c.alert(AlertTestRefused, "Hot water: test move refused: move cap reached.", 0)
+		return
+	}
+	c.setState(StCmdOff, "test_move")
+}
+
 // abandonPeriod (review fix 5) abandons the rest of the running OFF
 // period: no further OFF until a planned period starting at or after its
 // end. Used where the OFF failed or was cut short by the heater itself
@@ -517,6 +575,7 @@ func (c *Controller) abandonPeriod(why string) {
 func (c *Controller) abandonOff() {
 	c.offPeriod = nil
 	c.P.CurrentOffPeriod = nil
+	c.testOff = false
 	if c.P.State == StCmdOff || c.P.State == StVerifyOff {
 		c.ver = nil
 	}
@@ -533,6 +592,7 @@ func (c *Controller) startOn(reason string, endsOff bool) {
 	}
 	c.offPeriod = nil
 	c.P.CurrentOffPeriod = nil
+	c.testOff, c.testProbe = false, false
 	c.ver = nil
 	c.mv = nil
 	c.subStep = 0
@@ -650,6 +710,7 @@ func (c *Controller) runVerifyOn() {
 func (c *Controller) toIdleOn(reason string) {
 	c.P.OffSince = time.Time{}
 	c.onEndsOff = false
+	c.testProbe = false
 	c.setState(StIdleOn, reason)
 }
 
@@ -667,7 +728,7 @@ func (c *Controller) runCycle(probe bool) {
 	case 0: // send 0
 		if !c.reserveAfter(1) {
 			if probe {
-				c.P.NextProbeOnS = c.P.OnSSinceGenuineStart + c.cfg.ProbeRepeat.Seconds()
+				c.rescheduleProbe()
 				c.toIdleOn("probe_skipped_move_budget")
 			} else {
 				c.cycleNoRise(probe, "no_move_budget")
@@ -719,7 +780,7 @@ func (c *Controller) runCycle(probe bool) {
 			if probe {
 				// Row 27: the clock is stamped only by the qualifier (later);
 				// reset the probe schedule meanwhile.
-				c.P.NextProbeOnS = c.P.OnSSinceGenuineStart + c.cfg.ProbeRepeat.Seconds()
+				c.rescheduleProbe()
 			}
 			c.toIdleOn(purpose + "_rise")
 			return
@@ -732,11 +793,20 @@ func (c *Controller) runCycle(probe bool) {
 	}
 }
 
+// rescheduleProbe moves the backstop probe +ProbeRepeat of ON time. A
+// manual R3 test probe leaves the backstop schedule alone.
+func (c *Controller) rescheduleProbe() {
+	if c.testProbe {
+		return
+	}
+	c.P.NextProbeOnS = c.P.OnSSinceGenuineStart + c.cfg.ProbeRepeat.Seconds()
+}
+
 func (c *Controller) cycleNoRise(probe bool, reason string) {
 	if probe {
 		// Row 28: next probe +4 h of ON time; alerts come from the clock.
 		c.setVerdict(VOnPositionOnly, map[string]any{"probe": true, "reason": reason})
-		c.P.NextProbeOnS = c.P.OnSSinceGenuineStart + c.cfg.ProbeRepeat.Seconds()
+		c.rescheduleProbe()
 		c.toIdleOn("probe_" + reason)
 		return
 	}

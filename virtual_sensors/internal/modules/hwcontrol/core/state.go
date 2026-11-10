@@ -76,6 +76,13 @@ type Controller struct {
 	// shadowNextProbe is SHADOW's own would-probe schedule (ON seconds).
 	shadowNextProbe float64
 
+	// R3 manual test moves (PLAN §8).
+	buttonPrev    map[Role]string
+	testPending   string // "move" | "probe" | ""
+	testPendingAt time.Time
+	testOff       bool // the running OFF is a test move
+	testProbe     bool // the running probe is a test probe
+
 	hold            string
 	bootSince       time.Time
 	healthySince    time.Time
@@ -119,6 +126,7 @@ func New(cfg Config, persisted []byte, coverEntity string) *Controller {
 	c := &Controller{
 		cfg: cfg, P: p, coverEntity: coverEntity,
 		in: map[Role]*held{}, conflicts: map[string]bool{}, lastPub: map[string]string{},
+		buttonPrev: map[Role]string{},
 	}
 	c.res.keep = 20 * time.Minute
 	c.corrected.keep = 20 * time.Minute
@@ -289,6 +297,10 @@ func (c *Controller) onEntity(u EntityUpdate) {
 	if u.Role == RoleBoost {
 		c.onBoostState(u)
 	}
+	if u.Role == RoleTestMove || u.Role == RoleTestProbe {
+		c.onTestButton(u)
+		return
+	}
 	x := c.h(u.Role)
 	x.known = true
 	x.at = u.At
@@ -344,6 +356,31 @@ func (c *Controller) onBoostState(u EntityUpdate) {
 	if valid {
 		c.boostPrev, c.boostPrevKnown = val, true
 	}
+}
+
+// onTestButton records an R3 test-move or test-probe press (PLAN §8). A
+// button's state is its last press time: a change to a new valid value is
+// a press; the first value seen (the snapshot) is not.
+func (c *Controller) onTestButton(u EntityUpdate) {
+	val := u.State
+	valid := val != "unavailable" && val != "unknown" && val != ""
+	prev, known := c.buttonPrev[u.Role]
+	if valid {
+		c.buttonPrev[u.Role] = val
+	}
+	if !known || !valid || val == prev {
+		return
+	}
+	kind := "move"
+	if u.Role == RoleTestProbe {
+		kind = "probe"
+	}
+	if !c.live {
+		c.alert(AlertTestRefused, "Hot water: test "+kind+" refused: the controller is not LIVE (both keys needed).", 0)
+		return
+	}
+	c.testPending, c.testPendingAt = kind, c.now
+	c.logf("test %s requested", kind)
 }
 
 func (c *Controller) pressBoost() {
@@ -594,6 +631,11 @@ func (c *Controller) housekeeping() {
 	c.boostExits()
 	if c.linkUp {
 		c.backstopAlerts() // after a replay, alert only once HA is reachable
+	}
+	if c.testPending != "" && c.now.Sub(c.testPendingAt) > time.Minute {
+		kind := c.testPending
+		c.testPending = ""
+		c.alert(AlertTestRefused, fmt.Sprintf("Hot water: test %s refused: controller busy in %s.", kind, c.stateLabel()), 0)
 	}
 	if b, ok := c.num(RoleBattery); ok && b < c.cfg.BatteryAlert {
 		c.alert(AlertBatteryLow, fmt.Sprintf("Hot-water switch motor battery at %.0f%% (alert below %.0f%%).", b, c.cfg.BatteryAlert), 24*time.Hour)

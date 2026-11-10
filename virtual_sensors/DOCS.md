@@ -234,10 +234,22 @@ Published (MQTT discovery, prefix `hot_water_controller_`, never
 `hwc_`): `heartbeat` (Unix s, every 60 s only while healthy), `state`,
 `desired`, `verdict`, `on_hours_since_genuine_start`,
 `hours_since_reheat_end`, `moves_today`, `plan`, `shadow_would`, `alert`,
-`strikes`, `saving_month` (declared; not yet computed). State persists in
+`strikes`. PLAN's `saving_month` is not published until a saving
+estimate is computed. State persists in
 `/data/hot_water_control-state.json`; a missing or corrupt file means
 every clock is unknown, so no OFF until a finished reheat is seen live or
-seeded from 24 h of detector history.
+seeded from 24 h of detector history. `""` and `null` times in that file
+read as unset.
+
+**R3 test moves** (PLAN §8, supervised live actuation): with the
+controller LIVE, pressing `input_button.hot_water_test_move` runs one OFF
+for `hwc_test_off_min` (default 10 min) and then commands ON and
+verifies; `input_button.hot_water_test_probe` runs one 0 → 99 probe
+(without moving the backstop probe schedule). Both need select Auto, no
+hold, fresh inputs, battery at or above the floor and the move reserve;
+otherwise they are refused with the alert `TEST_MOVE_REFUSED`. They need
+no plan period or tank clock. `hwc_test_moves_only: true` overrides the
+planner (no planned OFF), so only test moves switch OFF.
 
 Interpretations taken where PLAN is silent or inconsistent are listed in
 the 0.2.0 CHANGELOG entry.

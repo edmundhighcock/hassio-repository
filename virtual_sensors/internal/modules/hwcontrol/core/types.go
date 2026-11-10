@@ -20,6 +20,8 @@ const (
 	RoleConflict                   // automation.* of the old controllers
 	RoleEV                         // loaver_power, already in W
 	RoleTankTemp                   // logged only
+	RoleTestMove                   // input_button.hot_water_test_move (R3 manual test OFF/ON)
+	RoleTestProbe                  // input_button.hot_water_test_probe (R3 manual probe)
 )
 
 // Select options.
@@ -216,6 +218,7 @@ const (
 	AlertNoDetector        = "NO_DETECTOR"
 	AlertShadowDaily       = "SHADOW_SUMMARY"
 	AlertOffAtCapUnhandled = "MOVE_CAP"
+	AlertTestRefused       = "TEST_MOVE_REFUSED"
 )
 
 // Telemetry object ids (§2.5). Prefix hot_water_controller_, never hwc_.
@@ -231,11 +234,13 @@ const (
 	ObjShadowWould   = "hot_water_controller_shadow_would"
 	ObjAlert         = "hot_water_controller_alert"
 	ObjStrikes       = "hot_water_controller_strikes"
-	ObjSavingMonth   = "hot_water_controller_saving_month"
+	// hot_water_controller_saving_month (PLAN §2.5) is not published: no
+	// saving estimate is computed yet, and an entity that never gets a
+	// value is worse than none. Add it with the estimate.
 )
 
 // TelemetryObjects lists every published object id.
 var TelemetryObjects = []string{
 	ObjHeartbeat, ObjState, ObjDesired, ObjVerdict, ObjOnHours, ObjHoursSinceEnd,
-	ObjMovesToday, ObjPlan, ObjShadowWould, ObjAlert, ObjStrikes, ObjSavingMonth,
+	ObjMovesToday, ObjPlan, ObjShadowWould, ObjAlert, ObjStrikes,
 }

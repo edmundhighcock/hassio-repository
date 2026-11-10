@@ -84,3 +84,11 @@ configuration:
   hwc_price_adder_ore:
     name: "Price adder (öre/kWh)"
     description: "Transfer + energy tax + supplier fee, excl. VAT. Update each January. Default 55.1."
+  hwc_test_moves_only:
+    name: "Test moves only (R3)"
+    description: >-
+      Overrides the planner: no planned OFF. Only the test-move and
+      test-probe buttons switch the heater, and only when LIVE.
+  hwc_test_off_min:
+    name: "Test OFF length (min)"
+    description: "How long a test move holds OFF before switching ON. Default 10."
