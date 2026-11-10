@@ -162,16 +162,11 @@ func Plan(in Input, p Params) Result {
 		}
 	}
 	chosen := map[int]bool{}
-	if pricedKWh < need && res.PricesPartial && usableKWh > need {
-		// Tomorrow's prices are not in yet and the time left still covers the
-		// need at the ceiling: plan the priced slots only, leave the rest.
-		res.AwaitingPrices = true
-		for _, c := range usable {
-			if c.priced {
-				chosen[c.i] = true
-			}
-		}
-	} else if pricedKWh < need {
+	// Tomorrow's prices are not in yet and the time left still covers the
+	// need at the ceiling: choose from the priced slots only, leave the
+	// remainder unplanned and wait for the prices (not deadline mode).
+	res.AwaitingPrices = res.PricesPartial && usableKWh > need
+	if pricedKWh < need && !res.AwaitingPrices {
 		// Backstop: every remaining usable slot at its ceiling.
 		res.DeadlineMode = true
 		for _, c := range usable {

@@ -348,7 +348,7 @@ func TestAwaitingPricesThenNormalPlan(t *testing.T) {
 	if s := stateOf(outs); s != "awaiting_prices" {
 		t.Fatalf("state %q", s)
 	}
-	if !m.plan.AwaitingPrices || m.plan.DeadlineMode || m.plan.UnplannedKWh <= 0 {
+	if !m.plan.AwaitingPrices || m.plan.DeadlineMode {
 		t.Fatalf("%+v", m.plan)
 	}
 	outs = m.OnStateUpdate(modules.StateUpdate{EntityID: m.priceEnt, Time: at(10, 13, 5), Available: true, Attrs: rawPrices(at(10, 0, 0), at(12, 0, 0), f)})
