@@ -305,52 +305,115 @@ Restart state is `/data/ev_control-state.json`.
 
 All options are optional with defaults in code (see config.yaml `ev_*`).
 
-## Heat-pump and Dyson planner (`hp_control`, shadow only)
+## Heat-pump and Dyson planner (`hp_control`)
 
 Design: `services/hp-planner/PLAN.md` in the ham repository. Enable it by
-adding `hp_control` to `modules`. **It is shadow only: it calls no Home
-Assistant or device service, and there is no live option in this build.**
+adding `hp_control` to `modules`. **It is SHADOW by default.** It drives
+`climate.heat_pump` and `fan.dyson_nn2_eu_nfa8623a` only when BOTH
+`hp_mode: live` AND `input_boolean.hp_controller_armed` is on (two keys, as
+`hot_water_control`). With either key off it publishes what it would do and
+sends no device command. The only service it calls in shadow is the
+read-only `weather.get_forecasts`.
 
-It reads `sensor.house_mean_temperature`, `sensor.outdoor_temperature_best`,
+Reads: the comfort sensors (below), `sensor.outdoor_temperature_best`,
 `sensor.bedroom_midheight_sensor_temperature`, `sensor.heat_pump_power_power`,
 `input_number.house_target_temperature` (desired),
-`input_number.house_minimum_temperature` (floor),
-`input_select.house_presence`, `input_boolean.house_presence_auto`, `person.*`,
-`climate.heat_pump`, `fan.dyson_nn2_eu_nfa8623a` and the nordpool price sensor
-(`hwc_price_entity`, hwcontrol's `planner.ParseNordpool`, all-in price from
-`hwc_price_adder_ore` and `hwc_vat_factor`). **Missing helpers do not break
-it**: minimum falls back to `hp_min_default` (19.0), desired to
-`hp_desired_default` (20.5), presence to Home (auto off), and `reason` says so.
+`input_number.house_minimum_temperature` (floor), `input_select.house_presence`,
+`input_boolean.house_presence_auto`, `person.*`, `climate.heat_pump`,
+`fan.dyson_nn2_eu_nfa8623a`, `timer.tv_quiet`, `input_boolean.tv_quiet_active`,
+`input_boolean.hp_controller_armed` and the nordpool price sensor
+(`hwc_price_entity`; all-in price from `hwc_price_adder_ore`, `hwc_vat_factor`).
+Missing helpers do not break it: minimum falls back to `hp_min_default`
+(19.0), desired to `hp_desired_default` (20.5), presence to Home; a missing
+arming helper means not armed. **`input_boolean.hp_controller_armed` must
+exist in Home Assistant (a package helper) before live can be armed.**
 
-Model (`model.go`): dT/dt = -u (T - Tout) + h(level, Tout) + gain; boost
-h = max(0, boost_rate + slope (Tout - 5)), hold = hold_frac x boost, bedroom =
-mean + offset. **Every default is PROVISIONAL until
-`services/house-model/RESULTS.md`**: `hp_model_u` 0.08 per hour,
-`hp_model_boost_rate` 0.9 C/h, `hp_model_rate_slope` 0.03, `hp_model_hold_frac`
-0.4 (hold 700 W, boost 1700 W: `hp_p_hold_w`, `hp_p_boost_w`),
-`hp_model_gain` 0.1 C/h (no sun term), `hp_model_bedroom_offset` -2.0 C. With
-these placeholders boost cannot hold 19 C at 3 C outdoor, so expect
-`floor_at_risk` until the fit replaces them.
+**Comfort sensor** (`hp_comfort_sensors`): the mean of
+`sensor.kitchen_temperature_sensor_temperature` and
+`sensor.bedroom_midheight_sensor_temperature`. `sensor.house_mean_temperature`
+is deliberately not used: it includes the heat-pump intake sensor and the
+Dyson's own sensor, both in the pump's airstream, and reads about 2.4 K per kW
+high while the pump runs. These sensors report only on change, so one is
+ignored after `hp_sensor_stale_min` (180 min). The night bedroom cap also uses
+the bedroom sensor directly: the plan uses the measured bedroom-minus-comfort
+offset, and a bedroom above `hp_bedroom_cap` at night turns the pump off.
 
-Planner (`plan.go`, pure): dynamic programming, backward, over slots x 0.1 C grid
-(floor - 1 to 26 C) x {off, hold, boost} x previous level (for the
-`hp_switch_penalty_kr` against IR beeps). Cost = price x electrical energy +
-`hp_lambda` (T - desired)^2 per slot + `hp_evening_penalty_kr` per running slot
-17:00-21:00 + 1000 kr per C below the floor or above the night bedroom cap
-(`hp_bedroom_cap`; hard unless infeasible, then boost and `floor_at_risk`).
-Outdoor temperature is held at today's reading; prices beyond the published
-ones are filled with their mean (flagged). Horizon 24-36 h; about 2 ms on a
-desktop. Re-plans every 15 minutes and on a price, set-point or presence change.
+**Model** (`model.go`): dT/dt = -u (T - Tout) + h(level, Tout) + gain; boost
+h = max(0, boost_rate + slope (Tout - 5)), hold = hold_frac x boost. The
+defaults are the 2026-11-10 fit (`services/house-model/RESULTS.md`,
+kitchen+bedroom column, free-run, 3.7 days of data): `hp_model_u` 0.027 per
+hour, `hp_model_boost_rate` 0.935 C/h (0.55 K/h per kW x 1.7 kW),
+`hp_model_hold_frac` 0.41 (0.7 kW), `hp_model_gain` 0.05 C/h,
+`hp_model_bedroom_offset` -0.3, **`hp_model_rate_slope` 0**: the COP slope is
+not identifiable from the data yet. Because the plan's per-slot cost is price x
+electrical energy and the heat delivered is the model's h(level, Tout), it
+already plans on price / COP once the slope is non-zero. Options of these
+names that were set earlier override the defaults: remove stale ones.
 
-Dyson (D28, D36): runs whenever the heat pump heats, speed cap by time and
-presence (`hp_dyson_*_pct`).
+**Planner** (`plan.go`, pure): dynamic programming, backward, over slots x
+0.1 C grid x {off, hold, boost} x previous level. Cost = price x electrical
+energy + `hp_lambda` (T - desired)^2 per slot + `hp_evening_penalty_kr` per
+running slot 17:00-21:00 + `hp_switch_penalty_kr` per level change (IR beeps) +
+1000 kr per C below the floor (`minimum + hp_floor_margin_c`) or above the night
+bedroom cap. **`hp_lambda` 0.05** was tuned by closed-loop replay of a winter
+day with a 06:00-08:00 peak up to 4.8 kr/kWh (`TestReplayMorningPeakNoBoost`):
+no heating in the morning or evening peaks while the house is above the
+minimum, pre-heat to about 21.8 C by 15:00 and coast to about 19.4 C by
+21:00, daily mean within 0.1 C of desired, never below the minimum. A higher
+lambda (0.3 and up) pins the house to desired and ignores prices (a third
+dearer); a much lower one rides the floor and the mean drifts. Horizon 24-36 h.
 
-Published: `sensor.hp_controller_state` (idle, would_off, would_hold,
-would_boost, floor_at_risk, degraded; attribute `reason`), `hp_plan` (planned kWh
-today; slots, cost, predicted mean and minimum), `hp_would_command`,
-`hp_model_error` (24 h MAE of the 1 h-ahead house mean, bias in attributes),
-`hp_shadow_cost` (plan cost today; actual cost in attributes). Restart state is
-`/data/hp_control-state.json`. All options optional (see config.yaml `hp_*`).
+**Outdoor forecast**: every 30 minutes the module calls
+`weather.get_forecasts` (type hourly) on `hp_forecast_entity`
+(`weather.smhi_home`) and interpolates the hourly values per slot. The host
+passes the service response back (`Effect.ReturnResponse`,
+`CommandResult.Response`, `haws.CallServiceResponse`). A forecast older than
+3 h, or none, falls back to the current `outdoor_temperature_best` held flat.
+
+**Dyson**: runs whenever the heat pump heats, off otherwise; speed cap by time
+and presence (`hp_dyson_*_pct`), in 10 % steps.
+
+### Live executor
+
+Heat pump (SmartIR over IR; every command BEEPS): commands are sent only when
+the observed state differs from the target and never repeated for a state it is
+already in; the same unmet command is not re-sent for 30 minutes (one
+"command not applied" notification instead). Off: `climate.turn_off`. Hold:
+heat at `hp_hold_setpoint_c` (22), fan high. Boost: heat at
+`hp_boost_setpoint_c` (30), fan high. From off, one
+`climate.set_temperature` (with `hvac_mode: heat`) carries mode and set-point;
+the fan mode is sent only if it differs. Dyson: `fan.turn_on` with the
+percentage, or `fan.turn_off`, only on change.
+
+* **TV quiet**: while `timer.tv_quiet` is active (or `tv_quiet_active` is on),
+  nothing is sent to either device, and the package's own pause is not an
+  override. 90 s after it ends the plan resumes, after the package has restored
+  its state.
+* **Manual override**: a change of either device that the module did not
+  cause (and is not what the plan wants anyway) holds the module off both
+  devices for `hp_override_hold_h` (2 h), with a notification. A below-minimum
+  house during the hold-off is notified (hourly) but not fought.
+* **Safety**: no fresh comfort reading, no input event for `hp_stale_after_min`
+  (90), no price for the current slot, no plan or no outdoor value: heat at the
+  hold set-point (state `safe_hold`, notification). Comfort below the minimum:
+  at least hold (state `below_min`).
+* **Notifications** (`hp_notify_service`, plus a persistent notification):
+  armed, disarmed, override, command failure (retry after 5 min, 3 tries),
+  safe hold, not applied. Disarming leaves both devices as they are.
+* Nothing is sent before 30 s after the link comes up, on warm-up replay, or
+  while the link is down.
+
+Published (MQTT discovery): `sensor.hp_controller_state` (shadow: would_off,
+would_hold, would_boost, floor_at_risk, degraded, idle; live adds safe_hold,
+below_min, bedroom_cap, override, tv_quiet; attribute `reason`, `shadow`),
+`hp_plan`, `hp_would_command`, `hp_model_error`, `hp_shadow_cost` (per-day
+`days` no longer carries a `0001-01-01` key), **`hp_control_mode`** (shadow |
+live), **`hp_control_armed`** (on | off, attribute `active` = both keys),
+**`hp_last_command`**, **`hp_override`** (none | active, attributes `until`,
+`reason`) and **`hp_heartbeat`** (an ISO timestamp refreshed every 30 s, for a
+watchdog). Restart state is `/data/hp_control-state.json` (also the override
+and whether it was armed, so a restart does not re-announce). All options are
+optional (see config.yaml `hp_*`).
 
 ## MQTT discovery
 

@@ -95,15 +95,19 @@ schema:
   ev_min_block_min: "int(0,240)?" # default 30
   ev_heater_phase_a: "float?" # default 7.5
   ev_hp_phase_a: "float?" # default 7.4
-  # --- hp_control (SHADOW ONLY: no service is ever called). Every key is
-  # optional with NO entry under options:; Go applies the default. The model
-  # defaults are PROVISIONAL until services/house-model/RESULTS.md. ---
-  hp_model_u: "float?" # default 0.08 per hour (PROVISIONAL)
-  hp_model_boost_rate: "float?" # default 0.9 C/h at boost, 5 C outdoor (PROVISIONAL)
-  hp_model_rate_slope: "float?" # default 0.03 C/h per C colder (PROVISIONAL)
-  hp_model_hold_frac: "float?" # default 0.4 of boost (PROVISIONAL)
-  hp_model_gain: "float?" # default 0.1 C/h internal gain (PROVISIONAL)
-  hp_model_bedroom_offset: "float?" # default -2.0 C from the house mean (PROVISIONAL)
+  # --- hp_control. SHADOW by default; it drives climate.heat_pump and the
+  # Dyson fan only with hp_mode: live AND input_boolean.hp_controller_armed
+  # on (two keys). Every key is optional and has NO entry under options:;
+  # Go applies the default when absent and replaces an out-of-range value
+  # with it (logged). Model defaults are the 2026-11-10 fit
+  # (ham services/house-model/RESULTS.md, kitchen+bedroom column). ---
+  hp_mode: "list(shadow|live)?" # default shadow
+  hp_model_u: "float?" # default 0.027 per hour (fit: 0.027 +/- 0.002, tau 38 h)
+  hp_model_boost_rate: "float?" # default 0.935 C/h gross at boost (fit a0 0.55 K/h/kW x 1.7 kW)
+  hp_model_rate_slope: "float?" # default 0: COP slope not identifiable from the data (-0.00 +/- 0.01)
+  hp_model_hold_frac: "float?" # default 0.41 of boost (0.7 kW / 1.7 kW)
+  hp_model_gain: "float?" # default 0.05 C/h internal gain (fit g 0.17 K/h/kW x 0.30 kW)
+  hp_model_bedroom_offset: "float?" # default -0.3 C from the comfort temperature (fit -0.2 on .. -0.46 off)
   hp_p_hold_w: "float?" # default 700
   hp_p_boost_w: "float?" # default 1700
   hp_min_default: "float?" # default 19.0 (helper missing)
@@ -117,7 +121,16 @@ schema:
   hp_dyson_day_home_pct: "int(0,100)?" # default 60
   hp_dyson_evening_pct: "int(0,100)?" # default 50
   hp_dyson_away_pct: "int(0,100)?" # default 100
-  hp_lambda: "float?" # default 0.1 kr per C^2 per slot
+  hp_lambda: "float?" # default 0.05 kr per C^2 per slot (replay-tuned; see DOCS.md)
+  hp_comfort_sensors: "str?" # default "sensor.kitchen_temperature_sensor_temperature,sensor.bedroom_midheight_sensor_temperature" (mean; NOT sensor.house_mean_temperature, which includes the pump-intake and Dyson sensors)
+  hp_forecast_entity: "str?" # default weather.smhi_home; "" disables the forecast (current outdoor reading held)
+  hp_floor_margin_c: "float?" # default 0.3: the plan keeps this far above the minimum
+  hp_notify_service: "str?" # default notify.mobile_app_edmund15max
+  hp_hold_setpoint_c: "float?" # default 22 (17-30); the IR set-point is a power dial
+  hp_boost_setpoint_c: "float?" # default 30 (17-30)
+  hp_override_hold_h: "float?" # default 2 (0.25-24): hold-off after a manual change
+  hp_stale_after_min: "int(10,720)?" # default 90: no input event this long = stale = safe hold
+  hp_sensor_stale_min: "int(30,1440)?" # default 180: a comfort sensor older than this is ignored
   hp_evening_penalty_kr: "float?" # default 3.0 per running slot
   hp_switch_penalty_kr: "float?" # default 0.3 per level change
 # This add-on's own /data (energy totals, open-cycle state - see DOCS.md

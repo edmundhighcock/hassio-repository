@@ -195,10 +195,11 @@ func TestBedroomCapBites(t *testing.T) {
 	}
 }
 
-func TestProvisionalDefaultsAtThreeC(t *testing.T) {
-	// The PROVISIONAL model cannot hold 19 C at 3 C outdoor: it must flag
-	// floor_at_risk and boost wherever needed rather than fail.
+func TestWeakModelFlagsFloorAtRisk(t *testing.T) {
+	// A model that cannot hold 19 C at 3 C outdoor (the old placeholder
+	// numbers) must flag floor_at_risk and boost wherever needed.
 	p := DefaultParams()
+	p.Model = Model{U: 0.08, Boost5: 0.9, Slope: 0.03, HoldFrac: 0.4, Gain: 0.1, BedroomOffset: -2}
 	in := synth()
 	in.T0 = 19.5
 	r := run(t, p, in)
@@ -224,21 +225,27 @@ func TestMissingPricesExtrapolated(t *testing.T) {
 }
 
 func TestModelStepNumbers(t *testing.T) {
-	m := DefaultModel()
-	// PROVISIONAL numbers: u 0.08, 0.9 C/h at 5 C, -0.03 per C colder, hold 40 %, gain 0.1.
-	if got := m.Rate(Boost, 5); math.Abs(got-0.9) > 1e-12 {
+	m := DefaultModel() // the fit: services/house-model RESULTS.md, kitchen+bedroom
+	if m.U != 0.027 || m.Slope != 0 {
+		t.Fatalf("%+v", m)
+	}
+	// COP slope 0: the boost rate does not depend on outdoor temperature.
+	if m.Rate(Boost, 5) != m.Rate(Boost, -10) || math.Abs(m.Rate(Boost, 5)-0.935) > 1e-12 {
+		t.Fatalf("%v", m.Rate(Boost, 5))
+	}
+	if got := m.Rate(Hold, 5); math.Abs(got-0.935*0.41) > 1e-12 {
 		t.Fatalf("%v", got)
 	}
-	if got := m.Rate(Boost, -5); math.Abs(got-0.6) > 1e-12 {
+	// Off at 20 C / 0 C outdoor over 15 min: 20 + 0.25*(-0.54+0.05) = 19.8775.
+	if got := m.Step(20, Off, 0); math.Abs(got-19.8775) > 1e-9 {
 		t.Fatalf("%v", got)
 	}
-	if got := m.Rate(Hold, 5); math.Abs(got-0.36) > 1e-12 {
+	// Net gain of boost from 20 C at 0 C: 0.935+0.05-0.54 = 0.445 K/h (RESULTS.md: 0.46).
+	if got := (m.Step(20, Boost, 0) - 20) / dtH; math.Abs(got-0.445) > 1e-9 {
 		t.Fatalf("%v", got)
 	}
-	// Off at 20 C / 0 C outdoor over 15 min: 20 + 0.25*(-1.6+0.1) = 19.625.
-	if got := m.Step(20, Off, 0); math.Abs(got-19.625) > 1e-9 {
-		t.Fatalf("%v", got)
-	}
+	// A positive slope still scales the rate (COP modelled), floored at 0.
+	m.Slope = 0.03
 	if got := m.Rate(Boost, -40); got != 0 {
 		t.Fatalf("rate must not go negative: %v", got)
 	}
@@ -315,7 +322,7 @@ func TestModuleMissingHelpersFallBack(t *testing.T) {
 	t0 := at(10, 12, 0)
 	m.OnStateUpdate(modules.StateUpdate{EntityID: m.priceEnt, Time: t0, Available: true, Attrs: raw(t, at(10, 0, 0), 192, dayPrices)})
 	feed(m, t0, outdoorEnt, 3)
-	outs := feed(m, t0, houseEnt, 20.5)
+	outs := comfortAt(m, t0, 20.5)
 	st, attrs := stateOf(outs, ObjState)
 	if !strings.HasPrefix(st, "would_") && st != "floor_at_risk" {
 		t.Fatalf("state %q %s", st, attrs)
@@ -368,15 +375,15 @@ func TestModulePresenceAndOptions(t *testing.T) {
 	}
 }
 
-func TestModuleErrorTrackingPersistAndNoEffects(t *testing.T) {
+func TestModuleErrorTrackingAndPersist(t *testing.T) {
 	m := New()
 	_ = m.Init(nil)
 	t0 := at(10, 12, 0)
 	m.OnStateUpdate(modules.StateUpdate{EntityID: m.priceEnt, Time: t0, Available: true, Attrs: raw(t, at(10, 0, 0), 192, dayPrices)})
 	feed(m, t0, outdoorEnt, 3)
-	feed(m, t0, houseEnt, 20.5)
+	comfortAt(m, t0, 20.5)
 	pred := m.plan.Slots[3].TEnd
-	feed(m, t0.Add(time.Hour), houseEnt, pred+0.4)
+	comfortAt(m, t0.Add(time.Hour), pred+0.4)
 	m.OnTick(t0.Add(time.Hour + 5*time.Second))
 	if len(m.errs) != 1 || math.Abs(m.errs[0].Err-0.4) > 1e-9 {
 		t.Fatalf("%+v", m.errs)
@@ -396,30 +403,33 @@ func TestModuleErrorTrackingPersistAndNoEffects(t *testing.T) {
 	if err := New().Init([]byte("{garbage")); err != nil {
 		t.Fatal("corrupt state must not fail Init")
 	}
-	// Shadow only: the module does not implement modules.Actor.
-	var x any = m
-	if _, ok := x.(modules.Actor); ok {
-		t.Fatal("hp_control must not be an Actor")
-	}
+}
+
+// comfortAt feeds both default comfort sensors.
+func comfortAt(m *Module, t time.Time, v float64) []modules.OutputUpdate {
+	a := feed(m, t, kitchenEnt, v)
+	return append(a, feed(m, t, bedroomEnt, v)...)
 }
 
 func TestModuleWouldCommandAndFloorState(t *testing.T) {
-	m := New() // provisional model: at 3 C cannot hold the floor
+	m := New()
+	m.p.Model = Model{U: 0.08, Boost5: 0.9, Slope: 0.03, HoldFrac: 0.4, Gain: 0.1, BedroomOffset: -2} // cannot hold the floor at 3 C
 	_ = m.Init(nil)
 	t0 := at(10, 12, 0)
 	m.OnStateUpdate(modules.StateUpdate{EntityID: m.priceEnt, Time: t0, Available: true, Attrs: raw(t, at(10, 0, 0), 192, dayPrices)})
 	feed(m, t0, outdoorEnt, 3)
-	feed(m, t0, houseEnt, 19.2)
+	comfortAt(m, t0, 19.2)
 	m.OnStateUpdate(modules.StateUpdate{EntityID: climateEnt, Time: t0, State: "off"})
+	m.OnStateUpdate(modules.StateUpdate{EntityID: dysonEnt, Time: t0, State: "off"})
 	outs := m.OnTick(t0.Add(15 * time.Minute))
 	st, _ := stateOf(outs, ObjState)
 	cmd, _ := stateOf(outs, ObjWould)
-	if st != "floor_at_risk" || !strings.Contains(cmd, "heat pump heat 30 C fan high") || !strings.Contains(cmd, "dyson") {
+	if st != "floor_at_risk" || !strings.Contains(cmd, "heat pump heat 30 C") || !strings.Contains(cmd, "fan high") || !strings.Contains(cmd, "dyson") {
 		t.Fatalf("%q %q", st, cmd)
 	}
 	// Once the heat pump already boosts at 30 and Dyson runs at the cap: none.
 	m.OnStateUpdate(modules.StateUpdate{EntityID: climateEnt, Time: t0, State: "heat",
-		Attrs: map[string]json.RawMessage{"temperature": json.RawMessage("30")}})
+		Attrs: map[string]json.RawMessage{"temperature": json.RawMessage("30"), "fan_mode": json.RawMessage(`"high"`)}})
 	m.OnStateUpdate(modules.StateUpdate{EntityID: dysonEnt, Time: t0, State: "on",
 		Attrs: map[string]json.RawMessage{"percentage": json.RawMessage("60")}})
 	if _, c := m.decideCmd(t0.Add(15 * time.Minute)); c != "none" {

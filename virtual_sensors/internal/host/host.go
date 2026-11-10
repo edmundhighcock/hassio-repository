@@ -40,6 +40,12 @@ type HA interface {
 	CallService(domain, service string, data, target map[string]any) (int, error)
 }
 
+// ResponseCaller is optionally implemented by the HA client: a service call
+// that asks HA to return response data (Effect.ReturnResponse).
+type ResponseCaller interface {
+	CallServiceResponse(domain, service string, data, target map[string]any) (int, error)
+}
+
 // Publisher publishes module outputs (mqttpub.Publisher in production).
 type Publisher interface {
 	PublishState(u modules.OutputUpdate) error
@@ -237,7 +243,7 @@ func (h *Host) HandleResult(r haws.Result) {
 		return
 	}
 	delete(h.pending, r.ID)
-	h.deliver(p.mod, modules.CommandResult{CorrID: p.corrID, OK: r.Success, Err: r.Err, At: h.Clock.Now()})
+	h.deliver(p.mod, modules.CommandResult{CorrID: p.corrID, OK: r.Success, Err: r.Err, At: h.Clock.Now(), Response: r.Response})
 }
 
 // Tick drives Ticker modules, times out unanswered commands and persists
@@ -352,7 +358,13 @@ func (h *Host) execute(m modules.Module, a modules.Actor, e modules.Effect) {
 			}
 			data[k] = v
 		}
-		id, err := h.ha.CallService(e.Domain, e.Service, data, target)
+		var id int
+		var err error
+		if rc, ok := h.ha.(ResponseCaller); ok && e.ReturnResponse {
+			id, err = rc.CallServiceResponse(e.Domain, e.Service, data, target)
+		} else {
+			id, err = h.ha.CallService(e.Domain, e.Service, data, target)
+		}
 		if err != nil {
 			h.queued = append(h.queued, queuedResult{a, modules.CommandResult{CorrID: e.CorrID, Err: err.Error(), At: now}})
 			return

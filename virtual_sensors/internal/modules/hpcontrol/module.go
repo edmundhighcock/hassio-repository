@@ -22,13 +22,21 @@ const (
 	ObjWould    = "hp_would_command"
 	ObjModelErr = "hp_model_error"
 	ObjCost     = "hp_shadow_cost"
+	// Live-executor outputs.
+	ObjMode     = "hp_control_mode"  // shadow | live
+	ObjArmed    = "hp_control_armed" // on | off (the arming helper); attribute active
+	ObjLastCmd  = "hp_last_command"  // what was last sent
+	ObjOverride = "hp_override"      // none | active (manual override hold-off)
+	// ObjHeartbeat is an ISO timestamp refreshed at least every 60 s (every
+	// 30 s in practice), for an HA-side watchdog.
+	ObjHeartbeat = "hp_heartbeat"
 )
 
 // Input entities (sensor. domain omitted, as everywhere in this add-on).
 const (
-	houseEnt    = "house_mean_temperature"
 	outdoorEnt  = "outdoor_temperature_best"
 	bedroomEnt  = "bedroom_midheight_sensor_temperature"
+	kitchenEnt  = "kitchen_temperature_sensor_temperature"
 	hpPowerEnt  = "heat_pump_power_power"
 	desiredEnt  = "input_number.house_target_temperature"
 	minimumEnt  = "input_number.house_minimum_temperature"
@@ -37,6 +45,9 @@ const (
 	personPfx   = "person."
 	climateEnt  = "climate.heat_pump"
 	dysonEnt    = "fan.dyson_nn2_eu_nfa8623a"
+	armedEnt    = "input_boolean.hp_controller_armed"
+	tvTimerEnt  = "timer.tv_quiet"
+	tvActiveEnt = "input_boolean.tv_quiet_active"
 )
 
 func init() {
@@ -69,6 +80,17 @@ type options struct {
 	PriceEnt   *string  `json:"hwc_price_entity"`
 	AdderOre   *float64 `json:"hwc_price_adder_ore"`
 	VAT        *float64 `json:"hwc_vat_factor"`
+	// Comfort sensors, forecast, live executor.
+	Comfort       *string  `json:"hp_comfort_sensors"`
+	ForecastEnt   *string  `json:"hp_forecast_entity"`
+	FloorMargin   *float64 `json:"hp_floor_margin_c"`
+	Mode          *string  `json:"hp_mode"`
+	NotifyService *string  `json:"hp_notify_service"`
+	HoldSet       *float64 `json:"hp_hold_setpoint_c"`
+	BoostSet      *float64 `json:"hp_boost_setpoint_c"`
+	OverrideH     *float64 `json:"hp_override_hold_h"`
+	StaleMin      *int     `json:"hp_stale_after_min"`
+	SensorStale   *int     `json:"hp_sensor_stale_min"`
 }
 
 type errPoint struct {
@@ -87,6 +109,10 @@ type persisted struct {
 	Prices map[int64]float64   `json:"prices,omitempty"` // quarter start -> SEK/kWh ex VAT
 	Errs   []errPoint          `json:"errs,omitempty"`
 	Days   map[string]*dayCost `json:"days,omitempty"`
+	// Live executor: survive a restart without a spurious arm notification
+	// and without forgetting a manual override.
+	WasActive     bool      `json:"was_active,omitempty"`
+	OverrideUntil time.Time `json:"override_until,omitempty"`
 }
 
 type reading struct {
@@ -95,46 +121,74 @@ type reading struct {
 	at time.Time
 }
 
-// Module is the hp_control module (shadow only).
+const zeroDayKey = "0001-01-01"
+
+// Module is the hp_control module. Shadow by default; with hp_mode live AND
+// input_boolean.hp_controller_armed on it also drives the heat pump and the
+// Dyson fan (exec.go).
 type Module struct {
 	p        Params
 	priceEnt string
 
-	house, outdoor, bedroom reading
-	hpW                     float64
-	desired, minimum        reading
-	presSel                 string
-	presOK                  bool
-	autoOn, autoOK          bool
-	persons                 map[string]bool
-	hpState                 string // climate.heat_pump state
-	hpSet                   float64
-	hpSetOK                 bool
-	hpFan                   string
-	dysonOn                 string
-	dysonPct                float64
-	dysonPctOK              bool
-	prices                  map[int64]float64
-	now                     time.Time
+	// Configuration beyond Params.
+	comfortIDs  []string // entity ids, "sensor." prefix stripped
+	forecastEnt string
+	floorMargin float64
+	live        bool // hp_mode: live
+	notifySvc   string
+	holdSet     float64
+	boostSet    float64
+	overrideFor time.Duration
+	staleAfter  time.Duration
+	sensorStale time.Duration
+
+	comfort          map[string]reading
+	outdoor, bedroom reading
+	hpW              float64
+	desired, minimum reading
+	presSel          string
+	presOK           bool
+	autoOn, autoOK   bool
+	persons          map[string]bool
+	hpState          string // climate.heat_pump state
+	hpSet            float64
+	hpSetOK          bool
+	hpFan            string
+	dysonOn          string
+	dysonPct         float64
+	dysonPctOK       bool
+	prices           map[int64]float64
+	now              time.Time
+	lastHeard        time.Time // latest event time from any input
+
+	forecast      map[int64]float64
+	forecastAt    time.Time // when the forecast was fetched
+	forecastReqAt time.Time
+	forecastBusy  bool
 
 	plan       Result
 	havePlan   bool
 	lastPlanAt time.Time
 	planNotes  []string
 
-	pending map[int64]float64 // target quarter (unix) -> predicted house mean
+	pending map[int64]float64 // target quarter (unix) -> predicted comfort temperature
 	errs    []errPoint
 	days    map[string]*dayCost
 	lastInt time.Time
 
 	lastState, lastWould string
 	lastBench            time.Duration
+
+	ex executor
 }
 
 // New returns a module with defaults applied.
 func New() *Module {
-	return &Module{p: DefaultParams(), priceEnt: "nordpool_kwh_se3_sek_3_06_0", prices: map[int64]float64{},
-		persons: map[string]bool{}, pending: map[int64]float64{}, days: map[string]*dayCost{}}
+	m := &Module{p: DefaultParams(), priceEnt: "nordpool_kwh_se3_sek_3_06_0", prices: map[int64]float64{},
+		persons: map[string]bool{}, pending: map[int64]float64{}, days: map[string]*dayCost{},
+		comfort: map[string]reading{}, forecast: map[int64]float64{}}
+	m.applyExecDefaults()
+	return m
 }
 
 // Name implements modules.Module.
@@ -142,14 +196,23 @@ func (m *Module) Name() string { return Name }
 
 // Inputs implements modules.Module.
 func (m *Module) Inputs() []modules.InputSpec {
-	return []modules.InputSpec{
-		{EntityID: houseEnt}, {EntityID: outdoorEnt}, {EntityID: bedroomEnt}, {EntityID: hpPowerEnt},
+	in := []modules.InputSpec{
+		{EntityID: outdoorEnt}, {EntityID: bedroomEnt}, {EntityID: hpPowerEnt},
 		{EntityID: desiredEnt}, {EntityID: minimumEnt}, {EntityID: presenceEnt}, {EntityID: autoEnt},
+		{EntityID: armedEnt}, {EntityID: tvTimerEnt}, {EntityID: tvActiveEnt},
 		{EntityID: personPfx, Prefix: true},
 		{EntityID: climateEnt, Attributes: []string{"temperature", "fan_mode"}},
 		{EntityID: dysonEnt, Attributes: []string{"percentage"}},
 		{EntityID: m.priceEnt, Attributes: []string{"today", "tomorrow", "raw_today", "raw_tomorrow", "tomorrow_valid"}},
 	}
+	seen := map[string]bool{outdoorEnt: true, bedroomEnt: true}
+	for _, id := range m.comfortIDs {
+		if !seen[id] {
+			seen[id] = true
+			in = append(in, modules.InputSpec{EntityID: id})
+		}
+	}
+	return in
 }
 
 // Outputs implements modules.Module.
@@ -163,6 +226,11 @@ func (m *Module) Outputs() []modules.OutputSpec {
 		mk(ObjWould, "HP would command", "", ""),
 		withAvail(mk(ObjModelErr, "HP model error", "°C", "measurement")),
 		mk(ObjCost, "HP shadow cost", "kr", ""),
+		mk(ObjMode, "HP control mode", "", ""),
+		mk(ObjArmed, "HP control armed", "", ""),
+		mk(ObjLastCmd, "HP last command", "", ""),
+		mk(ObjOverride, "HP override", "", ""),
+		{ObjectID: ObjHeartbeat, UniqueID: "virtual_sensors_" + ObjHeartbeat, Name: "HP controller heartbeat", DeviceClass: "timestamp"},
 	}
 }
 
@@ -248,6 +316,7 @@ func (m *Module) Configure(raw []byte) error {
 	if o.VAT != nil && *o.VAT > 0 {
 		p.Price.VAT = *o.VAT
 	}
+	msgs = append(msgs, m.configureExec(o)...)
 	for _, s := range msgs {
 		log.Printf("%s: %s", Name, s)
 	}
@@ -269,15 +338,24 @@ func (m *Module) Init(b []byte) error {
 			if ps.Days != nil {
 				m.days = ps.Days
 			}
+			m.ex.wasActive = ps.WasActive
+			m.ex.overrideUntil = ps.OverrideUntil
 		}
 	}
-	log.Printf("%s: SHADOW ONLY: reads Home Assistant, publishes sensors, never calls a service", Name)
+	// An older build could persist a zero-time day key; drop it.
+	delete(m.days, zeroDayKey)
+	if m.live {
+		log.Printf("%s: mode LIVE: drives climate.heat_pump and the Dyson fan only while %s is on", Name, armedEnt)
+	} else {
+		log.Printf("%s: SHADOW: reads Home Assistant, publishes sensors; device commands need hp_mode live and %s on", Name, armedEnt)
+	}
 	return nil
 }
 
 // Persist implements modules.Module.
 func (m *Module) Persist() ([]byte, error) {
-	return json.Marshal(persisted{Prices: m.prices, Errs: m.errs, Days: m.days})
+	return json.Marshal(persisted{Prices: m.prices, Errs: m.errs, Days: m.days,
+		WasActive: m.ex.wasActive, OverrideUntil: m.ex.overrideUntil})
 }
 
 // InitialStates implements modules.InitialStater.
@@ -307,18 +385,37 @@ func attrStr(u modules.StateUpdate, k string) string {
 	return s
 }
 
+// isComfort reports whether id is one of the comfort sensors.
+func (m *Module) isComfort(id string) bool {
+	for _, c := range m.comfortIDs {
+		if c == id {
+			return true
+		}
+	}
+	return false
+}
+
 // OnStateUpdate implements modules.Module.
 func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	if u.Time.After(m.now) {
 		m.now = u.Time
 	}
+	// Liveness is judged on the inputs the module does not cause: the echo
+	// of its own commands must not hide a silent Home Assistant.
+	if !u.Replay && u.Time.After(m.lastHeard) && u.EntityID != climateEnt && u.EntityID != dysonEnt {
+		m.lastHeard = u.Time
+	}
 	replan := false
 	switch {
-	case u.EntityID == houseEnt:
-		first := !m.house.ok
+	case m.isComfort(u.EntityID):
+		_, was := m.comfortNow(m.now)
 		m.integrate(u.Time)
-		m.house = num(u)
-		replan = first && m.house.ok
+		m.comfort[u.EntityID] = num(u)
+		if u.EntityID == bedroomEnt {
+			m.bedroom = num(u)
+		}
+		_, is := m.comfortNow(m.now)
+		replan = !was && is
 	case u.EntityID == outdoorEnt:
 		first := !m.outdoor.ok
 		m.outdoor = num(u)
@@ -352,6 +449,12 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		old := m.presenceNow()
 		m.persons[u.EntityID] = u.State == "home"
 		replan = old != m.presenceNow()
+	case u.EntityID == armedEnt:
+		m.ex.armed, m.ex.armedOK = u.State == "on", u.State == "on" || u.State == "off"
+	case u.EntityID == tvTimerEnt:
+		m.ex.onTimer(u.State == "active", m.now)
+	case u.EntityID == tvActiveEnt:
+		m.ex.onTVBool(u.State == "on", m.now)
 	case u.EntityID == climateEnt:
 		m.hpState = u.State
 		if v, ok := attrFloat(u, "temperature"); ok {
@@ -360,9 +463,11 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			m.hpSetOK = false
 		}
 		m.hpFan = attrStr(u, "fan_mode")
+		m.onDeviceChange(u.Replay, m.now, "heat pump")
 	case u.EntityID == dysonEnt:
 		m.dysonOn = u.State
 		m.dysonPct, m.dysonPctOK = attrFloat(u, "percentage")
+		m.onDeviceChange(u.Replay, m.now, "Dyson fan")
 	case u.EntityID == m.priceEnt:
 		if len(u.Attrs) > 0 {
 			for _, pr := range planner.ParseNordpool(u.Attrs, u.Time, m.p.Loc) {
@@ -382,9 +487,42 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		return nil
 	}
 	if replan {
-		m.replan(u.Time)
+		m.replan(m.now)
 	}
-	return m.publishAll(u.Time, replan)
+	if !u.Replay {
+		m.act(m.now)
+	}
+	return m.publishAll(m.now, replan)
+}
+
+// comfortNow is the mean of the fresh comfort sensors and how many of them
+// were fresh. A sensor is fresh when available and its last update is no
+// older than hp_sensor_stale_min (these sensors report only on change, every
+// 20-30 min or so).
+func (m *Module) comfortNow(now time.Time) (float64, bool) {
+	var sum float64
+	n := 0
+	for _, id := range m.comfortIDs {
+		r, ok := m.comfort[id]
+		if !ok || !r.ok || (!r.at.IsZero() && now.Sub(r.at) > m.sensorStale) {
+			continue
+		}
+		sum += r.v
+		n++
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return sum / float64(n), true
+}
+
+// bedroomNow is the bedroom reading if fresh.
+func (m *Module) bedroomNow(now time.Time) (float64, bool) {
+	r := m.bedroom
+	if !r.ok || (!r.at.IsZero() && now.Sub(r.at) > m.sensorStale) {
+		return 0, false
+	}
+	return r.v, true
 }
 
 // presenceNow resolves the household presence (PLAN "Presence", D33):
@@ -443,6 +581,23 @@ func (m *Module) desiredNow() (float64, string) {
 
 func (m *Module) priceKr(sek float64) float64 { return m.p.Price.AllInOre(sek) / 100 }
 
+// forecastFresh reports whether the outdoor forecast is usable at now.
+func (m *Module) forecastFresh(now time.Time) bool {
+	return len(m.forecast) > 0 && !m.forecastAt.IsZero() && now.Sub(m.forecastAt) <= 3*time.Hour
+}
+
+// toutNow is the outdoor temperature for the plan's first slot: the
+// reading, else the forecast.
+func (m *Module) toutNow(now time.Time) (float64, bool) {
+	if m.outdoor.ok {
+		return m.outdoor.v, true
+	}
+	if m.forecastFresh(now) {
+		return Input{Forecast: m.forecast}.outdoorAt(now), true
+	}
+	return 0, false
+}
+
 func (m *Module) inputPlan(now time.Time) Input {
 	mn, _ := m.minNow()
 	de, _ := m.desiredNow()
@@ -451,12 +606,27 @@ func (m *Module) inputPlan(now time.Time) Input {
 		pr[k] = m.priceKr(v)
 	}
 	prev, _ := m.observedLevel()
-	return Input{Now: now, T0: m.house.v, Tout: m.outdoor.v, Min: mn, Desired: de, Prices: pr, Prev: prev}
+	t0, _ := m.comfortNow(now)
+	tout, _ := m.toutNow(now)
+	in := Input{Now: now, T0: t0, Tout: tout, Min: mn + m.floorMargin, Desired: de, Prices: pr, Prev: prev}
+	if m.forecastFresh(now) {
+		in.Forecast = m.forecast
+	}
+	if b, ok := m.bedroomNow(now); ok {
+		// The measured bedroom-minus-comfort offset, bounded so one odd
+		// reading cannot disable the night cap.
+		in.BedOffset, in.BedOffsetOK = math.Max(-1.5, math.Min(0.5, b-t0)), true
+	}
+	return in
 }
 
 func (m *Module) replan(now time.Time) {
 	m.lastPlanAt = now
-	if !m.house.ok || !m.outdoor.ok || len(m.prices) == 0 {
+	if _, ok := m.comfortNow(now); !ok {
+		m.havePlan = false
+		return
+	}
+	if _, ok := m.toutNow(now); !ok || len(m.prices) == 0 {
 		m.havePlan = false
 		return
 	}
@@ -550,10 +720,11 @@ func (m *Module) resolve(now time.Time) {
 			continue
 		}
 		delete(m.pending, tgt)
-		if !m.house.ok || now.Sub(m.house.at) > 30*time.Minute || now.Unix()-tgt > 20*60 {
+		c, ok := m.comfortNow(now)
+		if !ok || now.Unix()-tgt > 20*60 {
 			continue
 		}
-		m.errs = append(m.errs, errPoint{T: tgt, Err: m.house.v - pred})
+		m.errs = append(m.errs, errPoint{T: tgt, Err: c - pred})
 	}
 	cut := now.Add(-24 * time.Hour).Unix()
 	i := 0
@@ -570,10 +741,12 @@ func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
 	}
 	m.integrate(now)
 	m.resolve(now)
+	m.requestForecast(now)
 	re := m.lastPlanAt.IsZero() || now.Sub(m.lastPlanAt) >= 15*time.Minute
 	if re {
 		m.replan(now)
 	}
+	m.act(now)
 	return m.publishAll(now, re)
 }
 
@@ -582,7 +755,7 @@ func (m *Module) observedLevel() (Level, bool) {
 	case "off":
 		return Off, true
 	case "heat":
-		if m.hpSetOK && m.hpSet >= 30 {
+		if m.hpSetOK && m.hpSet >= m.boostSet {
 			return Boost, true
 		}
 		return Hold, true
@@ -606,12 +779,30 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	if len(notes) > 0 {
 		tail = " [" + strings.Join(notes, "; ") + "]"
 	}
+	if m.ex.active(m) && !m.now.IsZero() {
+		if tg := m.target(now); tg.Kind == "safe_hold" {
+			state, reason = "safe_hold", "safe hold: "+tg.Reason+tail
+			switch {
+			case m.ex.quiet(now):
+				state, reason = "tv_quiet", "TV quiet: nothing is sent"+tail
+			case now.Before(m.ex.overrideUntil):
+				state, reason = "override", "manual override until "+m.ex.overrideUntil.In(m.p.Loc).Format("15:04")+tail
+			}
+			cmd = "none"
+			if cs := m.describeCalls(tg); len(cs) > 0 {
+				cmd = strings.Join(cs, "; ")
+			}
+			return state, cmd, reason
+		}
+	}
+	_, cok := m.comfortNow(now)
+	_, tok := m.toutNow(now)
 	switch {
-	case m.now.IsZero() || (!m.house.ok && !m.outdoor.ok && len(m.prices) == 0):
+	case m.now.IsZero() || (!cok && !m.outdoor.ok && len(m.prices) == 0):
 		return "idle", "none", "no readings yet" + tail
-	case !m.house.ok:
-		return "degraded", "none", "no house mean temperature" + tail
-	case !m.outdoor.ok:
+	case !cok:
+		return "degraded", "none", "no fresh comfort temperature" + tail
+	case !tok:
 		return "degraded", "none", "no outdoor temperature" + tail
 	case len(m.prices) == 0 || !m.havePlan:
 		return "degraded", "none", "no prices" + tail
@@ -620,10 +811,14 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	if !in {
 		return "degraded", "none", "no plan slot for now" + tail
 	}
-	pr := m.presenceNow()
-	pct := m.p.DysonPct(now, sl.Level, pr)
-	state = "would_" + sl.Level.String()
-	reason = fmt.Sprintf("planned %s; house %.1f C, predicted %.1f C at slot end", sl.Level, m.house.v, sl.TEnd)
+	tg := m.target(now)
+	state = "would_" + tg.Level.String()
+	c, _ := m.comfortNow(now)
+	reason = fmt.Sprintf("planned %s; comfort %.1f C, predicted %.1f C at slot end", sl.Level, c, sl.TEnd)
+	if tg.Kind != "plan" {
+		state = tg.Kind
+		reason += fmt.Sprintf("; %s: %s -> %s", tg.Kind, tg.Reason, tg.Level)
+	}
 	if m.plan.FloorAtRisk {
 		state = "floor_at_risk"
 		reason += fmt.Sprintf("; floor at risk: plan min %.1f C", m.plan.MinT)
@@ -631,35 +826,15 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	if m.plan.Extrapolated {
 		reason += "; prices beyond the published ones extrapolated"
 	}
-	var cs []string
-	cur, known := m.observedLevel()
-	if !known || cur != sl.Level {
-		desired, _ := m.desiredNow()
-		switch sl.Level {
-		case Off:
-			cs = append(cs, "heat pump off")
-		case Hold:
-			cs = append(cs, fmt.Sprintf("heat pump heat %.1f C fan auto", desired))
-		case Boost:
-			cs = append(cs, "heat pump heat 30 C fan high")
-		}
-		if !known {
-			reason += "; heat pump state unknown"
+	if m.ex.active(m) {
+		switch {
+		case m.ex.quiet(now):
+			state, reason = "tv_quiet", "TV quiet: nothing is sent"+tail
+		case now.Before(m.ex.overrideUntil):
+			state, reason = "override", "manual override until "+m.ex.overrideUntil.In(m.p.Loc).Format("15:04")+tail
 		}
 	}
-	dcur := 0
-	if m.dysonOn == "on" && m.dysonPctOK {
-		dcur = int(m.dysonPct)
-	}
-	if m.dysonOn == "" || m.dysonOn == "unavailable" || m.dysonOn == "unknown" || dcur != pct {
-		if pct == 0 {
-			if dcur != 0 || m.dysonOn == "" {
-				cs = append(cs, "dyson off")
-			}
-		} else {
-			cs = append(cs, fmt.Sprintf("dyson %d%%", pct))
-		}
-	}
+	cs := m.describeCalls(tg)
 	cmd = "none"
 	if len(cs) > 0 {
 		cmd = strings.Join(cs, "; ")
@@ -674,19 +849,21 @@ func jsonStr(v any) string { b, _ := json.Marshal(v); return string(b) }
 func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 	var outs []modules.OutputUpdate
 	state, cmd, reason := m.decide(now)
+	shadow := !m.ex.active(m)
 	if force || state != m.lastState {
 		m.lastState = state
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjState, Time: now, StateString: state,
-			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": true})})
+			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": shadow})})
 	}
 	if force || cmd != m.lastWould {
 		m.lastWould = cmd
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjWould, Time: now, StateString: cmd,
-			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": true})})
+			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": shadow})})
 	}
 	if force {
 		outs = append(outs, m.planOutput(now), m.errOutput(now), m.costOutput(now))
 	}
+	outs = append(outs, m.ex.liveOutputs(m, now, force)...)
 	return outs
 }
 
@@ -700,7 +877,7 @@ func (m *Module) planOutput(now time.Time) modules.OutputUpdate {
 		}
 	}
 	v := 0.0
-	attrs := map[string]any{"slots": slots, "slot_fields": []string{"start", "level", "dyson_pct", "t_pred_end", "price_kr_per_kwh"}, "shadow": true}
+	attrs := map[string]any{"slots": slots, "slot_fields": []string{"start", "level", "dyson_pct", "t_pred_end", "price_kr_per_kwh"}, "shadow": !m.ex.active(m)}
 	if m.havePlan {
 		// Planned kWh today (local date of now).
 		dk := now.In(m.p.Loc).Format("2006-01-02")
@@ -735,13 +912,19 @@ func (m *Module) errOutput(now time.Time) modules.OutputUpdate {
 }
 
 func (m *Module) costOutput(now time.Time) modules.OutputUpdate {
-	d := m.day(now)
+	var d dayCost
+	if !now.IsZero() { // a zero time would create the spurious 0001-01-01 day key
+		d = *m.day(now)
+	}
 	days := map[string]any{}
 	for k, v := range m.days {
+		if k == zeroDayKey {
+			continue
+		}
 		days[k] = map[string]any{"plan_kr": round(v.PlanKr, 2), "actual_kr": round(v.ActualKr, 2),
 			"plan_kwh": round(v.PlanKWh, 2), "actual_kwh": round(v.ActualKWh, 2)}
 	}
 	return modules.OutputUpdate{ObjectID: ObjCost, Time: now, Value: round(d.PlanKr, 2),
 		AttributesJSON: jsonStr(map[string]any{"plan_kr_today": round(d.PlanKr, 2), "actual_kr_today": round(d.ActualKr, 2),
-			"plan_kwh_today": round(d.PlanKWh, 2), "actual_kwh_today": round(d.ActualKWh, 2), "days": days, "shadow": true})}
+			"plan_kwh_today": round(d.PlanKWh, 2), "actual_kwh_today": round(d.ActualKWh, 2), "days": days, "shadow": !m.ex.active(m)})}
 }

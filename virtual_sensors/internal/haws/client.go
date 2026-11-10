@@ -39,6 +39,8 @@ type Result struct {
 	ID      int
 	Success bool
 	Err     string
+	// Response is the service response data, if the call asked for it.
+	Response json.RawMessage
 }
 
 // Message is one inbound WS message of interest: either a state event or
@@ -139,11 +141,27 @@ func (c *Client) CallService(domain, service string, data, target map[string]any
 	return c.send(msg)
 }
 
+// CallServiceResponse is CallService with return_response: the service's
+// response data arrives in Result.Response.
+func (c *Client) CallServiceResponse(domain, service string, data, target map[string]any) (int, error) {
+	msg := map[string]any{"type": "call_service", "domain": domain, "service": service, "return_response": true}
+	if data != nil {
+		msg["service_data"] = data
+	}
+	if target != nil {
+		msg["target"] = target
+	}
+	return c.send(msg)
+}
+
 type wsEnvelope struct {
 	ID      int    `json:"id"`
 	Type    string `json:"type"`
 	Success bool   `json:"success"`
-	Error   *struct {
+	Result  *struct {
+		Response json.RawMessage `json:"response"`
+	} `json:"result"`
+	Error *struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
@@ -171,6 +189,9 @@ func (c *Client) ReadMessage() (Message, bool, error) {
 	}
 	if env.Type == "result" {
 		r := &Result{ID: env.ID, Success: env.Success}
+		if env.Result != nil {
+			r.Response = env.Result.Response
+		}
 		if env.Error != nil {
 			r.Err = env.Error.Code + ": " + env.Error.Message
 		}
