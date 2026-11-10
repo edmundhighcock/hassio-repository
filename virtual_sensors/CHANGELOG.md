@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- New module `ev_control` (Go package `evcontrol`): SHADOW-ONLY EV planner
+  and guard for the Easee charger, per ham `services/ev-planner/PLAN.md`.
+  Reads entities, plans the night against quarter-hour prices, publishes
+  `ev_*` sensors and one evaluation line per session under
+  `/data/evcontrol/`. It calls no service; there is no live mode. Not
+  enabled unless `ev_control` is added to `modules`. Every `ev_*` option is
+  optional with its default applied in Go. hwcontrol is unchanged.
+
 ## 0.2.0
 
 - New module `hot_water_control`: the hot-water immersion controller of

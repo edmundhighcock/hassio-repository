@@ -81,6 +81,36 @@ configuration:
   hwc_min_saving_ore:
     name: "Planner: minimum saving (öre/kWh)"
     description: "Default 20."
+  ev_entity_prefix:
+    name: "EV: charger entity prefix"
+    description: "ev_control (shadow only). Default loaver."
+  ev_departure:
+    name: "EV: departure time"
+    description: "Local HH:MM. Default 06:30."
+  ev_need_kwh:
+    name: "EV: energy need (kWh)"
+    description: "Battery plus charging losses, assumed empty at plug-in. Default 44."
+  ev_min_a:
+    name: "EV: minimum charge current (A)"
+    description: "Below this a slot is unusable. Default 6."
+  ev_max_a:
+    name: "EV: maximum charge current (A)"
+    description: "The charger circuit. Default 16."
+  ev_phase_budget_a:
+    name: "EV: per-phase budget (A)"
+    description: "Default 19."
+  ev_house_base_a:
+    name: "EV: house base load per phase (A)"
+    description: "Default 3."
+  ev_min_block_min:
+    name: "EV: minimum block (min)"
+    description: "Gaps shorter than this between planned slots are filled. Default 30."
+  ev_heater_phase_a:
+    name: "EV: immersion heater current per phase (A)"
+    description: "On phases A and B while it draws. Default 7.5."
+  ev_hp_phase_a:
+    name: "EV: heat pump maximum current on phase C (A)"
+    description: "Default 7.4."
   hwc_price_adder_ore:
     name: "Price adder (öre/kWh)"
     description: "Transfer + energy tax + supplier fee, excl. VAT. Update each January. Default 55.1."

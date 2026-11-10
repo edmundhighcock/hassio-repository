@@ -254,6 +254,57 @@ planner (no planned OFF), so only test moves switch OFF.
 Interpretations taken where PLAN is silent or inconsistent are listed in
 the 0.2.0 CHANGELOG entry.
 
+## EV planner and guard (`ev_control`, shadow only)
+
+Design: `services/ev-planner/PLAN.md` in the ham repository. Enable it by
+adding `ev_control` to `modules`. **It is shadow only: it calls no Home
+Assistant or Easee service, and there is no live option in this build.**
+The existing 22:00 `Car Start Charging` automation keeps charging the car.
+
+It reads `sensor.loaver_status`, `_power` (kW), `_session_energy`,
+`sensor.grid_meter_power`, `sensor.heat_pump_power_power`, hot water's
+residual (`hot_water_estimated_power`), hot water's plan
+(`sensor.hot_water_controller_plan`, read as Home Assistant attributes;
+hwcontrol is unchanged) and the nordpool price sensor
+(`hwc_price_entity`; parsed with hwcontrol's `planner.ParseNordpool`;
+all-in price uses `hwc_price_adder_ore` and `hwc_vat_factor`).
+
+Planner (`internal/modules/evcontrol/plan.go`, pure): assumes the car is
+empty at plug-in; need = `ev_need_kwh` minus the session energy. Per
+quarter-hour the EV ceiling is the smallest of (`ev_phase_budget_a` minus
+the forecast non-EV amps) over phases A, B, C, floored to whole amps,
+clamped to `ev_max_a`, unusable below `ev_min_a`. The forecast is a base
+`ev_house_base_a` on every phase, `ev_heater_phase_a` on A and B in
+hot-water-ON slots between 16:00 and 23:00, and `ev_hp_phase_a` on C
+always. The cheapest usable priced slots are chosen until the need is met;
+gaps shorter than `ev_min_block_min` between chosen runs are filled. If
+the priced slots cannot meet the need, every usable slot to departure is
+planned at its ceiling (`deadline_mode`). Without tomorrow's prices the
+plan is flagged `prices_partial`. It re-plans on plug-in, a price update,
+a hot-water plan change and every 15 minutes.
+
+Guard (`guard.go`, pure): per-phase current is estimated from the grid
+power, the EV power, the heat pump and the immersion heater (assumed
+drawing when the hot-water residual is at least 1500 W); the would-be EV
+limit is the floored minimum headroom against the budget. Breaches
+(estimated phase above the budget) are counted per session on the rising
+edge.
+
+Published (prefix `ev_`): `sensor.ev_controller_state` (idle, planned,
+would_charge, would_pause, deadline_mode, degraded; attribute `reason`),
+`ev_plan` (planned kWh; attributes slots, cost, need, departure,
+prices_partial, deadline_mode), `ev_would_command` (resume at N A, pause,
+limit N A, none), `ev_guard_limit_a` (per-phase attributes),
+`ev_guard_breaches_tonight`, `ev_shadow_saving` (last session actual cost
+minus the plan's cost for the same kWh, plus cumulative).
+
+Evaluation: at unplug one JSON line per session is appended to
+`/data/evcontrol/sessions.jsonl` (plug-in, departure, kWh delivered,
+actual and plan cost, whether the plan finishes by departure, breaches).
+Restart state is `/data/ev_control-state.json`.
+
+All options are optional with defaults in code (see config.yaml `ev_*`).
+
 ## MQTT discovery
 
 Discovery configs are published retained to

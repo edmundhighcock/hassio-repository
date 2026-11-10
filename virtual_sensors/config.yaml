@@ -32,7 +32,7 @@ options:
   go_memlimit_mib: 24
 schema:
   modules:
-    - "list(hot_water|hot_water_control|example_passthrough)"
+    - "list(hot_water|hot_water_control|ev_control|example_passthrough)"
   log_level: "list(debug|info|warning|error)"
   mqtt_host: "str?"
   mqtt_port: "port?"
@@ -81,6 +81,20 @@ schema:
   # input_button.hot_water_test_move / _test_probe, LIVE only, within the move caps
   hwc_test_moves_only: "bool?" # default false; true = planner overridden, no planned OFF
   hwc_test_off_min: "int(2,60)?" # default 10: how long a test OFF lasts
+  # --- ev_control (SHADOW ONLY: no service is ever called). Every key is
+  # optional with NO entry under options:; Go applies the default. The
+  # price keys are hwcontrol's own (hwc_price_entity, hwc_price_adder_ore,
+  # hwc_vat_factor). Enable via the `modules` list. ---
+  ev_entity_prefix: "str?" # default loaver
+  ev_departure: "str?" # default "06:30" local
+  ev_need_kwh: "float?" # default 44
+  ev_min_a: "int(6,32)?" # default 6
+  ev_max_a: "int(6,32)?" # default 16
+  ev_phase_budget_a: "float?" # default 19
+  ev_house_base_a: "float?" # default 3
+  ev_min_block_min: "int(0,240)?" # default 30
+  ev_heater_phase_a: "float?" # default 7.5
+  ev_hp_phase_a: "float?" # default 7.4
 # This add-on's own /data (energy totals, open-cycle state - see DOCS.md
 # "Restart semantics") is small; it is included in Home Assistant's
 # normal backups like any other add-on's /data, with no backup_exclude.
