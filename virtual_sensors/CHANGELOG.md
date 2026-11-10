@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - New module `ev_control` (Go package `evcontrol`): SHADOW-ONLY EV planner
   and guard for the Easee charger, per ham `services/ev-planner/PLAN.md`.
