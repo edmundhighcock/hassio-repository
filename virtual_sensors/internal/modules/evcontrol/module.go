@@ -26,6 +26,7 @@ const (
 	ObjGuard     = "ev_guard_limit_a"
 	ObjBreaches  = "ev_guard_breaches_tonight"
 	ObjSaving    = "ev_shadow_saving"
+	ObjHeartbeat = "ev_controller_heartbeat"
 	hwPlanEntity = "hot_water_controller_plan"
 	gridEntity   = "grid_meter_power"
 	hpEntity     = "heat_pump_power_power"
@@ -52,6 +53,14 @@ type options struct {
 	PriceEnt   *string  `json:"hwc_price_entity"`
 	AdderOre   *float64 `json:"hwc_price_adder_ore"`
 	VAT        *float64 `json:"hwc_vat_factor"`
+	Mode       *string  `json:"ev_mode"`
+	Notify     *string  `json:"ev_notify_service"`
+	ChargerID  *string  `json:"ev_charger_id"`
+	TTLMin     *int     `json:"ev_limit_ttl_min"`
+	StaleMin   *int     `json:"ev_stale_after_min"`
+	EqEntity   *string  `json:"ev_equalizer_entity"`
+	EqOnline   *string  `json:"ev_equalizer_online_entity"`
+	EqFreshMin *int     `json:"ev_equalizer_fresh_min"`
 }
 
 // persisted is the module's restart state.
@@ -59,6 +68,7 @@ type persisted struct {
 	Session *session          `json:"session,omitempty"`
 	Prices  map[int64]float64 `json:"prices,omitempty"` // quarter start (unix) -> SEK/kWh ex VAT
 	Sum     savingTotals      `json:"totals"`
+	Exec    *execPersist      `json:"exec,omitempty"`
 }
 
 type savingTotals struct {
@@ -121,6 +131,18 @@ type Module struct {
 	sessionsPath string
 	appendLine   func(path string, b []byte) error
 	lastSaving   *sessionResult
+
+	x            exec
+	lastArmedPub string
+	lastHB       time.Time
+	eqA          [3]float64
+	eqAt         time.Time
+	eqOK         bool
+	eqOnline     bool
+	eqEnt, eqOnE string
+	eqFresh      time.Duration
+	chargerA     float64
+	chargerAOK   bool
 }
 
 type period struct{ start, end time.Time }
@@ -129,7 +151,8 @@ type period struct{ start, end time.Time }
 func New() *Module {
 	m := &Module{p: DefaultParams(), prefix: "loaver", depHHMM: 6*60 + 30,
 		priceEnt: "nordpool_kwh_se3_sek_3_06_0", prices: map[int64]float64{},
-		sessionsPath: filepath.Join(SessionsDir, "sessions.jsonl"), appendLine: appendFile}
+		sessionsPath: filepath.Join(SessionsDir, "sessions.jsonl"), appendLine: appendFile,
+		x: newExec(), eqEnt: "equalizer_current", eqOnE: "binary_sensor.equalizer_online", eqFresh: 2 * time.Minute}
 	return m
 }
 
@@ -154,7 +177,9 @@ func (m *Module) ent(s string) string { return m.prefix + "_" + s }
 // Inputs implements modules.Module.
 func (m *Module) Inputs() []modules.InputSpec {
 	return []modules.InputSpec{
-		{EntityID: m.ent("status")}, {EntityID: m.ent("power")}, {EntityID: m.ent("session_energy")},
+		{EntityID: m.ent("status"), Attributes: []string{"id"}}, {EntityID: m.ent("power")}, {EntityID: m.ent("session_energy")},
+		{EntityID: m.ent("current")}, {EntityID: ArmedEntity},
+		{EntityID: m.eqEnt, Attributes: []string{"state_currentL1", "state_currentL2", "state_currentL3"}}, {EntityID: m.eqOnE},
 		{EntityID: gridEntity}, {EntityID: hpEntity},
 		{EntityID: hotwater.OutPowerObjectID},
 		{EntityID: hwPlanEntity, Attributes: []string{"periods", "valid_until"}},
@@ -174,6 +199,11 @@ func (m *Module) Outputs() []modules.OutputSpec {
 		mk(ObjGuard, "EV guard limit", "A", "measurement"),
 		mk(ObjBreaches, "EV guard breaches tonight", "", "measurement"),
 		mk(ObjSaving, "EV shadow saving", "kr", ""),
+		mk(ObjMode, "EV controller mode", "", ""),
+		mk(ObjArmed, "EV controller armed", "", ""),
+		mk(ObjLastCmd, "EV last command", "", ""),
+		mk(ObjLimitForce, "EV limit in force", "A", "measurement"),
+		mk(ObjHeartbeat, "EV controller heartbeat", "s", ""),
 	}
 }
 
@@ -231,6 +261,38 @@ func (m *Module) Configure(raw []byte) error {
 	if o.VAT != nil && *o.VAT > 0 {
 		p.Price.VAT = *o.VAT
 	}
+	x := newExec()
+	x.live = o.Mode != nil && *o.Mode == "live"
+	if o.Notify != nil && strings.HasPrefix(*o.Notify, "notify.") {
+		x.notify = *o.Notify
+	}
+	if o.ChargerID != nil {
+		x.chargerOpt = strings.TrimSpace(*o.ChargerID)
+	}
+	if o.TTLMin != nil {
+		if *o.TTLMin >= 3 && *o.TTLMin <= 120 {
+			x.ttl = time.Duration(*o.TTLMin) * time.Minute
+		} else {
+			msgs = append(msgs, "option ev_limit_ttl_min out of range 3..120; default applied")
+		}
+	}
+	if o.StaleMin != nil {
+		if *o.StaleMin >= 2 && *o.StaleMin <= 120 {
+			x.stale = time.Duration(*o.StaleMin) * time.Minute
+		} else {
+			msgs = append(msgs, "option ev_stale_after_min out of range 2..120; default applied")
+		}
+	}
+	if o.EqEntity != nil && *o.EqEntity != "" {
+		m.eqEnt = strings.TrimPrefix(*o.EqEntity, "sensor.")
+	}
+	if o.EqOnline != nil && *o.EqOnline != "" {
+		m.eqOnE = *o.EqOnline
+	}
+	if o.EqFreshMin != nil && *o.EqFreshMin >= 1 && *o.EqFreshMin <= 60 {
+		m.eqFresh = time.Duration(*o.EqFreshMin) * time.Minute
+	}
+	m.x = x
 	if p.MaxA < p.MinA {
 		msgs = append(msgs, "ev_max_a < ev_min_a; defaults applied")
 		p.MinA, p.MaxA = 6, 16
@@ -258,18 +320,25 @@ func (m *Module) Init(b []byte) error {
 			log.Printf("%s: persisted state unreadable (%v); starting fresh", Name, err)
 		} else {
 			m.sess, m.totals = ps.Session, ps.Sum
+			if ps.Exec != nil {
+				m.x.st = *ps.Exec
+			}
 			if ps.Prices != nil {
 				m.prices = ps.Prices
 			}
 		}
 	}
-	log.Printf("%s: SHADOW ONLY: reads Home Assistant, publishes sensors, never calls a service", Name)
+	if m.x.live {
+		log.Printf("%s: mode live (needs %s on too)", Name, ArmedEntity)
+	} else {
+		log.Printf("%s: mode shadow: reads Home Assistant, publishes sensors, calls no service", Name)
+	}
 	return nil
 }
 
 // Persist implements modules.Module.
 func (m *Module) Persist() ([]byte, error) {
-	return json.Marshal(persisted{Session: m.sess, Prices: m.prices, Sum: m.totals})
+	return json.Marshal(persisted{Session: m.sess, Prices: m.prices, Sum: m.totals, Exec: &m.x.st})
 }
 
 // InitialStates implements modules.InitialStater.
@@ -324,6 +393,12 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	case m.ent("status"):
 		was := m.plugged()
 		m.integrate(u.Time)
+		if raw, ok := u.Attrs["id"]; ok {
+			var id string
+			if json.Unmarshal(raw, &id) == nil && id != "" {
+				m.x.chargerID = id
+			}
+		}
 		m.status, m.statusOK = u.State, u.Available || u.State != ""
 		if u.State == "unavailable" || u.State == "unknown" {
 			m.statusOK = false
@@ -353,8 +428,31 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 				m.sess.DeliveredKWh = u.Value
 			}
 		}
+	case ArmedEntity:
+		m.x.armedKey = u.State == "on"
+	case m.ent("current"):
+		m.chargerA, m.chargerAOK = u.Value, u.Available
+	case m.eqEnt:
+		ok := u.Available
+		var a [3]float64
+		for i, k := range []string{"state_currentL1", "state_currentL2", "state_currentL3"} {
+			raw, has := u.Attrs[k]
+			if !has || json.Unmarshal(raw, &a[i]) != nil {
+				ok = false
+			}
+		}
+		if ok {
+			m.eqA, m.eqAt, m.eqOK = a, u.Time, true
+		}
+		outs = append(outs, m.runGuard(u.Time)...)
+	case m.eqOnE:
+		m.eqOnline = u.State == "on"
+		outs = append(outs, m.runGuard(u.Time)...)
 	case gridEntity:
 		m.gridW, m.gridOK = u.Value, u.Available
+		if u.Available {
+			m.x.gridAt = u.Time
+		}
 		outs = append(outs, m.runGuard(u.Time)...)
 	case hpEntity:
 		if u.Available {
@@ -529,13 +627,18 @@ func (m *Module) replan(now time.Time) {
 }
 
 func (m *Module) runGuard(t time.Time) []modules.OutputUpdate {
-	if !m.gridOK {
+	eqFresh := m.eqOK && m.eqOnline && t.Sub(m.eqAt) < m.eqFresh
+	if !m.gridOK && !eqFresh {
 		return nil
 	}
-	g := Guard(GuardIn{GridW: m.gridW, EVkW: m.evKW, HPW: m.hpW, ImmersionOn: m.residualW >= 1500}, m.p)
+	g := Guard(GuardIn{GridW: m.gridW, EVkW: m.evKW, HPW: m.hpW, ImmersionOn: m.residualW >= 1500,
+		EqA: m.eqA, EqOK: eqFresh, ChargerA: m.chargerA, ChargerOK: m.chargerAOK}, m.p)
 	m.guard, m.haveGuard = g, true
 	if g.Breach && !m.inBreach && m.sess != nil {
 		m.sess.Breaches++
+	}
+	if g.Breach && !m.inBreach {
+		m.x.breachEdge = true
 	}
 	m.inBreach = g.Breach
 	return nil
@@ -554,6 +657,10 @@ func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
 	if re {
 		m.replan(now)
 	}
+	// The guard is also re-evaluated here so a lapsed Equalizer reading
+	// falls back to the grid estimate without waiting for an update.
+	m.runGuard(now)
+	m.control(now)
 	return m.publishAll(now, re)
 }
 
@@ -625,16 +732,24 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 
 func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 	var outs []modules.OutputUpdate
+	outs = append(outs, m.execOutputs(now, force)...)
+	if m.lastHB.IsZero() || now.Sub(m.lastHB) >= 30*time.Second {
+		// Unix seconds; an HA-side watchdog resumes a paused charger if
+		// this goes stale (see DOCS.md).
+		m.lastHB = now
+		outs = append(outs, modules.OutputUpdate{ObjectID: ObjHeartbeat, Time: now, Value: float64(now.Unix()),
+			AttributesJSON: jsonStr(map[string]any{"mode": m.modeString(), "armed_live": m.armedLive(), "paused_by_us": m.x.st.Paused})})
+	}
 	state, cmd, reason := m.decide(now)
 	if force || state != m.lastState {
 		m.lastState = state
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjState, Time: now, StateString: state,
-			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": true, "unplanned_kwh": round(m.plan.UnplannedKWh, 1)})})
+			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": !m.armedLive(), "unplanned_kwh": round(m.plan.UnplannedKWh, 1)})})
 	}
 	if force || cmd != m.lastWould {
 		m.lastWould = cmd
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjWould, Time: now, StateString: cmd,
-			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": true})})
+			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": !m.armedLive()})})
 	}
 	if force {
 		outs = append(outs, m.planOutput(now))
@@ -647,7 +762,7 @@ func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 			AttributesJSON: jsonStr(map[string]any{
 				"phase_a_a": round(g.PhaseA[0], 1), "phase_b_a": round(g.PhaseA[1], 1), "phase_c_a": round(g.PhaseA[2], 1),
 				"house_a": round(g.HouseA[0], 1), "house_b": round(g.HouseA[1], 1), "house_c": round(g.HouseA[2], 1),
-				"ev_a_per_phase": round(g.EVA, 1), "breach": g.Breach, "shadow": true})})
+				"ev_a_per_phase": round(g.EVA, 1), "breach": g.Breach, "shadow": !m.armedLive()})})
 		n := 0
 		if m.sess != nil {
 			n = m.sess.Breaches
@@ -677,7 +792,7 @@ func (m *Module) planOutput(now time.Time) modules.OutputUpdate {
 	return modules.OutputUpdate{ObjectID: ObjPlan, Time: now, Value: v, AttributesJSON: jsonStr(map[string]any{
 		"slots": slots, "slot_fields": []string{"start", "amps", "kw", "price_kr_per_kwh"},
 		"cost_kr": round(m.plan.CostKr, 2), "need_kwh": round(m.plan.NeedKWh, 1), "departure": dep,
-		"prices_partial": m.plan.PricesPartial, "deadline_mode": m.plan.DeadlineMode, "unplanned_kwh": round(m.plan.UnplannedKWh, 1), "awaiting_prices": m.plan.AwaitingPrices, "feasible": m.plan.Feasible, "shadow": true})}
+		"prices_partial": m.plan.PricesPartial, "deadline_mode": m.plan.DeadlineMode, "unplanned_kwh": round(m.plan.UnplannedKWh, 1), "awaiting_prices": m.plan.AwaitingPrices, "feasible": m.plan.Feasible, "shadow": !m.armedLive()})}
 }
 
 func (m *Module) savingOutput(now time.Time) modules.OutputUpdate {
