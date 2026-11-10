@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+
+- hwcontrol: C10 revised. A restart or reconnect with the cover below 90 now
+  RESUMES a valid OFF (`boot_resume_off`: IDLE_OFF, no motor move, OffSince and
+  clocks kept) instead of commanding ON (`boot_below_90`). Resume only if the
+  controller itself put the switch OFF (persisted `off_since` set and last
+  command OFF), now is inside a period of the current plan (or a valid Override
+  Off), and the normal running-OFF checks still pass (`offRevoked`: armed/live,
+  tank clock, fresh inputs, no boost, no hold incl. latch/battery/strikes,
+  selector) plus the evening rule. Otherwise ON as before. No new persisted
+  field. Cover >= 90 at boot (`boot_on`) is unchanged.
+
 ## 0.4.0
 
 - New module `hp_control` (Go package `hpcontrol`): SHADOW-ONLY heat-pump and

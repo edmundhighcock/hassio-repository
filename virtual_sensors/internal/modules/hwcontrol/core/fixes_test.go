@@ -366,7 +366,9 @@ func TestLinkLossIsNotDisarm(t *testing.T) {
 	r.step(Link{At: r.now, Up: true})
 	r.pushCover()
 	r.advance(time.Minute)
-	if !r.c.Live() || !r.switchOn {
+	// C10 (revised 0.4.1): the still-valid OFF is resumed, with no move.
+	if !r.c.Live() || r.switchOn || len(r.cmds) != n {
 		t.Fatalf("after reconnect live=%v on=%v state %s", r.c.Live(), r.switchOn, r.state())
 	}
+	r.wantState("IDLE_OFF")
 }

@@ -138,9 +138,10 @@ func TestRows19And20OnRetriesThenHold(t *testing.T) {
 	}
 }
 
-// Row 4 / C10: a restart with the cover below 90 commands ON and does not
-// resume the OFF period, even though the persisted period is still open.
-func TestRow4RestartMidOffGoesOn(t *testing.T) {
+// Row 4 / C10 (revised 0.4.1): a restart with the cover below 90 resumes
+// the OFF when it is still valid (see resume_off_test.go for the cases
+// that still go ON).
+func TestRow4RestartMidOffResumes(t *testing.T) {
 	r := readyForOff(t)
 	r.advance(18 * time.Minute)
 	r.wantState("IDLE_OFF")
@@ -152,11 +153,9 @@ func TestRow4RestartMidOffGoesOn(t *testing.T) {
 	r2.plan(r.c.plan)
 	r2.boot(true)
 	r2.advance(time.Minute)
-	if r2.countCmds(99) != 1 || !r2.switchOn {
-		t.Fatalf("restart mid-OFF did not go ON: %v state %s", r2.cmds, r2.state())
-	}
-	if r2.countCmds(0) != 0 {
-		t.Fatal("OFF resumed after restart")
+	r2.wantState("IDLE_OFF")
+	if len(r2.cmds) != 0 || r2.switchOn {
+		t.Fatalf("restart mid-OFF did not resume the OFF: %v state %s", r2.cmds, r2.state())
 	}
 }
 
@@ -212,19 +211,21 @@ func TestRow17StaleWhileOffGoesOn(t *testing.T) {
 }
 
 // Row 17: HA connection lost while OFF -> DEGRADED (commands impossible);
-// on reconnect BOOT commands ON.
+// on reconnect BOOT resumes the still-valid OFF (C10, revised 0.4.1).
 func TestRow17LinkLostWhileOff(t *testing.T) {
 	r := readyForOff(t)
 	r.advance(18 * time.Minute)
 	r.wantState("IDLE_OFF")
+	n := len(r.cmds)
 	r.step(Link{At: r.now, Up: false})
 	r.advance(10 * time.Second)
 	r.wantState("DEGRADED")
 	r.step(Link{At: r.now, Up: true})
 	r.pushCover()
 	r.advance(time.Minute)
-	if !r.switchOn {
-		t.Fatalf("not ON after reconnect, state %s", r.state())
+	r.wantState("IDLE_OFF")
+	if r.switchOn || len(r.cmds) != n {
+		t.Fatalf("OFF not resumed after reconnect: %v state %s", r.cmds, r.state())
 	}
 }
 

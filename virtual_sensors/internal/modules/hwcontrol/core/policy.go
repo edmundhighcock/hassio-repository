@@ -334,11 +334,68 @@ func (c *Controller) runBoot() {
 		c.setState(StIdleOn, "boot_on") // row 3: settle before any OFF
 		return
 	}
-	// Row 4: below 90, including a crash or reconnect mid-OFF; the OFF
-	// period is not resumed (C10). G may still hold for the ON.
+	// Row 4 / C10 (revised 0.4.1): below 90 at boot, including a crash or
+	// reconnect mid-OFF. A valid OFF is RESUMED (IDLE_OFF, no motor move,
+	// OffSince and the clocks kept) only if the controller itself put the
+	// switch OFF (OffSince set and the last command was OFF) and every
+	// condition the normal OFF path applies still holds (bootMayResumeOff).
+	// Otherwise the OFF is abandoned and ON is commanded (boot_below_90);
+	// G may still hold for that ON.
+	if op, ok := c.bootMayResumeOff(); ok {
+		c.offPeriod = op
+		c.P.CurrentOffPeriod = op // nil for an Override Off
+		c.heatOffCount = 0
+		c.setState(StIdleOff, "boot_resume_off")
+		return
+	}
 	endsOff := !c.P.OffSince.IsZero()
 	c.abandonOff()
 	c.startOn("boot_below_90", endsOff)
+}
+
+// bootMayResumeOff decides C10: whether a restart or reconnect with the
+// cover below 90 may continue the running OFF. It returns the period to
+// continue (nil for an Override Off, which has no plan period). It reuses
+// the running-OFF predicate offRevoked (live/armed, tank clock, input
+// freshness, boost, holds incl. latch/battery/strikes, selector, period
+// end and plan coverage) and the evening rule, so nothing is
+// reimplemented.
+func (c *Controller) bootMayResumeOff() (*OffPeriod, bool) {
+	// The controller must have commanded this OFF: OffSince is set only
+	// when its own OFF move completed, and cleared when an ON is verified;
+	// the last command must also still be OFF (not an interrupted ON).
+	if c.P.OffSince.IsZero() || c.P.LastCommand.Target != c.cfg.CmdOff {
+		return nil, false
+	}
+	if c.P.Strikes >= 3 || !c.eveningOK() || c.testOff {
+		return nil, false
+	}
+	if c.entityFresh(RoleSelect) && c.str(RoleSelect) == SelectOverrideOff {
+		saved := c.offPeriod
+		c.offPeriod = nil
+		why := c.offRevoked(true)
+		c.offPeriod = saved
+		if why != "" {
+			return nil, false
+		}
+		c.overrideOffDone = false // maybeOverrideOff re-adopts it (no move: already OFF)
+		return nil, true
+	}
+	cur, ok := c.plan.PeriodAt(c.now)
+	if !ok || cur.Start.Before(c.P.AbandonedUntil) {
+		return nil, false
+	}
+	if pp := c.P.CurrentOffPeriod; pp != nil && pp.Start.Equal(cur.Start) && pp.End.Before(cur.End) {
+		cur = *pp // frozen: a replan may only shorten
+	}
+	saved := c.offPeriod
+	c.offPeriod = &cur
+	why := c.offRevoked(false)
+	if why != "" {
+		c.offPeriod = saved
+		return nil, false
+	}
+	return c.offPeriod, true
 }
 
 func (c *Controller) enterDegraded(reason string) {

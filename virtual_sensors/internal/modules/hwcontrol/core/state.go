@@ -461,7 +461,7 @@ func (c *Controller) onLink(l Link) {
 		// (older) warm-up replay times.
 		c.bootSince = c.now
 		if c.P.State != StBoot && c.hold == "" {
-			// §5.5: on reconnect go through BOOT; an OFF is not resumed (C10).
+			// §5.5: on reconnect go through BOOT; a valid OFF may be resumed (C10, runBoot).
 			c.setState(StBoot, "reconnect")
 		}
 	}
