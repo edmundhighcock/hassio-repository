@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"virtual_sensors/internal/modules"
@@ -68,6 +69,9 @@ type Module struct {
 	lastPlanAt time.Time
 	testOnly   bool // hwc_test_moves_only: R3 planner override, never a plan
 	now        time.Time
+
+	schedMu sync.RWMutex
+	sched   core.HeaterSchedule
 
 	outs    []modules.OutputUpdate
 	effects []modules.Effect
@@ -351,7 +355,24 @@ func (m *Module) step(in core.Input) {
 		}
 	}
 	m.apply(m.c.Step(in))
+	s := m.c.Schedule()
+	m.schedMu.Lock()
+	m.sched = s
+	m.schedMu.Unlock()
 }
+
+// HeaterSchedule implements core.HeaterScheduleSource: the next 24 h of
+// planned heater ON/OFF windows and the heater's current state, as of the
+// last step. Safe to call from another goroutine or module.
+func (m *Module) HeaterSchedule() core.HeaterSchedule {
+	m.schedMu.RLock()
+	defer m.schedMu.RUnlock()
+	s := m.sched
+	s.Windows = append([]core.HeaterWindow(nil), s.Windows...)
+	return s
+}
+
+var _ core.HeaterScheduleSource = (*Module)(nil)
 
 func (m *Module) apply(effs []core.Effect) {
 	for _, e := range effs {
