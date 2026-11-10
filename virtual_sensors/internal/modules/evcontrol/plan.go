@@ -71,13 +71,15 @@ func (s Slot) KWh() float64 { return s.KW * 0.25 }
 
 // Result is a plan.
 type Result struct {
-	Slots         []Slot
-	NeedKWh       float64 // remaining need
-	PlannedKWh    float64
-	CostKr        float64 // all-in, priced slots only
-	DeadlineMode  bool
-	PricesPartial bool
-	Feasible      bool // PlannedKWh >= NeedKWh
+	Slots          []Slot
+	NeedKWh        float64 // remaining need
+	PlannedKWh     float64
+	CostKr         float64 // all-in, priced slots only
+	DeadlineMode   bool
+	AwaitingPrices bool    // partial prices, need not yet fully planned; re-plan when tomorrow arrives
+	UnplannedKWh   float64 // remainder of the need left unplanned while awaiting prices
+	PricesPartial  bool
+	Feasible       bool // PlannedKWh >= NeedKWh
 }
 
 // AmpsKW converts per-phase amps to 3-phase kW.
@@ -149,17 +151,27 @@ func Plan(in Input, p Params) Result {
 		return Slot{Start: c.start, Amps: c.amps, KW: AmpsKW(c.amps), PriceOre: c.price, Priced: c.priced}
 	}
 	var usable []cand
-	pricedKWh := 0.0
+	pricedKWh, usableKWh := 0.0, 0.0
 	for _, c := range all {
 		if c.amps > 0 {
 			usable = append(usable, c)
+			usableKWh += AmpsKW(c.amps) * 0.25
 			if c.priced {
 				pricedKWh += AmpsKW(c.amps) * 0.25
 			}
 		}
 	}
 	chosen := map[int]bool{}
-	if pricedKWh < need {
+	if pricedKWh < need && res.PricesPartial && usableKWh > need {
+		// Tomorrow's prices are not in yet and the time left still covers the
+		// need at the ceiling: plan the priced slots only, leave the rest.
+		res.AwaitingPrices = true
+		for _, c := range usable {
+			if c.priced {
+				chosen[c.i] = true
+			}
+		}
+	} else if pricedKWh < need {
 		// Backstop: every remaining usable slot at its ceiling.
 		res.DeadlineMode = true
 		for _, c := range usable {
@@ -225,6 +237,9 @@ func Plan(in Input, p Params) Result {
 		}
 	}
 	res.Feasible = res.PlannedKWh >= need-1e-9
+	if res.AwaitingPrices {
+		res.UnplannedKWh = math.Max(0, need-res.PlannedKWh)
+	}
 	return res
 }
 

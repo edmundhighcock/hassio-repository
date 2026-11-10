@@ -118,12 +118,18 @@ func TestPartialPrices(t *testing.T) {
 	if !r.PricesPartial {
 		t.Fatal("prices_partial not flagged")
 	}
-	if !r.DeadlineMode {
-		t.Fatalf("priced slots (5 h) cannot meet 44 kWh: backstop expected")
+	if r.DeadlineMode || !r.AwaitingPrices || r.UnplannedKWh <= 0 {
+		t.Fatalf("time left covers the need: awaiting prices, not deadline: %+v", r)
 	}
-	last := r.Slots[len(r.Slots)-1]
-	if !last.Start.Equal(at(11, 6, 15)) || last.Priced {
-		t.Fatalf("backstop should cover unpriced slots to departure: %v", last)
+	for _, s := range r.Slots {
+		if !s.Priced {
+			t.Fatal("awaiting prices must plan priced slots only")
+		}
+	}
+	// Too little time left even at the ceiling: deadline backstop.
+	r = Plan(Input{Now: at(11, 2, 0), Departure: at(11, 6, 30), Prices: pr, HotWaterOn: noHeater}, p)
+	if !r.DeadlineMode || r.AwaitingPrices {
+		t.Fatalf("expected deadline mode: %+v", r)
 	}
 	// Enough priced slots tonight: no backstop, unpriced slots not chosen.
 	p.NeedKWh = 5.52
@@ -315,5 +321,44 @@ func TestPersistRoundTripAndConfigDefaults(t *testing.T) {
 	}
 	if err := New().Init([]byte("{garbage")); err != nil {
 		t.Fatal("corrupt state must not fail Init")
+	}
+}
+
+func TestAwaitingPricesThenNormalPlan(t *testing.T) {
+	m := New()
+	m.appendLine = func(string, []byte) error { return nil }
+	_ = m.Init(nil)
+	t0 := at(10, 10, 0)
+	f := func(h int) float64 {
+		if h >= 1 && h < 5 {
+			return 0.3
+		}
+		return 1.0
+	}
+	stateOf := func(outs []modules.OutputUpdate) string {
+		for _, o := range outs {
+			if o.ObjectID == ObjState {
+				return o.StateString
+			}
+		}
+		return ""
+	}
+	m.OnStateUpdate(modules.StateUpdate{EntityID: m.priceEnt, Time: t0, Available: true, Attrs: rawPrices(at(10, 0, 0), at(11, 0, 0), f)})
+	outs := m.OnStateUpdate(modules.StateUpdate{EntityID: "loaver_status", Time: t0, State: "awaiting_start"})
+	if s := stateOf(outs); s != "awaiting_prices" {
+		t.Fatalf("state %q", s)
+	}
+	if !m.plan.AwaitingPrices || m.plan.DeadlineMode || m.plan.UnplannedKWh <= 0 {
+		t.Fatalf("%+v", m.plan)
+	}
+	outs = m.OnStateUpdate(modules.StateUpdate{EntityID: m.priceEnt, Time: at(10, 13, 5), Available: true, Attrs: rawPrices(at(10, 0, 0), at(12, 0, 0), f)})
+	if s := stateOf(outs); s == "awaiting_prices" || s == "" {
+		t.Fatalf("after tomorrow's prices: %q", s)
+	}
+	if m.plan.AwaitingPrices || m.plan.DeadlineMode || !m.plan.Feasible || m.plan.PricesPartial {
+		t.Fatalf("%+v", m.plan)
+	}
+	if m.sess.FirstPlan == nil || !m.sess.FirstPlan.Feasible {
+		t.Fatalf("session record should use the final plan: %+v", m.sess.FirstPlan)
 	}
 }

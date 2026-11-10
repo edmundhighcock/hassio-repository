@@ -516,10 +516,14 @@ func (m *Module) replan(now time.Time) {
 	m.plan = Plan(Input{Now: now, Departure: m.sess.Departure, DeliveredKWh: m.sessionKWh,
 		Prices: m.priceList(), HotWaterOn: m.hwOn}, m.p)
 	m.havePlan = true
-	if m.sess.FirstPlan == nil {
-		// The plan at plug-in, for the "would it have finished" record,
-		// is made for the FULL need from plug-in.
+	if m.sess.FirstPlan == nil || !m.plan.AwaitingPrices {
+		// The plan for the "would it have finished" record is made for the
+		// FULL need from plug-in, and is the final one made once prices
+		// are complete (overwritten on each replan except while awaiting).
 		full := Plan(Input{Now: m.sess.PlugIn, Departure: m.sess.Departure, Prices: m.priceList(), HotWaterOn: m.hwOn}, m.p)
+		if full.AwaitingPrices && m.sess.FirstPlan != nil {
+			return
+		}
 		m.sess.FirstPlan = &planSummary{PlannedKWh: full.PlannedKWh, NeedKWh: full.NeedKWh, Feasible: full.Feasible, CostKr: full.CostKr}
 	}
 }
@@ -597,7 +601,9 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 			return "would_pause", "pause", "guard: no headroom (" + why + ")"
 		}
 		st := "would_charge"
-		if m.plan.DeadlineMode {
+		if m.plan.AwaitingPrices {
+			st = "awaiting_prices"
+		} else if m.plan.DeadlineMode {
 			st = "deadline_mode"
 		}
 		if !charging {
@@ -611,6 +617,9 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	if charging {
 		return "would_pause", "pause", "charging outside the planned slots"
 	}
+	if m.plan.AwaitingPrices {
+		return "awaiting_prices", "none", "tomorrow's prices not yet published"
+	}
 	return "planned", "none", "waiting for a planned slot"
 }
 
@@ -620,7 +629,7 @@ func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 	if force || state != m.lastState {
 		m.lastState = state
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjState, Time: now, StateString: state,
-			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": true})})
+			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": true, "unplanned_kwh": round(m.plan.UnplannedKWh, 1)})})
 	}
 	if force || cmd != m.lastWould {
 		m.lastWould = cmd
@@ -668,7 +677,7 @@ func (m *Module) planOutput(now time.Time) modules.OutputUpdate {
 	return modules.OutputUpdate{ObjectID: ObjPlan, Time: now, Value: v, AttributesJSON: jsonStr(map[string]any{
 		"slots": slots, "slot_fields": []string{"start", "amps", "kw", "price_kr_per_kwh"},
 		"cost_kr": round(m.plan.CostKr, 2), "need_kwh": round(m.plan.NeedKWh, 1), "departure": dep,
-		"prices_partial": m.plan.PricesPartial, "deadline_mode": m.plan.DeadlineMode, "feasible": m.plan.Feasible, "shadow": true})}
+		"prices_partial": m.plan.PricesPartial, "deadline_mode": m.plan.DeadlineMode, "unplanned_kwh": round(m.plan.UnplannedKWh, 1), "awaiting_prices": m.plan.AwaitingPrices, "feasible": m.plan.Feasible, "shadow": true})}
 }
 
 func (m *Module) savingOutput(now time.Time) modules.OutputUpdate {
