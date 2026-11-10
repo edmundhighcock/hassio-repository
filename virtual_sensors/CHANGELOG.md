@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - New module `hp_control` (Go package `hpcontrol`): SHADOW-ONLY heat-pump and
   Dyson planner, per ham `services/hp-planner/PLAN.md`. Dynamic programming over
