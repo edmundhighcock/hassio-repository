@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.4.1"
+version: "0.5.0"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -32,7 +32,7 @@ options:
   go_memlimit_mib: 24
 schema:
   modules:
-    - "list(hot_water|hot_water_control|ev_control|hp_control|example_passthrough)"
+    - "list(hot_water|hot_water_control|ev_control|hp_control|house_planner|example_passthrough)"
   log_level: "list(debug|info|warning|error)"
   mqtt_host: "str?"
   mqtt_port: "port?"
@@ -103,7 +103,7 @@ schema:
   ev_stale_after_min: "int(2,120)?" # default 10: grid reading older than this = stale, charge now
   ev_equalizer_entity: "str?" # default sensor.equalizer_current (attrs state_currentL1..L3)
   ev_equalizer_online_entity: "str?" # default binary_sensor.equalizer_online
-  ev_equalizer_fresh_min: "int(1,60)?" # default 2
+  ev_equalizer_fresh_min: "int(1,60)?" # default 15 (the Equalizer updates on change only)
   # --- hp_control. SHADOW by default; it drives climate.heat_pump and the
   # Dyson fan only with hp_mode: live AND input_boolean.hp_controller_armed
   # on (two keys). Every key is optional and has NO entry under options:;
@@ -142,6 +142,18 @@ schema:
   hp_sensor_stale_min: "int(30,1440)?" # default 180: a comfort sensor older than this is ignored
   hp_evening_penalty_kr: "float?" # default 3.0 per running slot
   hp_switch_penalty_kr: "float?" # default 0.3 per level change
+  # --- house_planner (0.5.0): one budget per phase shared by the controllers.
+  # Every key optional, NO entry under options:; Go applies the default and
+  # replaces an out-of-range value with it (logged). It needs ev_control
+  # enabled (the EV guard supplies the live per-phase current). ---
+  house_budget_a: "float?" # default 19 A per phase
+  house_phase_map: "str?" # default "heater=L1+L2;hp=L3;ev=L1+L2+L3" (D32, provisional)
+  house_base_a: "float?" # default 3 A base house load on every phase
+  house_heater_w: "float?" # default: the heater schedule's own 3000 W; 0 takes the heater out of the budget
+  house_hp_max_w: "float?" # default 1700 W, assumed when the heat pump has no plan
+  house_overload_delay_s: "int(5,600)?" # default 30
+  house_hp_cooldown_min: "int(1,240)?" # default 15
+  house_horizon_h: "int(1,48)?" # default 24
 # This add-on's own /data (energy totals, open-cycle state - see DOCS.md
 # "Restart semantics") is small; it is included in Home Assistant's
 # normal backups like any other add-on's /data, with no backup_exclude.

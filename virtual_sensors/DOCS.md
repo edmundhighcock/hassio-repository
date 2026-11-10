@@ -414,6 +414,68 @@ watchdog). Restart state is `/data/hp_control-state.json` (also the override
 and whether it was armed, so a restart does not re-announce). All options are
 optional (see config.yaml `hp_*`).
 
+## House planner (`house_planner`, 0.5.0)
+
+Design: ham `doc/energy-design/energy-design.tex`, "house planner". Enable it
+by adding `house_planner` to `modules` **together with `ev_control`** (the EV
+guard supplies the live per-phase current; without it the planner says
+`no_data`). It reads no Home Assistant entity itself.
+
+One budget, `house_budget_a` (19 A) per phase, priority manual (unmanaged)
+loads, hot water, heat pump, EV. The modules share one process, so the code
+is a leaf package `internal/house` (budget arithmetic, phase map, overload
+state machine and a `Hub`) plus the small module `internal/modules/housebudget`.
+hwcontrol registers its heater schedule (`HeaterSchedule()` via
+`HouseHeaterPlan`), hpcontrol its planned power per slot
+(`PlannedPowerW()` / `HousePlan`), evcontrol its measured per-phase current;
+no module imports another.
+
+Wiring (provisional, D32) is the option string `house_phase_map`, default
+`heater=L1+L2;hp=L3;ev=L1+L2+L3`. Change it once the Equalizer confirms the
+real phases. Amps per phase: one phase W/230, two phases W/400, three phases
+W/(3x230).
+
+Forecast (recomputed every minute, 24 h, 15-minute slots): per-phase headroom
+= budget - base load (`house_base_a`, default 3 A) - the heater's ON windows
+on its phases (no heater plan: ON throughout) - the heat pump's planned W per
+slot on its phase (no heat-pump plan: `house_hp_max_w`). The EV planner uses
+the minimum over its phases as its per-slot current ceiling (floored, capped
+at `ev_max_a`, unusable below `ev_min_a`) instead of its static assumptions
+(`ev_house_base_a`, `ev_heater_phase_a`, `ev_hp_phase_a`, which apply only
+when there is no forecast or it is over 30 min old). The deadline backstop is
+unchanged. `ev_phase_budget_a` still governs the EV guard's live limit; keep
+it equal to `house_budget_a`.
+
+Live overload: a measured phase above the budget for more than
+`house_overload_delay_s` (30) first lowers the EV limit (down to pause; each
+further 30 s of overload steps it down by the excess). Only with the EV at
+zero, and the heat pump on an overloaded phase, the heat pump drops from
+boost to hold, then to off, for `house_hp_cooldown_min` (15) after the last
+overload. The EV cap is released 2 min after the overload ends (and only once
+the heat pump is released). The hot-water heater is never curtailed: the
+planner has no output for it. The caps go through the hub and are applied
+ONLY by evcontrol's and hpcontrol's own live executors when armed live
+(`ev_mode` live + `input_boolean.ev_controller_armed`; `hp_mode` live +
+`input_boolean.hp_controller_armed`); in shadow they only show in
+`ev_would_command` / `hp_would_command` and in the sensors below. A cap not
+refreshed for 2 min lapses (a dead planner never leaves a load throttled).
+With the Equalizer stale the guard's grid-power estimate is used and the
+planner acts on it too (`source` attribute). While `timer.tv_quiet` is
+active the heat-pump executor sends nothing, so an HP cap waits.
+
+Published (MQTT discovery): `sensor.house_budget_headroom_l1/l2/l3` (live A,
+budget minus the current; attribute `forecast` = [slot start, A] for the next
+24 h, plus `ev_ceiling_forecast`), `sensor.house_budget_state` (ok,
+curtailing_ev, curtailing_hp, no_data; attributes reason, source, caps, over
+phases, whether each executor is armed live) and
+`sensor.house_budget_heartbeat` (Unix seconds, every 30 s).
+
+Options (all optional, defaults in Go): `house_budget_a`, `house_phase_map`,
+`house_base_a`, `house_heater_w` (0 removes the heater from the budget),
+`house_hp_max_w`, `house_overload_delay_s`, `house_hp_cooldown_min`,
+`house_horizon_h`. The base load is a fixed option; a learned per-phase
+median is not built.
+
 ## MQTT discovery
 
 Discovery configs are published retained to
@@ -608,7 +670,7 @@ ttl_min, desired, reason, fallback), `ev_controller_heartbeat`.
 ### Guard inputs: Equalizer
 
 When `binary_sensor.equalizer_online` is on and `sensor.equalizer_current`
-was updated within `ev_equalizer_fresh_min` (2 min), the guard uses its real
+was updated within `ev_equalizer_fresh_min` (default 15 min), the guard uses its real
 per-phase currents (`state_currentL1..L3`, at the house fuse). Other load per
 phase is that reading minus the charger's own current: the smaller of
 `loaver_power`/(3x230) and `sensor.loaver_current` (whose per-phase mapping
@@ -616,3 +678,16 @@ is not documented, so the smaller value is subtracted, never overstating the
 charger and so never understating other load). Otherwise it falls back to the
 grid-power estimate above. Entities are options `ev_equalizer_entity` and
 `ev_equalizer_online_entity`.
+
+**Freshness rule (one rule, guard and house planner).** The Equalizer's
+attributes update ON CHANGE only, so a steady house is silent for minutes;
+a 2 min window made the guard read "stale" most of the time. A reading is
+fresh when the Equalizer is online AND `sensor.equalizer_current` was last
+updated less than `ev_equalizer_fresh_min` ago (default 15, was 2). The
+house planner does not re-judge it: it uses the guard's measurement
+(`evcontrol.EqualizerFresh`), so both always agree. Home Assistant's
+`last_reported` would be better (it advances on unchanged reports), but the
+add-on subscribes to `state_changed` only, which does not fire on unchanged
+reports; using it needs a second `state_reported` subscription in
+`internal/haws`, which is not built. A steady reading older than the window
+falls back to the grid-power estimate until the next change.

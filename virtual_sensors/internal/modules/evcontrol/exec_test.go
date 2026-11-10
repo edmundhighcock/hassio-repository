@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"virtual_sensors/internal/house"
 	"virtual_sensors/internal/modules"
 )
 
@@ -28,6 +29,7 @@ func spikePrice(h int) float64 {
 
 func newEnv(t *testing.T, opts string, armed bool) *env {
 	m := New()
+	m.hub = house.NewHub()
 	if err := m.Configure([]byte(opts)); err != nil {
 		t.Fatal(err)
 	}
@@ -432,6 +434,7 @@ func TestGuardUsesEqualizerWhenFresh(t *testing.T) {
 
 func TestModuleEqualizerFreshOnlineThenFallback(t *testing.T) {
 	m := New()
+	m.hub = house.NewHub()
 	m.Configure([]byte(`{}`))
 	t0 := at(10, 22, 0)
 	attrs := func(a, b, c string) map[string]json.RawMessage {
@@ -443,17 +446,23 @@ func TestModuleEqualizerFreshOnlineThenFallback(t *testing.T) {
 	if !m.guard.Measured || m.guard.LimitA != 7 { // floor(19-12) with no EV
 		t.Fatalf("equalizer path not used: %+v", m.guard)
 	}
-	// 3 minutes later (stale) a grid update falls back to the estimate.
-	m.OnStateUpdate(modules.StateUpdate{EntityID: gridEntity, Time: t0.Add(3 * time.Minute), Value: 800, Available: true})
+	// A steady house is silent (the Equalizer updates on change only): 10
+	// minutes on it is still fresh under the 15 min default window.
+	m.OnStateUpdate(modules.StateUpdate{EntityID: gridEntity, Time: t0.Add(10 * time.Minute), Value: 800, Available: true})
+	if !m.guard.Measured {
+		t.Fatalf("10 min-old online reading must still be fresh: %+v", m.guard)
+	}
+	// 16 minutes later (stale) a grid update falls back to the estimate.
+	m.OnStateUpdate(modules.StateUpdate{EntityID: gridEntity, Time: t0.Add(16 * time.Minute), Value: 800, Available: true})
 	if m.guard.Measured || m.guard.LimitA != 16 {
 		t.Fatalf("stale equalizer must fall back: %+v", m.guard)
 	}
 	// Offline: fall back even when fresh.
-	m.OnStateUpdate(modules.StateUpdate{EntityID: "equalizer_current", Time: t0.Add(4 * time.Minute), Value: 12, State: "12", Available: true, Attrs: attrs("2", "12", "3")})
+	m.OnStateUpdate(modules.StateUpdate{EntityID: "equalizer_current", Time: t0.Add(17 * time.Minute), Value: 12, State: "12", Available: true, Attrs: attrs("2", "12", "3")})
 	if !m.guard.Measured {
 		t.Fatal("fresh and online again must be measured")
 	}
-	m.OnStateUpdate(modules.StateUpdate{EntityID: "binary_sensor.equalizer_online", Time: t0.Add(4 * time.Minute), State: "off", Available: true})
+	m.OnStateUpdate(modules.StateUpdate{EntityID: "binary_sensor.equalizer_online", Time: t0.Add(17 * time.Minute), State: "off", Available: true})
 	if m.guard.Measured {
 		t.Fatalf("offline equalizer must fall back: %+v", m.guard)
 	}

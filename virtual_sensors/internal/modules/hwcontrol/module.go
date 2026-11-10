@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"virtual_sensors/internal/house"
 	"virtual_sensors/internal/modules"
 	"virtual_sensors/internal/modules/hotwater"
 	"virtual_sensors/internal/modules/hwcontrol/core"
@@ -334,7 +335,19 @@ func (m *Module) Init(persisted []byte) error {
 		mode = "live (needs the HA arming boolean too)"
 	}
 	log.Printf("%s: mode %s", Name, mode)
+	house.Default.SetHeater(m.HouseHeaterPlan) // read-only: the house planner never commands the heater
 	return nil
+}
+
+// HouseHeaterPlan adapts HeaterSchedule for the house planner's shared
+// budget (internal/house). Valid only once the controller has stepped.
+func (m *Module) HouseHeaterPlan() house.HeaterPlan {
+	s := m.HeaterSchedule()
+	p := house.HeaterPlan{Valid: !s.At.IsZero(), NominalW: float64(s.NominalW)}
+	for _, w := range s.Windows {
+		p.Windows = append(p.Windows, house.HeaterWindow{Start: w.Start, End: w.End, On: w.On})
+	}
+	return p
 }
 
 // Persist implements modules.Module.

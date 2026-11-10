@@ -284,6 +284,21 @@ func (m *Module) degradedReason(now time.Time) string {
 }
 
 func (m *Module) target(now time.Time) Target {
+	t := m.baseTarget(now)
+	// House budget (internal/house): a sustained phase overload that the EV
+	// could not cure caps the pump at hold, then off, for the cool-down.
+	// It outranks the plan and the safe hold: the fuse is the hard limit.
+	// Like the rest of this, it is only ever SENT when armed live.
+	if c, ok := m.hub.HPCap(now); ok && int(t.Level) > c {
+		pr := m.presenceNow()
+		l := Level(c)
+		return Target{Level: l, Pct: m.p.DysonPct(now, l, pr), Kind: "house_budget",
+			Reason: fmt.Sprintf("house budget overload: capped at %s (was %s)", l, t.Level)}
+	}
+	return t
+}
+
+func (m *Module) baseTarget(now time.Time) Target {
 	pr := m.presenceNow()
 	mk := func(l Level, kind, why string) Target {
 		return Target{Level: l, Pct: m.p.DysonPct(now, l, pr), Kind: kind, Reason: why}

@@ -55,6 +55,12 @@ type Input struct {
 	// HotWaterOn reports whether hot water's own plan has the switch ON at
 	// the slot start. nil means "unknown": treated as ON (conservative).
 	HotWaterOn func(time.Time) bool
+	// CeilingA (optional) is the house planner's per-slot headroom for the
+	// EV, the minimum over its phases, in amps. ok=false (no forecast, or it
+	// does not cover the slot) falls back to Params.Ceiling's static
+	// assumptions. The result is floored, capped at MaxA and zeroed below
+	// MinA like the static ceiling. The deadline backstop is unchanged.
+	CeilingA func(time.Time) (float64, bool)
 }
 
 // Slot is one planned 15-minute charging slot.
@@ -104,6 +110,19 @@ func (p Params) Ceiling(t time.Time, hwOn bool) float64 {
 	return head
 }
 
+// ClampCeiling turns a headroom in amps into a usable per-slot ceiling:
+// floored, at most MaxA, and 0 when below MinA.
+func (p Params) ClampCeiling(a float64) float64 {
+	a = math.Floor(a)
+	if a > p.MaxA {
+		a = p.MaxA
+	}
+	if a < p.MinA {
+		return 0
+	}
+	return a
+}
+
 func (p Params) heaterWindow(t time.Time) bool {
 	h := t.In(p.Loc).Hour()
 	return h >= p.HeaterFromH && h < p.HeaterToH
@@ -136,6 +155,11 @@ func Plan(in Input, p Params) Result {
 			on = in.HotWaterOn(t)
 		}
 		c := cand{i: len(all), start: t, amps: p.Ceiling(t, on)}
+		if in.CeilingA != nil {
+			if v, ok := in.CeilingA(t); ok {
+				c.amps = p.ClampCeiling(v)
+			}
+		}
 		if sek, ok := known[t.Unix()]; ok {
 			c.priced, c.price = true, p.Price.AllInOre(sek)
 		} else {

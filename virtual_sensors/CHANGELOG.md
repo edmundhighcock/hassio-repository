@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0
+
+Integrates the three phase-3 branches and adds the house planner.
+
+- Hot-water fixes (hwcontrol): `HeaterSchedule()` / `core.HeaterScheduleSource`,
+  a read-only snapshot of the heater's planned ON/OFF windows for the next 24 h.
+- EV live executor (evcontrol): `ev_mode: live` plus
+  `input_boolean.ev_controller_armed` drives the Easee charger (dynamic charger
+  and circuit limits with a time-to-live, pause and resume, fallbacks), with a
+  guard that uses the Easee Equalizer's per-phase current. The Equalizer
+  freshness window is now 15 min by default (it updates on change only), one
+  rule shared with the house planner.
+- Heat-pump live executor (hpcontrol): `hp_mode: live` plus
+  `input_boolean.hp_controller_armed` drives `climate.heat_pump` and the Dyson
+  fan; `haws.CallServiceResponse`; refitted model defaults. New accessor
+  `PlannedPowerW()`.
+- New module `house_planner` (package `internal/house` + `housebudget`): one
+  19 A per-phase budget (manual, hot water, heat pump, EV), a 24 h headroom
+  forecast the EV planner uses as its per-slot ceiling, and live overload
+  handling (EV first, then the heat pump to hold then off; never the heater),
+  acting only through the modules' own armed live executors. Publishes
+  `house_budget_headroom_l1/l2/l3`, `house_budget_state`,
+  `house_budget_heartbeat`. Options `house_*`, all optional schema keys.
+  Needs `ev_control` enabled.
+
 ## 0.4.1
 
 - hwcontrol: C10 revised. A restart or reconnect with the cover below 90 now

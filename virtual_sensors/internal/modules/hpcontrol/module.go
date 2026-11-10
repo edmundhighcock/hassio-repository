@@ -6,8 +6,10 @@ import (
 	"log"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
+	"virtual_sensors/internal/house"
 	"virtual_sensors/internal/modules"
 	"virtual_sensors/internal/modules/hwcontrol/planner"
 )
@@ -180,13 +182,18 @@ type Module struct {
 	lastBench            time.Duration
 
 	ex executor
+
+	// House planner (internal/house): the plan snapshot it reads, and the hub.
+	hub    *house.Hub
+	snapMu sync.RWMutex
+	snap   map[int64]float64 // slot start (unix) -> planned W; nil: no plan
 }
 
 // New returns a module with defaults applied.
 func New() *Module {
 	m := &Module{p: DefaultParams(), priceEnt: "nordpool_kwh_se3_sek_3_06_0", prices: map[int64]float64{},
 		persons: map[string]bool{}, pending: map[int64]float64{}, days: map[string]*dayCost{},
-		comfort: map[string]reading{}, forecast: map[int64]float64{}}
+		comfort: map[string]reading{}, forecast: map[int64]float64{}, hub: house.Default}
 	m.applyExecDefaults()
 	return m
 }
@@ -342,6 +349,7 @@ func (m *Module) Init(b []byte) error {
 			m.ex.overrideUntil = ps.OverrideUntil
 		}
 	}
+	m.hub.SetHP(m.HousePlan) // read-only for the house planner
 	// An older build could persist a zero-time day key; drop it.
 	delete(m.days, zeroDayKey)
 	if m.live {
@@ -622,6 +630,7 @@ func (m *Module) inputPlan(now time.Time) Input {
 
 func (m *Module) replan(now time.Time) {
 	m.lastPlanAt = now
+	defer m.snapshotPlan()
 	if _, ok := m.comfortNow(now); !ok {
 		m.havePlan = false
 		return
@@ -640,6 +649,43 @@ func (m *Module) replan(now time.Time) {
 			m.pending[tgt] = m.plan.Slots[3].TEnd
 		}
 	}
+}
+
+// snapshotPlan copies the current plan's planned power per slot for
+// PlannedPowerW (called after every replan).
+func (m *Module) snapshotPlan() {
+	var snap map[int64]float64
+	if m.havePlan {
+		snap = make(map[int64]float64, len(m.plan.Slots))
+		for _, s := range m.plan.Slots {
+			snap[s.Start.Unix()] = m.p.PowerW(s.Level)
+		}
+	}
+	m.snapMu.Lock()
+	m.snap = snap
+	m.snapMu.Unlock()
+}
+
+// PlannedPowerW is the heat pump's current plan as slot start (unix) ->
+// planned electrical W, nil when there is no valid plan. Read-only and safe
+// to call from another goroutine; the house planner uses it for its budget.
+func (m *Module) PlannedPowerW() map[int64]float64 {
+	m.snapMu.RLock()
+	defer m.snapMu.RUnlock()
+	if m.snap == nil {
+		return nil
+	}
+	out := make(map[int64]float64, len(m.snap))
+	for k, v := range m.snap {
+		out[k] = v
+	}
+	return out
+}
+
+// HousePlan adapts PlannedPowerW for internal/house.
+func (m *Module) HousePlan() house.HPPlan {
+	w := m.PlannedPowerW()
+	return house.HPPlan{Valid: w != nil, W: w, MaxW: m.p.PBoostW}
 }
 
 func (m *Module) slotAt(t time.Time) (Slot, bool) {
@@ -746,6 +792,8 @@ func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
 	if re {
 		m.replan(now)
 	}
+	live := m.ex.active(m)
+	m.hub.SetArmed(nil, &live)
 	m.act(now)
 	return m.publishAll(now, re)
 }

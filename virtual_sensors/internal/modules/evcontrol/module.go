@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"virtual_sensors/internal/house"
 	"virtual_sensors/internal/modules"
 	"virtual_sensors/internal/modules/hotwater"
 	"virtual_sensors/internal/modules/hwcontrol/planner"
@@ -143,6 +144,48 @@ type Module struct {
 	eqFresh      time.Duration
 	chargerA     float64
 	chargerAOK   bool
+
+	hub *house.Hub
+}
+
+// DefaultEqFresh is the Equalizer freshness window. The Equalizer's
+// attributes update ON CHANGE only, so a steady house is silent for
+// minutes; the rule is "online AND last update inside this window", and the
+// window is generous (15 min). The house planner reads the guard's
+// measurement, so it uses this same rule.
+const DefaultEqFresh = 15 * time.Minute
+
+// eqIsFresh is the one Equalizer freshness rule.
+func (m *Module) eqIsFresh(now time.Time) bool {
+	return EqualizerFresh(m.eqOK, m.eqOnline, m.eqAt, now, m.eqFresh)
+}
+
+// EqualizerFresh: a reading is usable when it parsed (ok), the Equalizer
+// reports online, and it was last updated less than window ago.
+func EqualizerFresh(ok, online bool, at, now time.Time, window time.Duration) bool {
+	return ok && online && now.Sub(at) < window
+}
+
+// forecastMaxAge: the house planner's forecast is refreshed every minute;
+// one this old is not used and the static assumptions apply.
+const forecastMaxAge = 30 * time.Minute
+
+// houseCeiling is the house planner's headroom forecast for slot t as an
+// EV ceiling (ClampCeiling applied); ok=false when there is none.
+func (m *Module) houseCeiling(t time.Time) (float64, bool) {
+	v, ok := m.hub.EVCeilingA(m.now, t, forecastMaxAge)
+	if !ok {
+		return 0, false
+	}
+	return m.p.ClampCeiling(v), true
+}
+
+// ceilingNow is the ceiling for t: the house forecast, else the static one.
+func (m *Module) ceilingNow(t time.Time) float64 {
+	if v, ok := m.houseCeiling(t); ok {
+		return v
+	}
+	return m.p.Ceiling(t, m.hwOn(t))
 }
 
 type period struct{ start, end time.Time }
@@ -152,7 +195,7 @@ func New() *Module {
 	m := &Module{p: DefaultParams(), prefix: "loaver", depHHMM: 6*60 + 30,
 		priceEnt: "nordpool_kwh_se3_sek_3_06_0", prices: map[int64]float64{},
 		sessionsPath: filepath.Join(SessionsDir, "sessions.jsonl"), appendLine: appendFile,
-		x: newExec(), eqEnt: "equalizer_current", eqOnE: "binary_sensor.equalizer_online", eqFresh: 2 * time.Minute}
+		x: newExec(), hub: house.Default, eqEnt: "equalizer_current", eqOnE: "binary_sensor.equalizer_online", eqFresh: DefaultEqFresh}
 	return m
 }
 
@@ -612,13 +655,13 @@ func (m *Module) replan(now time.Time) {
 		return
 	}
 	m.plan = Plan(Input{Now: now, Departure: m.sess.Departure, DeliveredKWh: m.sessionKWh,
-		Prices: m.priceList(), HotWaterOn: m.hwOn}, m.p)
+		Prices: m.priceList(), HotWaterOn: m.hwOn, CeilingA: m.houseCeiling}, m.p)
 	m.havePlan = true
 	if m.sess.FirstPlan == nil || !m.plan.AwaitingPrices {
 		// The plan for the "would it have finished" record is made for the
 		// FULL need from plug-in, and is the final one made once prices
 		// are complete (overwritten on each replan except while awaiting).
-		full := Plan(Input{Now: m.sess.PlugIn, Departure: m.sess.Departure, Prices: m.priceList(), HotWaterOn: m.hwOn}, m.p)
+		full := Plan(Input{Now: m.sess.PlugIn, Departure: m.sess.Departure, Prices: m.priceList(), HotWaterOn: m.hwOn, CeilingA: m.houseCeiling}, m.p)
 		if full.AwaitingPrices && m.sess.FirstPlan != nil {
 			return
 		}
@@ -627,13 +670,16 @@ func (m *Module) replan(now time.Time) {
 }
 
 func (m *Module) runGuard(t time.Time) []modules.OutputUpdate {
-	eqFresh := m.eqOK && m.eqOnline && t.Sub(m.eqAt) < m.eqFresh
+	eqFresh := m.eqIsFresh(t)
 	if !m.gridOK && !eqFresh {
 		return nil
 	}
 	g := Guard(GuardIn{GridW: m.gridW, EVkW: m.evKW, HPW: m.hpW, ImmersionOn: m.residualW >= 1500,
 		EqA: m.eqA, EqOK: eqFresh, ChargerA: m.chargerA, ChargerOK: m.chargerAOK}, m.p)
 	m.guard, m.haveGuard = g, true
+	// The house planner's live data: the guard's per-phase current, the
+	// Equalizer when fresh, else the grid-power estimate.
+	m.hub.PublishMeasure(house.Measure{At: t, PhaseA: g.PhaseA, EVA: g.EVA, Measured: g.Measured})
 	if g.Breach && !m.inBreach && m.sess != nil {
 		m.sess.Breaches++
 	}
@@ -660,6 +706,8 @@ func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
 	// The guard is also re-evaluated here so a lapsed Equalizer reading
 	// falls back to the grid estimate without waiting for an update.
 	m.runGuard(now)
+	live := m.armedLive()
+	m.hub.SetArmed(&live, nil)
 	m.control(now)
 	return m.publishAll(now, re)
 }
@@ -703,6 +751,10 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 				eff = float64(m.guard.LimitA)
 				why = fmt.Sprintf("guard limits to %d A", m.guard.LimitA)
 			}
+		}
+		if c, ok := m.hub.EVCap(now); ok && float64(c) < eff {
+			eff = float64(c)
+			why = fmt.Sprintf("house budget overload: capped at %d A", c)
 		}
 		if eff < m.p.MinA {
 			return "would_pause", "pause", "guard: no headroom (" + why + ")"

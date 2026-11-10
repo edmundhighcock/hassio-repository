@@ -247,11 +247,26 @@ func (m *Module) desire(now time.Time) desired {
 	if guardFresh {
 		limit, circ = m.guard.LimitA, phaseLimits(m.guard, m.p)
 	} else {
-		limit = int(m.p.Ceiling(now, m.hwOn(now)))
+		limit = int(m.ceilingNow(now))
 		circ = vec{limit, limit, limit}
 	}
 	if limit > int(m.p.MaxA) {
 		limit = int(m.p.MaxA)
+	}
+	// House budget overload (internal/house): the house planner lowers the
+	// EV first, down to pause. This outranks every path below, the stale
+	// and deadline fallbacks included: the fuse is the hard limit.
+	capNote := ""
+	if c, ok := m.hub.EVCap(now); ok {
+		if c < limit {
+			limit = c
+			capNote = fmt.Sprintf("; house budget overload caps at %d A", c)
+		}
+		for i := range circ {
+			if circ[i] > c {
+				circ[i] = c
+			}
+		}
 	}
 	if !m.plugged() {
 		return desired{Mode: "idle", Reason: "car not plugged in"}
@@ -270,6 +285,7 @@ func (m *Module) desire(now time.Time) desired {
 		return desired{Mode: "idle", Reason: "need met"}
 	}
 	charge := func(fb, why string) desired {
+		why += capNote
 		if limit < int(m.p.MinA) {
 			return desired{Mode: "pause", Circuit: circ, Reason: "no headroom under the budget (" + why + ")", Fallback: fb}
 		}
@@ -302,6 +318,7 @@ func (m *Module) desire(now time.Time) desired {
 	if limit < a {
 		a, why = limit, fmt.Sprintf("guard limits to %d A", limit)
 	}
+	why += capNote
 	if a < int(m.p.MinA) {
 		return desired{Mode: "pause", Circuit: circ, Reason: "no headroom (" + why + ")"}
 	}
@@ -315,7 +332,7 @@ func (m *Module) guardFresh(now time.Time) bool {
 		return false
 	}
 	if m.guard.Measured {
-		return m.eqOK && m.eqOnline && now.Sub(m.eqAt) < m.eqFresh
+		return m.eqIsFresh(now)
 	}
 	return m.gridOK && now.Sub(m.x.gridAt) < m.x.stale
 }
