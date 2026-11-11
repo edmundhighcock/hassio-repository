@@ -234,7 +234,7 @@ Published (MQTT discovery, prefix `hot_water_controller_`, never
 `hwc_`): `heartbeat` (Unix s, every 60 s only while healthy), `state`,
 `desired`, `verdict`, `on_hours_since_genuine_start`,
 `hours_since_reheat_end`, `moves_today`, `plan`, `shadow_would`, `alert`,
-`strikes`. PLAN's `saving_month` is not published until a saving
+`strikes`, and `plan_v2` (the v2 shadow plan, only while `greedy_v1` drives). PLAN's `saving_month` is not published until a saving
 estimate is computed. State persists in
 `/data/hot_water_control-state.json`; a missing or corrupt file means
 every clock is unknown, so no OFF until a finished reheat is seen live or
@@ -253,6 +253,72 @@ planner (no planned OFF), so only test moves switch OFF.
 
 Interpretations taken where PLAN is silent or inconsistent are listed in
 the 0.2.0 CHANGELOG entry.
+
+### Planner v2 (0.6.0)
+
+`hwc_planner: greedy_v1|v2` (default `greedy_v1`, unchanged behaviour)
+selects the planner that drives the controller. v2 is a 24 h planner for
+a switch that can only allow or block the 3 kW immersion heater (the tank
+thermostat decides when it draws). It plans a few heating windows (switch
+ON) and permits OFF everywhere else:
+
+- FULL: one heat in the cheapest contiguous window of the learned full
+  length inside the night band (`hwc_v2_night_from`/`_to`, 22:00-07:00).
+- TOP-UP: the cheapest window of the learned top-up length inside the
+  midday band (`hwc_v2_midday_from`/`_to`, 10:00-16:00; `hwc_v2_topup`).
+- CATCH-UP: if the full heat produced no finished reheat (or it was cut
+  short) a full-length window is planned before the tank clock runs out,
+  and `FULL_HEAT_INCOMPLETE` is sent (LIVE only, once per 6 h). The tank
+  may simply have been hot.
+- EVENING (`hwc_v2_evening_topup`, default off): a short top-up before the
+  night window after an evening draw-down, seen as the tank sensor falling
+  `hwc_v2_evening_drop_c` (3 C) from its 6 h maximum. The proxy is not
+  validated; leave it off unless needed.
+- A window ends early once the heater has stayed off `hwc_v2_early_end_min`
+  (10 min) after a finished reheat, if the move budget allows the OFF; it is
+  extended while the heater is still drawing at its end.
+
+Durations come from the controller's reheat log (kept in the state file,
+60 entries, 45 days used): full = p85 of full-type reheats, clamped 90 min
+to 4 h, default `hwc_v2_full_default_min` (150) until 5 samples; top-up =
+p50 clamped 30-120 min, default `hwc_v2_topup_default_min` (60). Reheats cut
+short by the controller's own OFF are ignored. Windows are quarter-hour
+aligned and 30 s longer than the duration (the ON command leads the
+window), so a 150 min full heat is an 11-quarter (165 min) window.
+
+**Shadow.** While `greedy_v1` runs, v2 is computed every re-plan and
+published on `sensor.hot_water_controller_plan_v2` (state: number of
+upcoming windows; attributes `windows`, `learned`, `expected_24h` with v2's
+cost against greedy_v1's estimated cost for the same energy, `off_periods`,
+`notes`). It never reaches the controller. With v2 selected the same
+attributes appear on `sensor.hot_water_controller_plan` (re-planned every
+minute) and the shadow sensor is not published.
+
+**Safety rows.** The core still decides every OFF through `MayGoOff`; a v2
+plan only permits. Forced ON as before: tank clock (14 h), evening rule,
+boost, override, backstops (ON-time only), battery and detector faults,
+stale inputs, strikes, the watchdog latch, the move budget and the C10
+restart resume. Differences under v2: condition G waits until the tank
+clock has run out (otherwise every window start, after a long OFF, would
+count as a missing step); the reheat log and the plan's windows are
+persisted; the heater schedule for the house planner (`HeaterSchedule()`)
+reports v2's OFF stretches clipped to what the tank clock would let the
+controller hold, and ON throughout in SHADOW.
+
+**`hwc_v2_window_resets_clock` (default false, not approved).** Off, a
+heating window in which the thermostat never calls leaves the 14 h tank
+clock running; on a day with no call at midday the clock trips and the
+switch is forced ON, with the evening reheat at evening prices (see the
+CHANGELOG and the closed-loop replay in
+`internal/modules/hwcontrol/closedloop_test.go` for the measured cost). On,
+the window counts as a satisfied tank and restarts the clock, but only if
+the plan is a v2 plan, the controller is LIVE, it observed the whole window
+(30 min or longer, no gap over 2 min), the cover and target were ON
+throughout, no input was stale, no detector cycle opened, no OFF command of
+ours fell inside it, and a real finished reheat ended within 28 h before
+the window's end. The evening rule, condition G and the backstops still use
+real reheats only (the evening rule needs a finished reheat on the same
+local day whatever this option says).
 
 ## EV planner, guard and live executor (`ev_control`)
 

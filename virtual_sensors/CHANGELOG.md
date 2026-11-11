@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.6.0
+
+Hot-water planner v2 (hwcontrol): a 24 h planner, selectable and in shadow
+by default.
+
+- `hwc_planner: greedy_v1|v2`, default `greedy_v1` (nothing changes unless
+  chosen). While `greedy_v1` drives, v2's plan is published in shadow on
+  `sensor.hot_water_controller_plan_v2` (windows, learned durations, expected
+  24 h cost against greedy_v1) and never reaches the controller.
+- v2 plans heating WINDOWS (switch ON) and permits OFF everywhere else: one
+  FULL heat in the cheapest contiguous night window (`hwc_v2_night_from/to`,
+  22:00-07:00), a TOP-UP in the cheapest midday window (`hwc_v2_midday_from/to`,
+  10:00-16:00, `hwc_v2_topup`), a CATCH-UP when a full heat produced no
+  finished reheat or was cut short (alert `FULL_HEAT_INCOMPLETE`), an
+  optional evening top-up (`hwc_v2_evening_topup`, default off), and an early
+  end of a window once the tank is full (`hwc_v2_early_end_min`). A window
+  that is still drawing at its end is extended; a window about to start is
+  pinned (it does not slide to the next quarter).
+- Durations are learned from the controller's own reheat log (persisted,
+  60 entries): full = p85 clamped 90 min-4 h (default 150 min, 5 samples
+  needed), top-up = p50 clamped 30-120 min (default 60 min).
+- `HeaterSchedule()` reports v2's OFF stretches, clipped to what the tank
+  clock would let the controller hold; in SHADOW it reports ON throughout.
+- Safety rows (the core still decides every OFF through `MayGoOff`; the plan
+  only permits): unchanged for the tank clock, evening rule, boost,
+  override, backstops (still ON-time only), battery, detector and stale-input
+  faults, watchdog latch, move budget and C10 restart. Changes: (1) under v2
+  condition G (an expected step after a long OFF) waits until the tank
+  clock has run out (`hwc_g_since_reheat_h` is raised to the clock limit),
+  otherwise every window start would count as a missing step; (2) the core
+  keeps a reheat log and the active plan's windows in its state file (absent
+  in older files, read as empty). A missing price or window means no OFF.
+- `hwc_v2_window_resets_clock` (default **false**, v2 only, NOT approved): a
+  heating window in which the thermostat never called counts as a satisfied
+  tank for the 14 h tank clock, on strict evidence (see DOCS.md). Off, a
+  no-call midday window lets the clock run out. The evening rule is
+  unchanged either way: it needs a real finished reheat on the same local
+  day. Closed-loop replay (`hwcontrol/closedloop_test.go`, 48 h, modelled
+  tank and winter prices): greedy_v1 255 ore/kWh paid, v2 with the reset 127,
+  v2 without it 198 (house with morning/evening draws); on days with no call
+  at midday, 313 / 122 / 213.
+- config.yaml: new optional schema keys only, none under `options:`.
+
 ## 0.5.1
 
 Heat-pump live executor (hpcontrol): fix a false manual override.

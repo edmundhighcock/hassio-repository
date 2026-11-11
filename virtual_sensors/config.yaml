@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.5.1"
+version: "0.6.0"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -81,6 +81,22 @@ schema:
   # input_button.hot_water_test_move / _test_probe, LIVE only, within the move caps
   hwc_test_moves_only: "bool?" # default false; true = planner overridden, no planned OFF
   hwc_test_off_min: "int(2,60)?" # default 10: how long a test OFF lasts
+  # planner v2 (0.6.0): a 24 h hot-water planner. hwc_planner defaults to
+  # greedy_v1 (unchanged behaviour); v2 then runs in SHADOW on
+  # sensor.hot_water_controller_plan_v2. None of these is a safety limit.
+  hwc_planner: "list(greedy_v1|v2)?" # default greedy_v1
+  hwc_v2_night_from: "str?" # default "22:00" local: the FULL heat sits in the cheapest window of this band
+  hwc_v2_night_to: "str?" # default "07:00"
+  hwc_v2_midday_from: "str?" # default "10:00" local: the TOP-UP band
+  hwc_v2_midday_to: "str?" # default "16:00"
+  hwc_v2_topup: "bool?" # default true
+  hwc_v2_full_default_min: "int(60,300)?" # default 150: full-heat length until 5 reheats are logged
+  hwc_v2_topup_default_min: "int(15,180)?" # default 60
+  hwc_v2_early_end_min: "int(2,60)?" # default 10: heater off this long ends a window early
+  hwc_v2_evening_topup: "bool?" # default false
+  hwc_v2_evening_gap_h: "float?" # default 3: evening top-up only if the night window is further off
+  hwc_v2_evening_drop_c: "float?" # default 3: tank sensor fall (C, 6 h) that counts as evening demand
+  hwc_v2_window_resets_clock: "bool?" # default false (NOT approved): a window with no call for heat restarts the 14 h tank clock
   # --- ev_control (shadow by default: live needs ev_mode: live AND
   # input_boolean.ev_controller_armed on). Every key is
   # optional with NO entry under options:; Go applies the default. The

@@ -81,6 +81,45 @@ configuration:
   hwc_min_saving_ore:
     name: "Planner: minimum saving (öre/kWh)"
     description: "Default 20."
+  hwc_planner:
+    name: "Hot water: planner"
+    description: "greedy_v1 (default) or v2, the 24 h planner (one full heat in the cheapest night window, a midday top-up, OFF otherwise). While greedy_v1 runs, v2 is published in shadow on sensor.hot_water_controller_plan_v2."
+  hwc_v2_night_from:
+    name: "Planner v2: night band start"
+    description: "Local HH:MM. Default 22:00."
+  hwc_v2_night_to:
+    name: "Planner v2: night band end"
+    description: "Local HH:MM. Default 07:00."
+  hwc_v2_midday_from:
+    name: "Planner v2: midday band start"
+    description: "Local HH:MM. Default 10:00."
+  hwc_v2_midday_to:
+    name: "Planner v2: midday band end"
+    description: "Local HH:MM. Default 16:00."
+  hwc_v2_topup:
+    name: "Planner v2: midday top-up"
+    description: "Default on."
+  hwc_v2_full_default_min:
+    name: "Planner v2: full-heat length before history (min)"
+    description: "Default 150. Learned (p85, 90 min to 4 h) once 5 reheats are logged."
+  hwc_v2_topup_default_min:
+    name: "Planner v2: top-up length before history (min)"
+    description: "Default 60. Learned (p50, 30 to 120 min) once 5 top-ups are logged."
+  hwc_v2_early_end_min:
+    name: "Planner v2: end a window early after (min)"
+    description: "The heater has stayed off this long after a finished reheat. Default 10."
+  hwc_v2_evening_topup:
+    name: "Planner v2: evening top-up"
+    description: "Optional short top-up after an evening draw-down. Default off."
+  hwc_v2_evening_gap_h:
+    name: "Planner v2: evening top-up needs the night window further than (h)"
+    description: "Default 3."
+  hwc_v2_evening_drop_c:
+    name: "Planner v2: evening demand = tank sensor fall (C)"
+    description: "Fall from the 6 h maximum that counts as evening demand. Default 3."
+  hwc_v2_window_resets_clock:
+    name: "Planner v2: a window with no call for heat restarts the tank clock"
+    description: "Not approved yet. Default off. Only on strict evidence; see DOCS.md."
   ev_entity_prefix:
     name: "EV: charger entity prefix"
     description: "ev_control (shadow only). Default loaver."
