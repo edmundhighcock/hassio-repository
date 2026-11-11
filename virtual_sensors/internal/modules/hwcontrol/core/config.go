@@ -97,6 +97,11 @@ type Config struct {
 	// R3 manual test moves (PLAN §8): how long a test OFF lasts.
 	TestOffDuration time.Duration // 10 min; clamped to 2-60 min
 
+	// WindowStamp (planner v2 only, clock.go): a heating window in which
+	// the thermostat never called counts as a satisfied tank for the tank
+	// clock, on strict evidence. Default false.
+	WindowStamp bool
+
 	// Version is published with the heartbeat.
 	Version string
 }

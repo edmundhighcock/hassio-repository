@@ -68,7 +68,17 @@ type Module struct {
 
 	prices     []planner.Price
 	lastPlanAt time.Time
-	testOnly   bool // hwc_test_moves_only: R3 planner override, never a plan
+
+	lastShadowSig string
+	lastShadowAt  time.Time
+
+	// planner v2 (0.6.0)
+	v2         bool // hwc_planner: v2 drives the controller
+	v2cfg      planner.V2Config
+	shadowWin  []core.PlanWindow // the shadow v2 plan's own window memory (greedy_v1 active)
+	tankTemps  []tempSample
+	eveningDrp float64 // hwc_v2_evening_drop_c
+	testOnly   bool    // hwc_test_moves_only: R3 planner override, never a plan
 	now        time.Time
 
 	schedMu sync.RWMutex
@@ -79,9 +89,17 @@ type Module struct {
 	notifyC uint64
 }
 
+type tempSample struct {
+	t time.Time
+	v float64
+}
+
+// ObjPlanV2 is the shadow comparison sensor (sensor.hot_water_controller_plan_v2).
+const ObjPlanV2 = "hot_water_controller_plan_v2"
+
 // New returns an unconfigured module (defaults apply until Configure).
 func New() *Module {
-	m := &Module{cfg: core.Defaults(), pcfg: planner.DefaultConfig()}
+	m := &Module{cfg: core.Defaults(), pcfg: planner.DefaultConfig(), v2cfg: planner.DefaultV2Config(), eveningDrp: 3}
 	m.ent = entitiesFor("cover.hot_water_switch", "sensor.nordpool_kwh_se3_sek_3_06_0", "notify.mobile_app_edmund15max")
 	m.buildRoles()
 	return m
@@ -150,6 +168,8 @@ func (m *Module) Outputs() []modules.OutputSpec {
 		out = append(out, modules.OutputSpec{ObjectID: obj, UniqueID: "virtual_sensors_" + obj, Name: n.name,
 			Unit: n.unit, StateClass: n.class, HasAttributes: true})
 	}
+	out = append(out, modules.OutputSpec{ObjectID: ObjPlanV2, UniqueID: "virtual_sensors_" + ObjPlanV2,
+		Name: "Hot water controller plan v2 (shadow)", HasAttributes: true})
 	return out
 }
 
@@ -187,6 +207,21 @@ type options struct {
 	MotorStoppedStates *string  `json:"hwc_motor_stopped_states"`
 	TestMovesOnly      *bool    `json:"hwc_test_moves_only"` // R3: no planned OFF, only manual test moves
 	TestOffMin         *int     `json:"hwc_test_off_min"`
+
+	// planner v2 (0.6.0)
+	Planner         *string  `json:"hwc_planner"`
+	V2NightFrom     *string  `json:"hwc_v2_night_from"`
+	V2NightTo       *string  `json:"hwc_v2_night_to"`
+	V2MiddayFrom    *string  `json:"hwc_v2_midday_from"`
+	V2MiddayTo      *string  `json:"hwc_v2_midday_to"`
+	V2Topup         *bool    `json:"hwc_v2_topup"`
+	V2FullDefaultM  *int     `json:"hwc_v2_full_default_min"`
+	V2TopupDefaultM *int     `json:"hwc_v2_topup_default_min"`
+	V2EarlyEndMin   *int     `json:"hwc_v2_early_end_min"`
+	V2EveningTopup  *bool    `json:"hwc_v2_evening_topup"`
+	V2EveningGapH   *float64 `json:"hwc_v2_evening_gap_h"`
+	V2EveningDropC  *float64 `json:"hwc_v2_evening_drop_c"`
+	V2WindowClock   *bool    `json:"hwc_v2_window_resets_clock"`
 }
 
 func hours(v float64) time.Duration { return time.Duration(v * float64(time.Hour)) }
@@ -300,7 +335,74 @@ func (m *Module) Configure(raw []byte) error {
 	if m.testOnly {
 		msgs = append(msgs, "hwc_test_moves_only: the planner is overridden, no planned OFF (R3 manual test moves only)")
 	}
+	v := planner.DefaultV2Config()
+	m.v2 = false
+	if o.Planner != nil {
+		switch *o.Planner {
+		case "v2":
+			m.v2 = true
+		case "greedy_v1", "":
+		default:
+			msgs = append(msgs, "option hwc_planner must be greedy_v1 or v2; greedy_v1 applied")
+		}
+	}
+	band := func(dst *int, s *string, name string) {
+		if s == nil {
+			return
+		}
+		if x, ok := core.ParseHHMM(*s); ok {
+			*dst = x
+		} else {
+			msgs = append(msgs, "option "+name+" does not parse; default applied")
+		}
+	}
+	band(&v.NightFrom, o.V2NightFrom, "hwc_v2_night_from")
+	band(&v.NightTo, o.V2NightTo, "hwc_v2_night_to")
+	band(&v.MiddayFrom, o.V2MiddayFrom, "hwc_v2_midday_from")
+	band(&v.MiddayTo, o.V2MiddayTo, "hwc_v2_midday_to")
+	if v.NightFrom == v.NightTo || v.MiddayFrom >= v.MiddayTo {
+		msgs = append(msgs, "hwc_v2 bands are empty or inverted; defaults applied")
+		d := planner.DefaultV2Config()
+		v.NightFrom, v.NightTo, v.MiddayFrom, v.MiddayTo = d.NightFrom, d.NightTo, d.MiddayFrom, d.MiddayTo
+	}
+	if o.V2Topup != nil {
+		v.Topup = *o.V2Topup
+	}
+	if o.V2FullDefaultM != nil && *o.V2FullDefaultM >= 60 && *o.V2FullDefaultM <= 300 {
+		v.FullDefault = time.Duration(*o.V2FullDefaultM) * time.Minute
+	}
+	if o.V2TopupDefaultM != nil && *o.V2TopupDefaultM >= 15 && *o.V2TopupDefaultM <= 180 {
+		v.TopupDefault = time.Duration(*o.V2TopupDefaultM) * time.Minute
+	}
+	if o.V2EarlyEndMin != nil && *o.V2EarlyEndMin >= 2 && *o.V2EarlyEndMin <= 60 {
+		v.EarlyEnd = time.Duration(*o.V2EarlyEndMin) * time.Minute
+	}
+	if o.V2EveningTopup != nil {
+		v.EveningTopup = *o.V2EveningTopup
+	}
+	if o.V2EveningGapH != nil && *o.V2EveningGapH >= 0 && *o.V2EveningGapH <= 12 {
+		v.EveningGap = hours(*o.V2EveningGapH)
+	}
+	m.eveningDrp = 3
+	if o.V2EveningDropC != nil && *o.V2EveningDropC > 0 && *o.V2EveningDropC <= 20 {
+		m.eveningDrp = *o.V2EveningDropC
+	}
+	if m.v2 && c.GSinceReheat < c.OffLimitSinceReheatEnd {
+		// Under v2 every window opens after a long OFF, so condition G
+		// (a step is expected after >= 2 h OFF and >= 4 h since the last
+		// reheat) would hold at every window start, and each satisfied
+		// tank would cost an extra recycle (two moves) and a `suspect`.
+		// G therefore waits until the tank clock itself has run out.
+		c.GSinceReheat = c.OffLimitSinceReheatEnd
+	}
+	// A heating window with no call for heat restarts the tank clock, on
+	// strict evidence (core/clock.go). v2 only; NOT approved yet: default off.
+	c.WindowStamp = m.v2 && o.V2WindowClock != nil && *o.V2WindowClock
 	msgs = append(msgs, c.Clamp()...)
+	if m.v2 && c.GSinceReheat < c.OffLimitSinceReheatEnd {
+		c.GSinceReheat = c.OffLimitSinceReheatEnd
+	}
+	v.Loc, v.MaxMovesDay, v.MaxMovesHour, v.MoveReserve = c.Loc, c.MaxMovesDay, c.MaxMovesHour, c.MoveReserve
 
 	if o.PriceAdderOre != nil {
 		p.AdderOre = *o.PriceAdderOre
@@ -320,7 +422,8 @@ func (m *Module) Configure(raw []byte) error {
 	for _, s := range msgs {
 		log.Printf("%s: %s", Name, s)
 	}
-	m.cfg, m.pcfg = c, p
+	v.Price = p
+	m.cfg, m.pcfg, m.v2cfg = c, p, v
 	return nil
 }
 
@@ -441,6 +544,9 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		}
 		return m.drainOuts()
 	}
+	if u.EntityID == m.ent.TankTemp {
+		m.recordTemp(u)
+	}
 	role, ok := m.roles[u.EntityID]
 	if !ok && strings.HasPrefix(u.EntityID, m.ent.ConflictPrefix) {
 		role, ok = core.RoleConflict, true
@@ -464,20 +570,129 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	return m.drainOuts()
 }
 
-// replan runs the planner on the known prices and hands the core the plan.
+// v2ReplanEvery is how often planner v2 re-plans when it drives the
+// controller: it ends windows early and extends them while the heater
+// draws, so it needs minute-scale freshness.
+const v2ReplanEvery = time.Minute
+
+// eveningDemand is the (unvalidated) evening draw-down proxy: while the
+// heater is blocked its demand is invisible on the grid, so the only
+// signal is the tank sensor's temperature falling by hwc_v2_evening_drop_c
+// from its maximum over the previous 6 h.
+func (m *Module) eveningDemand(now time.Time) bool {
+	if !m.v2cfg.EveningTopup || len(m.tankTemps) == 0 {
+		return false
+	}
+	last := m.tankTemps[len(m.tankTemps)-1]
+	if now.Sub(last.t) > 45*time.Minute {
+		return false
+	}
+	max := last.v
+	for _, s := range m.tankTemps {
+		if now.Sub(s.t) <= 6*time.Hour && s.v > max {
+			max = s.v
+		}
+	}
+	return max-last.v >= m.eveningDrp
+}
+
+func (m *Module) recordTemp(u modules.StateUpdate) {
+	if !u.Available || u.Replay {
+		return
+	}
+	m.tankTemps = append(m.tankTemps, tempSample{u.Time, u.Value})
+	for len(m.tankTemps) > 0 && u.Time.Sub(m.tankTemps[0].t) > 8*time.Hour {
+		m.tankTemps = m.tankTemps[1:]
+	}
+}
+
+// replan runs the planner(s) on the known prices and hands the core the
+// plan. greedy_v1 is always computed (it is the baseline of v2's cost
+// comparison). With hwc_planner v2 the core gets v2's plan; otherwise it
+// gets greedy_v1's and v2 runs as a SHADOW, published on
+// sensor.hot_water_controller_plan_v2 only.
 func (m *Module) replan(now time.Time) {
 	m.lastPlanAt = now
 	if len(m.prices) == 0 || m.testOnly {
 		m.step(core.PlanUpdate{At: now, Plan: nil})
 		return
 	}
-	p := planner.Plan(now, m.prices, m.pcfg, m.c.Facts())
-	m.step(core.PlanUpdate{At: now, Plan: p})
+	facts := m.c.Facts()
+	greedy := planner.Plan(now, m.prices, m.pcfg, facts)
+	in := planner.V2Input{Now: now, Prices: m.prices, Facts: facts, EveningDemand: m.eveningDemand(now),
+		GreedyOff: greedy.OffPeriods, TankHeadroom: facts.TankHeadroom}
+	if m.v2 {
+		res := planner.PlanV2(in, m.v2cfg)
+		var alerts []core.PlanAlert
+		if facts.Live {
+			alerts = res.Alerts
+		}
+		m.step(core.PlanUpdate{At: now, Plan: res.Plan, Alerts: alerts})
+		return
+	}
+	m.step(core.PlanUpdate{At: now, Plan: greedy})
+	// Shadow: v2 with its own window memory, never given to the core.
+	in.Facts.Windows = m.shadowWin
+	res := planner.PlanV2(in, m.v2cfg)
+	m.shadowWin = res.Plan.Windows
+	m.publishShadow(now, res, greedy)
+}
+
+// publishShadow publishes v2's would-be plan on the comparison sensor.
+func (m *Module) publishShadow(now time.Time, res planner.V2Result, greedy *core.Plan) {
+	attrs := map[string]any{"planner": planner.V2ID, "shadow": true, "active_planner": greedy.PlannerID,
+		"generated_at": now.In(m.cfg.Loc).Format(time.RFC3339)}
+	for k, v := range res.Plan.Extra {
+		attrs[k] = v
+	}
+	var offs []map[string]any
+	for _, p := range res.Plan.OffPeriods {
+		if len(offs) >= 6 {
+			break
+		}
+		offs = append(offs, map[string]any{"start": p.Start.In(m.cfg.Loc).Format(time.RFC3339), "end": p.End.In(m.cfg.Loc).Format(time.RFC3339)})
+	}
+	attrs["off_periods"] = offs
+	b, err := json.Marshal(attrs)
+	if err != nil || len(b) > 15000 {
+		return
+	}
+	n := 0
+	for _, w := range res.Plan.Windows {
+		if w.End.After(now) {
+			n++
+		}
+	}
+	state := fmt.Sprintf("%d", n)
+	sig := state + "|" + stripGenerated(string(b))
+	if sig == m.lastShadowSig && now.Sub(m.lastShadowAt) < 15*time.Minute {
+		return
+	}
+	m.lastShadowSig, m.lastShadowAt = sig, now
+	m.outs = append(m.outs, modules.OutputUpdate{ObjectID: ObjPlanV2, Time: now, StateString: state, AttributesJSON: string(b)})
+}
+
+// stripGenerated removes the generated_at stamp so an unchanged plan is not
+// republished every minute.
+func stripGenerated(s string) string {
+	i := strings.Index(s, `"generated_at":"`)
+	if i < 0 {
+		return s
+	}
+	j := strings.Index(s[i+16:], `"`)
+	if j < 0 {
+		return s
+	}
+	return s[:i] + s[i+16+j+1:]
 }
 
 // OnTick implements modules.Ticker.
 func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
-	if m.lastPlanAt.IsZero() || now.Sub(m.lastPlanAt) >= 15*time.Minute {
+	every := 15 * time.Minute
+	if m.v2 {
+		every = v2ReplanEvery
+	}
+	if m.lastPlanAt.IsZero() || now.Sub(m.lastPlanAt) >= every {
 		m.replan(now)
 	}
 	m.step(core.Tick{At: now})
@@ -526,6 +741,9 @@ func (m *Module) OnSignal(s any) {
 		m.step(core.CycleOpened{At: v.OnTime, OnTime: v.OnTime, Magnitude: v.Magnitude, Replay: v.Replay})
 	case hotwater.CycleClosed:
 		m.step(core.CycleClosed{At: v.OffTime, OnTime: v.OnTime, OffTime: v.OffTime, Accepted: v.Accepted, Replay: v.Replay})
+		if m.v2 && !v.Replay && !m.lastPlanAt.IsZero() {
+			m.replan(m.now) // a reheat just finished: the window may end early
+		}
 	case hotwater.MergedStep:
 		// Logged only: verification uses the controller's own step test.
 	}

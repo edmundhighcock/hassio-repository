@@ -10,6 +10,7 @@ import (
 
 func (c *Controller) onCycleOpened(e CycleOpened) {
 	c.P.Cycle = &CycleRec{OnTime: e.OnTime, Magnitude: e.Magnitude}
+	c.lastCycleOpen = e.OnTime
 	if c.P.Boost.Active && e.Magnitude >= c.cfg.GenuineMinW {
 		c.P.Boost.ReheatSeenStart = true
 	}
@@ -83,6 +84,7 @@ func (c *Controller) onCycleClosed(e CycleClosed) {
 	// A finished reheat: the tank clock (§4.1 rule 6).
 	c.P.LastFinishedReheatStart = cy.OnTime
 	c.P.LastFinishedReheatEnd = e.OffTime
+	c.logReheat(cy.OnTime, e.OffTime, e.Replay)
 	c.logf("finished reheat %s - %s", cy.OnTime.Format(time.RFC3339), e.OffTime.Format(time.RFC3339))
 	if c.P.Boost.Active && c.P.Boost.ReheatSeenStart {
 		c.endBoost("reheat_finished")
@@ -90,10 +92,40 @@ func (c *Controller) onCycleClosed(e CycleClosed) {
 	c.persistNow()
 }
 
+// logReheat appends to the reheat log (planner v2's learning data). A
+// reheat is "cut" if our own OFF command fell inside its last minutes: the
+// controller, not the thermostat, ended it. Replayed (warm-up) cycles are
+// logged too, without a kind, and duplicates are dropped.
+func (c *Controller) logReheat(on, off time.Time, replay bool) {
+	for _, r := range c.P.Reheats {
+		if r.Start.Equal(on) {
+			return
+		}
+	}
+	rec := ReheatRec{Start: on, End: off}
+	lc := c.P.LastCommand
+	if lc.Target == c.cfg.CmdOff && !lc.At.IsZero() &&
+		!off.Before(lc.At.Add(-time.Minute)) && off.Before(lc.At.Add(4*time.Minute)) {
+		rec.Cut = true
+	}
+	if !replay && c.plan != nil && c.plan.DefaultOff {
+		for _, w := range c.P.Windows {
+			if !on.Before(w.Start.Add(-2*time.Minute)) && on.Before(w.End) {
+				rec.Kind = w.Kind
+			}
+		}
+	}
+	c.P.Reheats = append(c.P.Reheats, rec)
+	sort.SliceStable(c.P.Reheats, func(i, j int) bool { return c.P.Reheats[i].Start.Before(c.P.Reheats[j].Start) })
+	if n := len(c.P.Reheats); n > MaxReheatLog {
+		c.P.Reheats = append([]ReheatRec(nil), c.P.Reheats[n-MaxReheatLog:]...)
+	}
+}
+
 // ---- tank clock and evening rule (§4.1 rules 6, 7) ----
 
 func (c *Controller) tankOK() bool {
-	end := c.P.LastFinishedReheatEnd
+	end := c.tankEnd()
 	return !end.IsZero() && !end.After(c.now) && c.now.Sub(end) <= c.cfg.OffLimitSinceReheatEnd
 }
 
@@ -247,6 +279,7 @@ func (c *Controller) onSeed(s Seed) {
 		lastGenuine = cy
 		if !cy.Off.IsZero() && cy.Accepted {
 			lastFinished = cy
+			c.logReheat(cy.On, cy.Off, true)
 		}
 	}
 	if lastGenuine != nil && c.P.LastGenuineStart.IsZero() {

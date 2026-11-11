@@ -108,7 +108,7 @@ func (c *Controller) MayGoOff(shadow bool) (bool, string) {
 	}
 	// 6. tank clock.
 	if !c.tankOK() {
-		if c.P.LastFinishedReheatEnd.IsZero() {
+		if c.tankEnd().IsZero() {
 			return false, "tank_clock_unknown"
 		}
 		return false, "tank_limit"
@@ -994,8 +994,8 @@ func (c *Controller) maybeOverrideOff() bool {
 	c.overrideOffDone = true
 	if !c.tankOK() {
 		why := "tank clock unknown"
-		if !c.P.LastFinishedReheatEnd.IsZero() {
-			why = fmt.Sprintf("last finished reheat ended %.1f h ago", c.now.Sub(c.P.LastFinishedReheatEnd).Hours())
+		if te := c.tankEnd(); !te.IsZero() {
+			why = fmt.Sprintf("last finished reheat ended %.1f h ago", c.now.Sub(te).Hours())
 		}
 		c.alert(AlertOverrideRefused, "Hot water: Override Off refused, staying ON ("+why+").", time.Hour)
 		return false

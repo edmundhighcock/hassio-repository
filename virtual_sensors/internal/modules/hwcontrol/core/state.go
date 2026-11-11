@@ -68,6 +68,10 @@ type Controller struct {
 	// 29); the hold is re-entered when the probe ends.
 	probeUnderHold string
 
+	// planner v2 window-satisfied stamp (clock.go).
+	winObs        map[int64]*winObs
+	lastCycleOpen time.Time
+
 	// populated: the first link-up (snapshot loaded) has happened.
 	populated bool
 	// histOn/histKnown: the switch state from replayed history, used for
@@ -163,8 +167,8 @@ func (c *Controller) Persist() ([]byte, error) {
 func (c *Controller) Facts() Facts {
 	f := Facts{LastFinishedReheatEnd: c.P.LastFinishedReheatEnd, LastFinishedReheatStart: c.P.LastFinishedReheatStart,
 		OffLimitSinceReheatEnd: c.cfg.OffLimitSinceReheatEnd}
-	if !c.P.LastFinishedReheatEnd.IsZero() {
-		if h := c.P.LastFinishedReheatEnd.Add(c.cfg.OffLimitSinceReheatEnd).Sub(c.now); h > 0 {
+	if te := c.tankEnd(); !te.IsZero() {
+		if h := te.Add(c.cfg.OffLimitSinceReheatEnd).Sub(c.now); h > 0 {
 			f.TankHeadroom = h
 		}
 	}
@@ -172,6 +176,14 @@ func (c *Controller) Facts() Facts {
 		op := *c.offPeriod
 		f.CurrentOff = &op
 	}
+	f.Reheats = append([]ReheatRec(nil), c.P.Reheats...)
+	f.Windows = append([]PlanWindow(nil), c.P.Windows...)
+	if cy := c.P.Cycle; cy != nil {
+		f.CycleOpen, f.CycleOpenSince = true, cy.OnTime
+	}
+	f.MovesLast24h = c.movesInLast(24 * time.Hour)
+	f.MovesLastHour = c.movesInLast(time.Hour)
+	f.Live = c.Live()
 	return f
 }
 
@@ -231,6 +243,12 @@ func (c *Controller) Step(in Input) []Effect {
 		c.detPresent = v.Present
 	case PlanUpdate:
 		c.plan = v.Plan
+		if v.Plan != nil && v.Plan.DefaultOff {
+			c.P.Windows = append([]PlanWindow(nil), v.Plan.Windows...)
+		}
+		for _, a := range v.Alerts {
+			c.alert(a.Code, a.Text, a.Repeat)
+		}
 	case Seed:
 		c.onSeed(v)
 	}
@@ -629,6 +647,7 @@ func (c *Controller) housekeeping() {
 		c.logf("strike decayed, now %d", c.P.Strikes)
 	}
 	c.boostExits()
+	c.trackWindows()
 	if c.linkUp {
 		c.backstopAlerts() // after a replay, alert only once HA is reachable
 	}

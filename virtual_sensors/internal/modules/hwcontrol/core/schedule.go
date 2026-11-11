@@ -80,9 +80,20 @@ func (c *Controller) Schedule() HeaterSchedule {
 		add(now, end, true)
 		return s
 	}
+	periods := c.plan.OffPeriods
+	if c.plan.DefaultOff {
+		// Planner v2: the permitted-OFF periods are the whole day bar the
+		// heating windows, so a house planner must not read them as
+		// certain OFF when the controller would not actually hold OFF.
+		if !c.Live() {
+			add(now, end, true) // SHADOW: the controller never switches
+			return s
+		}
+		periods = c.clipOffForTankClock(periods)
+	}
 	s.Planned = true
 	cur := now
-	for _, op := range c.plan.OffPeriods {
+	for _, op := range periods {
 		if !op.End.After(now) {
 			continue
 		}
@@ -92,4 +103,37 @@ func (c *Controller) Schedule() HeaterSchedule {
 	}
 	add(cur, end, true) // beyond the plan's last period (or ValidUntil) is ON
 	return s
+}
+
+// clipOffForTankClock shortens permitted-OFF periods to what the tank
+// clock (§4.1 rule 6) would let the controller hold: OFF is refused from
+// LastFinishedReheatEnd + OffLimit on, unless a reheat in a planned heating
+// window (the gap between two periods) resets it. A reheat is assumed in
+// each such window, which is the optimistic case, so an OFF stretch that
+// only holds if the window's reheat happens is still reported OFF, and an
+// unknown clock reports no OFF at all (the core would refuse every OFF).
+func (c *Controller) clipOffForTankClock(in []OffPeriod) []OffPeriod {
+	end := c.tankEnd()
+	if end.IsZero() || end.After(c.now) {
+		return nil
+	}
+	expiry := end.Add(c.cfg.OffLimitSinceReheatEnd)
+	var out []OffPeriod
+	for i, op := range in {
+		if op.Start.Before(expiry) {
+			e := op.End
+			if e.After(expiry) {
+				e = expiry
+			}
+			if e.After(op.Start) {
+				out = append(out, OffPeriod{Start: op.Start, End: e, Why: op.Why})
+			}
+		}
+		if i+1 < len(in) && in[i+1].Start.After(op.End) {
+			// The ON window between the periods ends at the next period's
+			// start; its reheat resets the clock there.
+			expiry = in[i+1].Start.Add(c.cfg.OffLimitSinceReheatEnd)
+		}
+	}
+	return out
 }

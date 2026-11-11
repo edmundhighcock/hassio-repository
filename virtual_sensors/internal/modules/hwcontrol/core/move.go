@@ -185,6 +185,9 @@ func (c *Controller) onCommandResult(r CommandResult) {
 	m.echo = false
 	c.P.Moves = append(c.P.Moves, c.now)
 	c.P.LastCommand = LastCommand{Target: m.target, At: c.now}
+	if m.target == c.cfg.CmdOff {
+		c.P.LastOffCmdAt = c.now
+	}
 	c.advanceMove()
 }
 

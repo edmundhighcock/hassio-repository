@@ -14,7 +14,43 @@ type Plan struct {
 	GeneratedAt time.Time
 	ValidUntil  time.Time
 	OffPeriods  []OffPeriod
+	// DefaultOff marks a plan whose OffPeriods are the COMPLEMENT of a few
+	// planned heating windows (planner v2): the switch is permitted OFF
+	// everywhere except in Windows. The core still enforces every safety
+	// rule; this only changes how the heater schedule is reported
+	// (Schedule) and lets the core tag reheats with the window they ran in.
+	DefaultOff bool
+	// Windows are the planned heating windows (informational, kept by the
+	// core across restarts so the planner and the reheat log can use them).
+	// Recently ended windows are included.
+	Windows []PlanWindow
+	// Extra is published on the plan sensor as extra attributes.
+	Extra map[string]any
 }
+
+// PlanWindow is one planned heating (switch ON) window of a DefaultOff plan.
+type PlanWindow struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	Kind  string    `json:"kind"`            // full | topup | catchup | evening
+	Ore   float64   `json:"ore,omitempty"`   // mean all-in öre/kWh over the window
+	Early bool      `json:"early,omitempty"` // ended early: the tank was full
+}
+
+// ReheatRec is one finished genuine reheat (§4.4), kept for duration
+// learning (planner v2). Cut: it ended because the controller switched OFF.
+type ReheatRec struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	Cut   bool      `json:"cut,omitempty"`
+	Kind  string    `json:"kind,omitempty"` // window kind it started in, "" if none
+}
+
+// Duration is the on-time.
+func (r ReheatRec) Duration() time.Duration { return r.End.Sub(r.Start) }
+
+// MaxReheatLog bounds the persisted reheat log.
+const MaxReheatLog = 60
 
 // OffPeriod is one permitted OFF window.
 type OffPeriod struct {
@@ -69,4 +105,13 @@ type Facts struct {
 	// in the core (review fix 4); a planner should keep it so rolling
 	// re-plans do not cut it short.
 	CurrentOff *OffPeriod
+
+	// For planner v2 (read-only; the core never depends on their use).
+	Reheats        []ReheatRec  // finished genuine reheats, oldest first
+	Windows        []PlanWindow // the active DefaultOff plan's windows, as last committed
+	CycleOpen      bool         // a detector cycle (heater step) is open now
+	CycleOpenSince time.Time
+	MovesLast24h   int
+	MovesLastHour  int
+	Live           bool
 }

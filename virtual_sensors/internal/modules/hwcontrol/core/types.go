@@ -107,8 +107,16 @@ type Detector struct {
 
 // PlanUpdate replaces the current plan (nil: no plan).
 type PlanUpdate struct {
-	At   time.Time
-	Plan *Plan
+	At     time.Time
+	Plan   *Plan
+	Alerts []PlanAlert // notifications the planner asks for (LIVE only, deduplicated by code)
+}
+
+// PlanAlert is a planner notification: sent once per Repeat for its Code.
+type PlanAlert struct {
+	Code   string
+	Text   string
+	Repeat time.Duration
 }
 
 // Seed delivers cycles reconstructed from detector history (§4.4).

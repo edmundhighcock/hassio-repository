@@ -48,6 +48,15 @@ type Persisted struct {
 	Cycle *CycleRec `json:"cycle,omitempty"`
 	// Retreats counts drifts seen in IDLE_ON (telemetry only).
 	Retreats int `json:"retreats"`
+	// Reheats is the finished-reheat log (newest last, at most
+	// MaxReheatLog) and Windows the active DefaultOff plan's windows, for
+	// planner v2 (0.6.0). Absent in older files: empty.
+	Reheats []ReheatRec `json:"reheats,omitempty"`
+	// SatisfiedEnd: the end of the last heating window that counted as a
+	// satisfied tank (clock.go); LastOffCmdAt: our last OFF command.
+	SatisfiedEnd time.Time    `json:"satisfied_end,omitempty"`
+	LastOffCmdAt time.Time    `json:"last_off_cmd_at,omitempty"`
+	Windows      []PlanWindow `json:"windows,omitempty"`
 }
 
 // BoostState persists a boost so a restart mid-boost continues ON (§4.7).

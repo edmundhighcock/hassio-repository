@@ -204,7 +204,8 @@ func (c *Controller) telemetry(tick bool) {
 		hs = ftoa1(c.now.Sub(c.P.LastFinishedReheatEnd).Hours())
 	}
 	c.publish(ObjHoursSinceEnd, hs, map[string]any{
-		"last_finished_reheat_end": fmtTime(c.P.LastFinishedReheatEnd), "last_finished_reheat_start": fmtTime(c.P.LastFinishedReheatStart)}, refresh && tick)
+		"last_finished_reheat_end": fmtTime(c.P.LastFinishedReheatEnd), "last_finished_reheat_start": fmtTime(c.P.LastFinishedReheatStart),
+		"satisfied_window_end": fmtTime(c.P.SatisfiedEnd)}, refresh && tick)
 	c.publish(ObjMovesToday, itoa(int64(c.movesInLast(24*time.Hour))), map[string]any{
 		"last_move_at": fmtTime(c.lastMoveAt()), "moves_last_hour": c.movesInLast(time.Hour)}, refresh)
 	c.publishPlan(refresh)
@@ -237,7 +238,13 @@ func (c *Controller) publishPlan(force bool) {
 			n = len(periods)
 		}
 	}
-	c.publish(ObjPlan, itoa(int64(n)), map[string]any{"periods": periods, "planner": planner, "generated_at": gen, "valid_until": valid}, force)
+	attrs := map[string]any{"periods": periods, "planner": planner, "generated_at": gen, "valid_until": valid}
+	if c.plan != nil {
+		for k, v := range c.plan.Extra {
+			attrs[k] = v
+		}
+	}
+	c.publish(ObjPlan, itoa(int64(n)), attrs, force)
 }
 
 func orNone(s string) string {
