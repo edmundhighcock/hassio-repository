@@ -331,12 +331,12 @@ func (m *Module) baseTarget(now time.Time) Target {
 	sl, _ := m.slotAt(now)
 	lvl := sl.Level
 	mn, _ := m.minNow()
-	c, _ := m.comfortNow(now)
-	if c < mn {
+	// The minimum holds in the coldest comfort sensor, not the mean (0.6.1).
+	if c, who, ok := m.comfortMinNow(now); ok && c < mn {
 		if lvl < Hold {
 			lvl = Hold
 		}
-		return mk(lvl, "below_min", fmt.Sprintf("comfort %.1f C below the minimum %.1f C", c, mn))
+		return mk(lvl, "below_min", fmt.Sprintf("%s %.1f C below the minimum %.1f C", who, c, mn))
 	}
 	if m.p.IsNight(now) {
 		if b, ok := m.bedroomNow(now); ok && b > m.p.BedroomCap && lvl != Off {
@@ -441,7 +441,7 @@ func (m *Module) act(now time.Time) {
 		return
 	}
 	if now.Before(e.overrideUntil) {
-		if c, ok := m.comfortNow(now); ok {
+		if c, _, ok := m.comfortMinNow(now); ok {
 			if mn, _ := m.minNow(); c < mn {
 				m.notify(now, "floor_in_override", "Heat pump controller: house below minimum",
 					fmt.Sprintf("Comfort %.1f C is below the minimum %.1f C while the manual override holds the controller off until %s.",

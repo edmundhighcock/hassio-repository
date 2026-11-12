@@ -29,10 +29,14 @@ type Input struct {
 	// temperature, used in place of the model's BedroomOffset for the night cap.
 	BedOffset   float64
 	BedOffsetOK bool
-	Min         float64           // floor
-	Desired     float64           // desired mean
-	Prices      map[int64]float64 // quarter start (unix) -> all-in kr/kWh
-	Prev        Level             // level in force now (Off if unknown); changing it costs SwitchPenaltyKr
+	Min         float64 // floor: applies to the COLDEST comfort sensor
+	// ColdOffset (<= 0) is the predicted coldest comfort sensor minus the
+	// comfort mean the model tracks. The floor binds on that sensor, so the
+	// mean must stay above Min - ColdOffset (0.6.1).
+	ColdOffset float64
+	Desired    float64           // desired mean
+	Prices     map[int64]float64 // quarter start (unix) -> all-in kr/kWh
+	Prev       Level             // level in force now (Off if unknown); changing it costs SwitchPenaltyKr
 }
 
 // Slot is one planned 15-minute slot.
@@ -136,7 +140,11 @@ func Plan(in Input, p Params) Result {
 		}
 	}
 
-	lo := in.Min - 1
+	if in.ColdOffset > 0 {
+		in.ColdOffset = 0
+	}
+	floor := in.Min - in.ColdOffset // floor for the mean
+	lo := floor - 1
 	hi := gridHi
 	if in.Desired+2 > hi {
 		hi = in.Desired + 2
@@ -164,8 +172,8 @@ func Plan(in Input, p Params) Result {
 	slot := func(k int, prev, l Level, t float64) (float64, float64) {
 		tn := mod.Step(t, l, tout[k])
 		c := slotPrice[k] * p.PowerW(l) / 1000 * dtH
-		if tn < in.Min {
-			c += bigM * (in.Min - tn)
+		if tn < floor {
+			c += bigM * (floor - tn)
 		}
 		if night[k] {
 			if b := tn + bedOff; b > p.BedroomCap {
@@ -212,8 +220,8 @@ func Plan(in Input, p Params) Result {
 		t := lo + float64(i)*gridStep
 		d := t - in.Desired
 		v := 20 * p.Lambda * d * d
-		if t < in.Min {
-			v += bigM * (in.Min - t)
+		if t < floor {
+			v += bigM * (floor - t)
 		}
 		for l := 0; l < 3; l++ {
 			V[K][l][i] = v
@@ -269,6 +277,6 @@ func Plan(in Input, p Params) Result {
 	if tn24 > 0 {
 		res.MeanT = tsum / float64(tn24)
 	}
-	res.FloorAtRisk = res.MinT < in.Min-0.05
+	res.FloorAtRisk = res.MinT < floor-0.05
 	return res
 }

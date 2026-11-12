@@ -532,6 +532,21 @@ func (m *Module) comfortNow(now time.Time) (float64, bool) {
 	return sum / float64(n), true
 }
 
+// comfortMinNow is the coldest fresh comfort sensor and its entity id.
+func (m *Module) comfortMinNow(now time.Time) (float64, string, bool) {
+	best, who, found := 0.0, "", false
+	for _, id := range m.comfortIDs {
+		r, ok := m.comfort[id]
+		if !ok || !r.ok || (!r.at.IsZero() && now.Sub(r.at) > m.sensorStale) {
+			continue
+		}
+		if !found || r.v < best {
+			best, who, found = r.v, id, true
+		}
+	}
+	return best, who, found
+}
+
 // bedroomNow is the bedroom reading if fresh.
 func (m *Module) bedroomNow(now time.Time) (float64, bool) {
 	r := m.bedroom
@@ -633,7 +648,32 @@ func (m *Module) inputPlan(now time.Time) Input {
 		// reading cannot disable the night cap.
 		in.BedOffset, in.BedOffsetOK = math.Max(-1.5, math.Min(0.5, b-t0)), true
 	}
+	in.ColdOffset = m.coldOffset(now, t0)
 	return in
+}
+
+// coldOffset is the coldest comfort sensor minus the comfort mean, <= 0,
+// bounded to [-1.5, 0]. With two or more fresh sensors it is measured live;
+// otherwise it falls back to the model's bedroom offset when the bedroom is
+// a comfort sensor. The floor binds on the coldest sensor, not the mean.
+func (m *Module) coldOffset(now time.Time, mean float64) float64 {
+	cold, n := math.Inf(1), 0
+	for _, id := range m.comfortIDs {
+		r, ok := m.comfort[id]
+		if !ok || !r.ok || (!r.at.IsZero() && now.Sub(r.at) > m.sensorStale) {
+			continue
+		}
+		n++
+		cold = math.Min(cold, r.v)
+	}
+	off := 0.0
+	if n >= 2 {
+		off = cold - mean
+	}
+	if m.isComfort(bedroomEnt) {
+		off = math.Min(off, m.p.Model.BedroomOffset) // the bedroom's usual lag, even if the kitchen is colder now
+	}
+	return math.Max(-1.5, math.Min(0, off))
 }
 
 func (m *Module) replan(now time.Time) {
