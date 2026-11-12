@@ -75,7 +75,7 @@ func (c *Controller) MayGoOff(shadow bool) (bool, string) {
 	if c.P.State != StIdleOn {
 		return false, "state_" + string(c.P.State)
 	}
-	if c.now.Sub(c.P.StateSince) < c.cfg.Settle {
+	if c.now.Sub(c.P.StateSince) < c.cfg.Settle && !c.settleWaived.Equal(c.P.StateSince) {
 		return false, "settling"
 	}
 	if c.P.Strikes >= 3 {
@@ -330,8 +330,26 @@ func (c *Controller) runBoot() {
 		}
 		return
 	}
+	// Boot decides only with a plan (or after the wait): the plan may say OFF
+	// (resume of a persisted OFF, C10; v2's default-OFF), and settling ON first
+	// would hold that OFF back for the settle time. No move while waiting.
+	waived := false
+	if !c.awaitPlanFrom.IsZero() {
+		switch {
+		case c.plan.Valid(c.now) && !c.planAt.Before(c.awaitPlanFrom):
+			waived = true
+		case !c.populated || c.now.Sub(c.bootSince) < c.cfg.BootPlanWait:
+			return
+		default:
+			c.logf("boot: no plan within %s: settling without one", c.cfg.BootPlanWait)
+		}
+		c.awaitPlanFrom = time.Time{}
+	}
 	if c.coverOn() {
 		c.setState(StIdleOn, "boot_on") // row 3: settle before any OFF
+		if waived {
+			c.settleWaived = c.P.StateSince
+		}
 		return
 	}
 	// Row 4 / C10 (revised 0.4.1): below 90 at boot, including a crash or

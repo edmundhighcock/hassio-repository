@@ -254,6 +254,21 @@ planner (no planned OFF), so only test moves switch OFF.
 Interpretations taken where PLAN is silent or inconsistent are listed in
 the 0.2.0 CHANGELOG entry.
 
+### Boot waits for the plan (0.6.1)
+
+At process start the controller stays in BOOT, holding the switch where it
+is and making no move, until the planner has produced a plan from fresh prices
+or `hwc_boot_plan_wait_s` (default 180 s) has passed. With the plan in force it
+then decides: OFF resumes a persisted OFF (C10) or applies v2's default-OFF
+(the 15 min settle is not repeated, since the plan was seen); no plan period
+now leaves it ON. Safety rules (boost, override, battery, strikes, tank clock,
+stale inputs) still force ON. With no plan in time it fails ON as before (a
+cover below 90 is commanded to 99; ON is settled for 15 min before any OFF).
+A boot is not a reheat and resets no clock. A reconnect with a still-valid plan
+does not wait. Note: an OFF can still be refused by the move budget (a 24 h cap
+of `hwc_max_moves_day`, default 8, leaving a reserve of 3 after the OFF); the
+state then stays `IDLE_ON`/`boot_on` until old moves age out.
+
 ### Planner v2 (0.6.0)
 
 `hwc_planner: greedy_v1|v2` (default `greedy_v1`, unchanged behaviour)
@@ -402,6 +417,17 @@ high while the pump runs. These sensors report only on change, so one is
 ignored after `hp_sensor_stale_min` (180 min). The night bedroom cap also uses
 the bedroom sensor directly: the plan uses the measured bedroom-minus-comfort
 offset, and a bedroom above `hp_bedroom_cap` at night turns the pump off.
+
+**The minimum holds in the coldest comfort sensor (0.6.1).** The comfort
+mean still sets the desired temperature, but `input_number.house_minimum_temperature`
+applies to EACH comfort sensor. The executor's "below minimum -> heat at hold"
+rule triggers on the minimum of the fresh comfort sensors (the reason names the
+sensor). In the plan, the floor binds on the predicted coldest sensor: the mean
+must stay above `minimum + hp_floor_margin_c` minus the cold offset, where the
+cold offset is the coldest sensor minus the mean, measured live and never less
+negative than `hp_model_bedroom_offset` (-0.3) while the bedroom is a comfort
+sensor, bounded to [-1.5, 0]. (2026-11-10: the bedroom reached 18.77 C below
+the 19.0 minimum for two hours while the mean stayed above it.)
 
 **Model** (`model.go`): dT/dt = -u (T - Tout) + h(level, Tout) + gain; boost
 h = max(0, boost_rate + slope (Tout - 5)), hold = hold_frac x boost. The

@@ -207,6 +207,7 @@ type options struct {
 	MotorStoppedStates *string  `json:"hwc_motor_stopped_states"`
 	TestMovesOnly      *bool    `json:"hwc_test_moves_only"` // R3: no planned OFF, only manual test moves
 	TestOffMin         *int     `json:"hwc_test_off_min"`
+	BootPlanWaitS      *int     `json:"hwc_boot_plan_wait_s"` // 0.6.1
 
 	// planner v2 (0.6.0)
 	Planner         *string  `json:"hwc_planner"`
@@ -397,6 +398,9 @@ func (m *Module) Configure(raw []byte) error {
 	}
 	// A heating window with no call for heat restarts the tank clock, on
 	// strict evidence (core/clock.go). v2 only; NOT approved yet: default off.
+	if o.BootPlanWaitS != nil {
+		c.BootPlanWait = time.Duration(*o.BootPlanWaitS) * time.Second
+	}
 	c.WindowStamp = m.v2 && o.V2WindowClock != nil && *o.V2WindowClock
 	msgs = append(msgs, c.Clamp()...)
 	if m.v2 && c.GSinceReheat < c.OffLimitSinceReheatEnd {

@@ -152,7 +152,12 @@ func TestShadowByDefaultEndToEnd(t *testing.T) {
 func TestLiveCommandsCoverAndNotifiesBothChannels(t *testing.T) {
 	w := newWorld(t, `{"hwc_mode":"live"}`)
 	w.bootInputs("on", 0)
+	// 0.6.1: no plan yet (no prices), so BOOT holds: no move for the wait.
 	w.run(10*time.Second, 500)
+	if cc := w.coverCalls(); len(cc) != 0 {
+		t.Fatalf("moved while waiting for a plan: %+v", cc)
+	}
+	w.run(3*time.Minute, 500) // the plan wait (3 min) passes: fail ON as before
 	cc := w.coverCalls()
 	if len(cc) != 1 || cc[0].service != "set_cover_position" || cc[0].data["position"] != 99 || cc[0].target["entity_id"] != "cover.hot_water_switch" {
 		t.Fatalf("cover calls %+v", cc)

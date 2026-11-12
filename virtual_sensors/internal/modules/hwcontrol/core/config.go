@@ -51,7 +51,11 @@ type Config struct {
 	EVMoveW                float64       // 1000 W
 
 	// State machine timings (§3).
-	BootTimeout     time.Duration // 3 min
+	BootTimeout time.Duration // 3 min
+	// BootPlanWait: at process start the controller holds in BOOT, moving
+	// nothing, until the planner has produced a plan from fresh prices or this
+	// long has passed (then it settles as before: ON). hwc_boot_plan_wait_s.
+	BootPlanWait    time.Duration // 3 min
 	DegradedRecover time.Duration // 2 min
 	Settle          time.Duration // 15 min
 	DeliberateGap   time.Duration // 10 min between deliberate changes
@@ -140,6 +144,7 @@ func Defaults() Config {
 		EVMoveW:                1000,
 
 		BootTimeout:     3 * time.Minute,
+		BootPlanWait:    3 * time.Minute,
 		DegradedRecover: 2 * time.Minute,
 		Settle:          15 * time.Minute,
 		DeliberateGap:   10 * time.Minute,
@@ -196,6 +201,7 @@ func (c *Config) Clamp() []string {
 	if c.Loc == nil {
 		c.Loc = d.Loc
 	}
+	fix(c.BootPlanWait < 0 || c.BootPlanWait > 15*time.Minute, "hwc_boot_plan_wait_s", func() { c.BootPlanWait = d.BootPlanWait })
 	fix(c.AlertAfter <= 0 || c.AlertAfter > 24*time.Hour, "hwc_backstop_alert_h", func() { c.AlertAfter = d.AlertAfter })
 	fix(c.ProbeAfter <= 0 || c.ProbeAfter >= c.AlertAfter, "hwc_backstop_probe_h", func() { c.ProbeAfter = d.ProbeAfter })
 	fix(c.OffLimitSinceReheatEnd <= 0 || c.OffLimitSinceReheatEnd > 16*time.Hour, "hwc_off_limit_since_reheat_end_h", func() { c.OffLimitSinceReheatEnd = d.OffLimitSinceReheatEnd })

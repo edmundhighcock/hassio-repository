@@ -63,6 +63,7 @@ func liveCfg() Config {
 	c := Defaults()
 	c.Live = true
 	c.ShadowSummaryHour = -1
+	c.BootPlanWait = 0 // legacy tests boot without a plan; boot_plan_test.go sets it
 	return c
 }
 

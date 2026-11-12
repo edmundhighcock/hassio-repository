@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.6.0"
+version: "0.6.1"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -81,6 +81,7 @@ schema:
   # input_button.hot_water_test_move / _test_probe, LIVE only, within the move caps
   hwc_test_moves_only: "bool?" # default false; true = planner overridden, no planned OFF
   hwc_test_off_min: "int(2,60)?" # default 10: how long a test OFF lasts
+  hwc_boot_plan_wait_s: "int(0,900)?" # default 180: at start the controller holds (no move) until the planner has a plan, or this long
   # planner v2 (0.6.0): a 24 h hot-water planner. hwc_planner defaults to
   # greedy_v1 (unchanged behaviour); v2 then runs in SHADOW on
   # sensor.hot_water_controller_plan_v2. None of these is a safety limit.

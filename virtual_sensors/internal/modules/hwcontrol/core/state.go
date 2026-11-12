@@ -87,8 +87,15 @@ type Controller struct {
 	testOff       bool // the running OFF is a test move
 	testProbe     bool // the running probe is a test probe
 
-	hold            string
-	bootSince       time.Time
+	hold      string
+	bootSince time.Time
+	// awaitPlanFrom is set (non-zero) while BOOT waits for the first plan
+	// after a process start; planAt is when the last valid plan arrived;
+	// settleWaived is the StateSince of an IDLE_ON entered from a boot that
+	// waited for its plan (the plan has been seen, so no 15 min settle).
+	awaitPlanFrom   time.Time
+	planAt          time.Time
+	settleWaived    time.Time
 	healthySince    time.Time
 	lastTick        time.Time
 	live            bool
@@ -202,6 +209,7 @@ func (c *Controller) Step(in Input) []Effect {
 		c.started = true
 		c.P.BootCount++
 		c.bootSince = c.now
+		c.awaitPlanFrom = c.now
 		c.lastTick = c.now
 		c.setState(StBoot, "process start")
 	}
@@ -243,6 +251,9 @@ func (c *Controller) Step(in Input) []Effect {
 		c.detPresent = v.Present
 	case PlanUpdate:
 		c.plan = v.Plan
+		if v.Plan != nil && v.Plan.Valid(c.now) {
+			c.planAt = c.now
+		}
 		if v.Plan != nil && v.Plan.DefaultOff {
 			c.P.Windows = append([]PlanWindow(nil), v.Plan.Windows...)
 		}
@@ -478,6 +489,9 @@ func (c *Controller) onLink(l Link) {
 		// The boot timer runs from the link coming up, not from the
 		// (older) warm-up replay times.
 		c.bootSince = c.now
+		if !c.plan.Valid(c.now) && c.awaitPlanFrom.IsZero() {
+			c.awaitPlanFrom = c.now // no usable plan across a reconnect: wait for one
+		}
 		if c.P.State != StBoot && c.hold == "" {
 			// §5.5: on reconnect go through BOOT; a valid OFF may be resumed (C10, runBoot).
 			c.setState(StBoot, "reconnect")

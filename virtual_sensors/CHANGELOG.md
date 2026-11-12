@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.1
+
+- hwcontrol: BOOT no longer decides before its plan exists. It holds (no move)
+  until the planner has a plan from fresh prices or `hwc_boot_plan_wait_s`
+  (optional, default 180 s) passes; a plan saying OFF then takes effect at once
+  (persisted OFF resume, v2 default-OFF), otherwise it fails ON as before.
+  A boot counts as no reheat. Cause: `runBoot` settled to `IDLE_ON/boot_on` at
+  once, before the plan arrived (2026-11-10 21:18, plan at 21:18:11), and the
+  15 min settle then blocked any OFF. (2026-11-12 under v2 the OFF was also
+  held by the move budget: 6 moves in 24 h plus the reserve of 3 exceeds 8.)
+- hpcontrol: the minimum applies to each comfort sensor. The executor's
+  below-minimum rule uses the coldest live sensor, and the plan's floor binds on
+  the predicted coldest sensor (live offset, at least the bedroom offset).
+  The desired temperature still uses the mean.
+
 ## 0.6.0
 
 Hot-water planner v2 (hwcontrol): a 24 h planner, selectable and in shadow
