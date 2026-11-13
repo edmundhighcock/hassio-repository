@@ -39,6 +39,10 @@ var KnownLoadEntities = []string{
 	"guest_house_oil_heater_power",
 	"heat_pump_power_power",
 	"fridge_power",
+	// 0.6.2: both W. The kettle (2.5 kW) was credited as the heater
+	// 2026-11-13 06:32; the air fryer is a 1.7 kW pulsing load.
+	"kettle_power",
+	"air_fryer_power",
 }
 
 // LegacyLoadEntities (0.2.0) are metered loads that have left Home
@@ -315,14 +319,40 @@ type Module struct {
 	// persisted; never consulted by the module's own logic.
 	sink   func(any)
 	replay bool
+
+	// 0.6.2 (gate.go): switch gate, phase gate, plateau fallback.
+	coverEnt      string
+	cover         []coverTransition
+	switchGate    bool
+	eqEnt, eqOnE  string
+	eq            []phaseSample
+	eqAt          float64
+	eqOnline      bool
+	eqOnlineSeen  bool
+	phaseGate     bool
+	phaseStepA    float64
+	phaseTolA     float64
+	pendingOn     *pendingOnStep
+	plateauRescue bool
+	plateauActive bool
+	plateauDone   bool
+	plateauT0     float64
+	lostHeld      map[string]float64 // last value of each known load that has gone unavailable, held for the plateau level
+	rescued       bool               // the open cycle came from the plateau fallback
 }
 
 func New() *Module {
 	return &Module{
 		params:   detect.DefaultParams(),
 		lastLoad: map[string]detect.Point{},
+		lostHeld: map[string]float64{},
 		loads:    map[string]*loadRing{},
 		residual: &loadRing{},
+
+		coverEnt: DefaultCoverEntity, switchGate: true,
+		eqEnt: defaultEqEntity, eqOnE: defaultEqOnline,
+		phaseGate: true, phaseStepA: 7.3, phaseTolA: 2.0,
+		plateauRescue: true,
 	}
 }
 
@@ -362,7 +392,7 @@ func (m *Module) Inputs() []modules.InputSpec {
 	for _, e := range KnownLoadEntities {
 		specs = append(specs, modules.InputSpec{EntityID: e})
 	}
-	return specs
+	return append(specs, m.gateInputs()...)
 }
 
 func (m *Module) Outputs() []modules.OutputSpec {
@@ -833,6 +863,7 @@ func (m *Module) handleLoadUpdate(t float64, u modules.StateUpdate) []modules.Ou
 			m.loads[u.EntityID] = &loadRing{}
 		}
 		m.loads[u.EntityID].push(t, u.Value, activityRetentionS)
+		delete(m.lostHeld, u.EntityID)
 		if !wasPresent {
 			return m.recordDiscontinuity(t, u.EntityID, "regained", -u.Value)
 		}
@@ -840,6 +871,7 @@ func (m *Module) handleLoadUpdate(t float64, u modules.StateUpdate) []modules.Ou
 	}
 	if wasPresent {
 		delete(m.lastLoad, u.EntityID)
+		m.lostHeld[u.EntityID] = prev.V
 		return m.recordDiscontinuity(t, u.EntityID, "lost", prev.V)
 	}
 	// Already missing (another unavailable/unknown update) - no change.
@@ -863,6 +895,9 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	// it is fixed here.
 	if u.EntityID == "loaver_power" {
 		u.Value *= 1000
+	}
+	if m.handleGateInput(t, u) {
+		return out
 	}
 	if u.EntityID != GridEntity {
 		// A known load changing does not, on its own, step the grid
@@ -949,6 +984,8 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		})
 	})
 
+	out = append(out, m.gateStep(t, u.Time, residual)...)
+
 	// Resolving a tentative off (see handleEvent) takes priority over the
 	// generic below-floor tracker below: once a specific off-candidate
 	// has been found, whether it's a real close is answered by the
@@ -1001,8 +1038,24 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 				m.belowSince = t
 			} else if t-m.belowSince > m.params.FloorDipMaxS {
 				// Floor violated: reject the open cycle now, live.
-				out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: u.Time, Value: 0})
-				m.signal(CycleClosed{OnTime: unixTime(m.onTime).UTC(), OffTime: u.Time.UTC(), Reason: "floor", Replay: m.replay})
+				if m.rescued {
+					// A cycle opened by the plateau fallback has no seen
+					// off step to pair with: the residual leaving the floor
+					// IS its end. Credit up to the moment it first dropped.
+					dur := m.belowSince - m.onTime
+					closed := CycleClosed{OnTime: unixTime(m.onTime).UTC(), OffTime: unixTime(m.belowSince).UTC(), Reason: "floor_rescued", Replay: m.replay}
+					out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(m.belowSince), Value: 0})
+					if dur >= m.params.MinOnDurationS {
+						kwh := abs(m.onMagnitude) * (dur / 3600.0) / 1000.0
+						m.energyKwh += kwh
+						out = append(out, modules.OutputUpdate{ObjectID: OutEnergyObjectID, Time: unixTime(m.belowSince), Value: m.energyKwh})
+						closed.Accepted, closed.Kwh = true, kwh
+					}
+					m.signal(closed)
+				} else {
+					out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: u.Time, Value: 0})
+					m.signal(CycleClosed{OnTime: unixTime(m.onTime).UTC(), OffTime: u.Time.UTC(), Reason: "floor", Replay: m.replay})
+				}
 				m.open = false
 				m.belowFloor = false
 			}
@@ -1024,17 +1077,20 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 	var out []modules.OutputUpdate
 	if !m.open {
 		if m.isOn(e.Magnitude) && m.rejectOK(e.TStart, e.TEnd) {
-			m.open = true
-			m.onTime = e.TEnd
-			m.onMagnitude = e.Magnitude
-			m.onBaseline = m.residualAt(e.TStart)
-			m.onLoadCorrection = 0
-			m.maxDeficit = 0
-			m.belowFloor = false
-			m.dipTolerated = false
-			m.pendingOff = nil
-			out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(e.TEnd), Value: e.Magnitude})
-			m.signal(CycleOpened{OnTime: unixTime(e.TEnd).UTC(), Magnitude: e.Magnitude, Replay: m.replay})
+			if off, _ := m.switchKnownOffAt(e.TEnd); off {
+				log.Printf("hot_water: step %+.0f W at %s ignored: the switch is known OFF", e.Magnitude, unixTime(e.TEnd).UTC().Format(time.RFC3339))
+				return out
+			}
+			if m.pendingOn != nil {
+				return out
+			}
+			if m.phaseFresh(e.TEnd) {
+				// The Equalizer confirms (or refutes) it phaseWaitS after
+				// the step - see gateStep.
+				m.pendingOn = &pendingOnStep{TStart: e.TStart, TEnd: e.TEnd, Magnitude: e.Magnitude}
+				return out
+			}
+			out = append(out, m.beginCycle(e.TEnd, e.Magnitude, m.residualAt(e.TStart), false)...)
 		}
 		return out
 	}
@@ -1091,6 +1147,22 @@ func (m *Module) handleEvent(e detect.MergedEvent) []modules.OutputUpdate {
 		m.pendingOffDeadline = e.TEnd + m.params.PostOffDwellS
 	}
 	return out
+}
+
+// beginCycle opens a heater cycle at onT.
+func (m *Module) beginCycle(onT, magnitude, baseline float64, rescued bool) []modules.OutputUpdate {
+	m.open = true
+	m.onTime = onT
+	m.onMagnitude = magnitude
+	m.onBaseline = baseline
+	m.onLoadCorrection = 0
+	m.maxDeficit = 0
+	m.belowFloor = false
+	m.dipTolerated = false
+	m.pendingOff = nil
+	m.rescued = rescued
+	m.signal(CycleOpened{OnTime: unixTime(onT).UTC(), Magnitude: magnitude, Replay: m.replay})
+	return []modules.OutputUpdate{{ObjectID: OutPowerObjectID, Time: unixTime(onT), Value: magnitude}}
 }
 
 func unixTime(epochS float64) time.Time {

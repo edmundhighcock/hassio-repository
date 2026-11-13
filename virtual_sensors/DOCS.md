@@ -294,12 +294,23 @@ ON) and permits OFF everywhere else:
   extended while the heater is still drawing at its end.
 
 Durations come from the controller's reheat log (kept in the state file,
-60 entries, 45 days used): full = p85 of full-type reheats, clamped 90 min
-to 4 h, default `hwc_v2_full_default_min` (150) until 5 samples; top-up =
-p50 clamped 30-120 min, default `hwc_v2_topup_default_min` (60). Reheats cut
-short by the controller's own OFF are ignored. Windows are quarter-hour
-aligned and 30 s longer than the duration (the ON command leads the
-window), so a 150 min full heat is an 11-quarter (165 min) window.
+60 entries, 45 days used). Since 0.6.2: a reheat shorter than 15 min is
+thermostat maintenance (the tank was already near its set-point) and feeds
+no statistic at all; a heat is "full" if the window tag says so, or untagged
+and it drew 45 min or more, or 30 min or more after a gap of 4 h or more
+(a tagged full that drew under 30 min is dropped too); the rest, 15 min up,
+are top-ups. Full window = p85 of the full heats, clamped to
+`hwc_v2_full_min_min` (default 180 min, floor) .. 6 h, default
+`hwc_v2_full_default_min` (180, never below the floor) until 5 samples;
+top-up = p50 clamped 30-120 min, default `hwc_v2_topup_default_min` (60).
+Reheats cut short by the controller's own OFF are ignored. Reheats that ended
+before `hwc_v2_learn_from` (default `2026-11-13T20:00` local, when the tank
+thermostat went from about 60 to 80 C; "" = no cutoff) are ignored, so the
+learned statistics start again from the 80 C tank: nothing is deleted from
+the state file and old and mis-classified heats can never shrink a plan (the
+floor also holds). Windows are quarter-hour aligned and 30 s longer than the
+duration (the ON command leads the window), so a 180 min full heat is a
+13-quarter (195 min) window.
 
 **Shadow.** While `greedy_v1` runs, v2 is computed every re-plan and
 published on `sensor.hot_water_controller_plan_v2` (state: number of
@@ -334,6 +345,59 @@ ours fell inside it, and a real finished reheat ended within 28 h before
 the window's end. The evening rule, condition G and the backstops still use
 real reheats only (the evening rule needs a finished reheat on the same
 local day whatever this option says).
+
+## Heater detection gates (0.6.2)
+
+`hot_water` now has three additions to the step detector (`gate.go`); the
+detector parameters and the backfill/Python parity are unchanged (the
+backfill CLI does not have them).
+
+- **Known loads.** `kettle_power` and `air_fryer_power` (both W) join
+  `KnownLoadEntities`; `loaver_power` is still kW (scaled x1000 in the
+  module). History checked against the parity data is unaffected, as neither
+  entity has history before 2026-11-13.
+- **Switch gate** (`hw_switch_gate`, default true). While the cover
+  (`hwc_cover_entity`, default `cover.hot_water_switch`) is `closed` - held at
+  least 5 s, since it reports `closed` for a second at the close command -
+  no ON step and no plateau opens a cycle, and an already-open cycle is closed
+  (reason `switch_off`, energy credited to 15 s after the switch closed) once
+  the switch has been closed for 3 min without the off step being seen. An
+  unknown or unavailable cover never blocks.
+- **Phase gate** (`hw_phase_gate`, default true). The immersion heater is a
+  two-phase 400 V load: +7.4 A on L1 and +7.3 A on L2, 0 on L3 (36 steps
+  2026-11-10..13: L1 7.37 A sd 0.1, L2 7.25 A sd 0.3, L3 0.0 A). The Equalizer
+  (`ev_equalizer_entity`, `ev_equalizer_online_entity`; per-phase attributes
+  read on every update, attribute-only changes included) confirms a step found
+  on the 5 s grid meter: `hw_phase_step_a` (7.3) +- `hw_phase_tol_a` (2.0) on
+  both L1 and L2 within 20 s of the step (the Equalizer reports 5-10 s after
+  the meter, on a 10 s tick), L3 rising at most 2.5 A. The kettle (L1 only,
+  +10.6 A), the dishwasher heater (L3 only, +9.5 A) and the heat-pump boost
+  (L2 only, about +8 A) fail it. While the EV charges (`loaver_power` 500 W or
+  more near the step) L1-L3 and L2-L3 are tested instead, in a wider band
+  (3.5 to 10.8 A at the defaults): the EV's phases are not equal enough for the
+  tight one (heater under an EV, 2026-11-13 19:24Z: L1 +4.9 A, L2 +7.7 A). The
+  gate rejects only on positive evidence: with the Equalizer offline, not heard
+  from in 15 min, without a reading before the step, or with no phase update at
+  all in the window, the step logic stands unchanged (missing a real heater costs
+  more than crediting a stray one). Measured: the EV's terminals T5 maps to L3
+  cleanly; T3 to L1 and T4 to L2 only roughly, so the EV is not netted per phase.
+  In 165 grid steps of 1.8 kW or more (2026-11-10..13) no non-heater event gave
+  a balanced L1+L2 step (EV starts only looked balanced while attribute-only
+  Equalizer changes were missing from the history API; ask it with
+  `significant_changes_only=0`). The hob (2026-11-10 17:40Z) predates the
+  Equalizer's data and is unchecked.
+- **Residual plateau fallback** (`hw_plateau_rescue`, default true). If no
+  cycle is open and the residual (grid minus known loads; a known load that went
+  unavailable keeps its last value subtracted) stays at 2700 W or more for 120 s,
+  with a median of 3900 W or less, the switch not known OFF and the phase gate not
+  refusing, a cycle opens, back-dated to the start of the plateau, at the median
+  less a 300 W base (clamped to the step band). This is for a heater step that
+  coincides with another load's step: 2026-11-13 19:24Z the EV started 22 s
+  before the heater, the two chained into one +7 kW event (outside the step
+  band, and vetoed by the moving EV load) and the heater then ran 45 min
+  unseen. A cycle opened this way that ends without a seen off step (the residual
+  stays under the floor for 2 min) is credited up to the moment it fell.
+
 
 ## EV planner, guard and live executor (`ev_control`)
 

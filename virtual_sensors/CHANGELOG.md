@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.2
+
+Detector and learner fixes after 2026-11-13.
+
+- hot_water: a reheat that began while the EV charger was starting was missed
+  for 45 min (19:24Z: EV step 22 s before the heater; the two chained into one
+  +7 kW event, outside the 2.5-3.6 kW step band and vetoed by the moving EV
+  load). New residual plateau fallback (`hw_plateau_rescue`, on): residual at
+  heater level for 120 s opens the cycle, back-dated; one without a seen off step
+  is credited when the residual falls.
+- hot_water: `kettle_power` and `air_fryer_power` (W) are now known loads.
+- hot_water: switch gate (`hw_switch_gate`, on, uses `hwc_cover_entity`): no cycle
+  opens while the cover is `closed`, and an open one is closed 3 min after it
+  closed (the 06:32 kettle draw was credited with the switch closed).
+- hot_water: phase gate (`hw_phase_gate`, on; `hw_phase_step_a` 7.3,
+  `hw_phase_tol_a` 2.0): an ON step must show about +7.3 A on both L1 and L2 and
+  nothing on L3 in the Equalizer (read from the attributes on every update);
+  tested L1-L3 / L2-L3 in a wider band while the EV charges. Falls back to the
+  step logic when the Equalizer is offline or stale (15 min). Phases found:
+  heater L1+L2 (7.4/7.3 A), kettle L1 (10.6 A), dishwasher heater L3 (9.5 A),
+  heat pump L2. See DOCS "Heater detection gates".
+- hwcontrol planner v2 learner: reheats under 15 min are thermostat
+  maintenance and feed no statistic; "full" now needs a tag, or 45 min of draw
+  (30 min after a gap of 4 h or more). Before, five 5-10 min top-ups made
+  "full p50 = 6 min" while the real full heat ran 96 min.
+- hwcontrol: tank thermostat is now 80 C: the full-heat floor goes from 90 to
+  180 min, cap 4 h to 6 h, `hwc_v2_full_default_min` default 150 to 180 (never below
+  the floor). New options `hwc_v2_full_min_min` (default 180) and
+  `hwc_v2_learn_from` (default `2026-11-13T20:00` local): older reheats are ignored
+  by the learner, so the stats restart on the 80 C tank with no state-file edit.
+
 ## 0.6.1
 
 - hwcontrol: BOOT no longer decides before its plan exists. It holds (no move)

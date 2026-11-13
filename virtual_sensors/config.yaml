@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.6.1"
+version: "0.6.2"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -81,6 +81,11 @@ schema:
   # input_button.hot_water_test_move / _test_probe, LIVE only, within the move caps
   hwc_test_moves_only: "bool?" # default false; true = planner overridden, no planned OFF
   hwc_test_off_min: "int(2,60)?" # default 10: how long a test OFF lasts
+  hw_switch_gate: "bool?" # default true (0.6.2): no heater cycle while hwc_cover_entity is closed
+  hw_phase_gate: "bool?" # default true (0.6.2): Equalizer must show +7.3 A on L1 and L2, none on L3
+  hw_phase_step_a: "float?" # default 7.3 (3..15)
+  hw_phase_tol_a: "float?" # default 2.0 (0.5..6)
+  hw_plateau_rescue: "bool?" # default true (0.6.2): residual at heater level for 120 s opens a cycle
   hwc_boot_plan_wait_s: "int(0,900)?" # default 180: at start the controller holds (no move) until the planner has a plan, or this long
   # planner v2 (0.6.0): a 24 h hot-water planner. hwc_planner defaults to
   # greedy_v1 (unchanged behaviour); v2 then runs in SHADOW on
@@ -91,7 +96,9 @@ schema:
   hwc_v2_midday_from: "str?" # default "10:00" local: the TOP-UP band
   hwc_v2_midday_to: "str?" # default "16:00"
   hwc_v2_topup: "bool?" # default true
-  hwc_v2_full_default_min: "int(60,300)?" # default 150: full-heat length until 5 reheats are logged
+  hwc_v2_full_default_min: "int(60,300)?" # default 180: full-heat length until 5 reheats are logged (raised to hwc_v2_full_min_min if lower)
+  hwc_v2_full_min_min: "int(60,360)?" # default 180 (0.6.2; was a fixed 90): floor of the learned full-heat window, tank thermostat now 80 C
+  hwc_v2_learn_from: "str?" # default "2026-11-13T20:00" local: reheats ending before this are ignored by the learner; "" = no cutoff
   hwc_v2_topup_default_min: "int(15,180)?" # default 60
   hwc_v2_early_end_min: "int(2,60)?" # default 10: heater off this long ends a window early
   hwc_v2_evening_topup: "bool?" # default false
