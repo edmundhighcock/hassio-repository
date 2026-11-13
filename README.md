@@ -37,3 +37,7 @@ This addon provides a postgresql database server. Like the RabbitMQ add-on, at t
 ### [InfluxDB 2](https://github.com/edmundhighcock/hassio-repository/tree/main/influxdb2)
 
 InfluxDB 2.x OSS, tuned to run comfortably on a memory-tight Raspberry Pi, for Home Assistant Core's own `influxdb` integration to store the household's full state-change history forever. No host port - reachable only from other add-ons and Home Assistant Core on the Supervisor's internal network.
+
+### [Netconsole Receiver](https://github.com/edmundhighcock/hassio-repository/tree/main/netconsole_receiver)
+
+Receives Linux netconsole kernel-log datagrams over UDP from an allow-list of machines, keeps rotated per-machine log files, and publishes per-machine status and alerts (hard lockup, kernel panic, ATA and Btrfs errors by default) to Home Assistant through MQTT discovery. A small Go add-on; nothing host-specific is built in.

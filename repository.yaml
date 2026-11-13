@@ -34,3 +34,7 @@ addons:
     name: "Virtual Sensors"
     description: "Derived sensors computed from other HA entities, published via MQTT discovery"
     url: https://github.com/edmundhighcock/hassio-repository/tree/main/virtual_sensors
+  netconsole_receiver:
+    name: "Netconsole Receiver"
+    description: "Receives Linux netconsole kernel logs over UDP, keeps rotated logs, publishes status and alerts via MQTT discovery"
+    url: https://github.com/edmundhighcock/hassio-repository/tree/main/netconsole_receiver
