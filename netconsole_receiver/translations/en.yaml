@@ -1,0 +1,65 @@
+configuration:
+  listen_port:
+    name: "Listen port (UDP)"
+    description: >-
+      The UDP port inside the container. Leave at 26666 unless you know
+      you need otherwise: the add-on publishes container port 26666/udp,
+      so a different value here also needs a matching change to the port
+      mapping, which only works with host networking. To change the port
+      the sender uses, change the host port in the Network tab instead.
+  sources:
+    name: "Sources (allow-list)"
+    description: >-
+      The machines allowed to send. Each entry has a `name` (a lowercase
+      slug used for the Home Assistant device, entity ids and the log file
+      name), the sender's `address` (IP) and optionally its UDP source
+      `port`. Datagrams from anything else are dropped and counted. An
+      empty list accepts nothing.
+  log_dir:
+    name: "Log directory"
+    description: >-
+      Where the per-source log files go. Default /config, the add-on's own
+      config folder (/addon_configs/<repo-prefix>_netconsole_receiver/ on
+      the host).
+  log_max_mb:
+    name: "Log file size (MB)"
+    description: "Rotate a source's log when it reaches this size. Default 5."
+  log_files:
+    name: "Log files kept"
+    description: "Files kept per source, the live one included. Default 5."
+  alert_rules:
+    name: "Alert rules"
+    description: >-
+      Regular expressions (Go/RE2 syntax) tested against each message. The
+      first match fires the alert event at once; further matches within
+      `cooldown_min` are counted and reported in ONE summary when the window
+      closes. The defaults cover hard lockups, kernel panics, ATA and Btrfs
+      errors. Edit a regex here to change it.
+  silence_after_min:
+    name: "Silence threshold (minutes)"
+    description: >-
+      Published as an attribute on each source's Last message sensor and
+      used in the documentation's example automation. The add-on itself
+      never alerts on silence; a Home Assistant automation does. Default 15.
+  log_level:
+    name: "Log level"
+    description: "How much detail to log."
+  go_memlimit_mib:
+    name: "Go memory limit (MiB)"
+    description: "Soft memory limit for the Go runtime. Default 24."
+  mqtt_host:
+    name: "MQTT host (override)"
+    description: >-
+      Only needed if the Supervisor does not report the Mosquitto add-on's
+      connection details. Leave blank to rely on the Supervisor.
+  mqtt_port:
+    name: "MQTT port (override)"
+    description: "Used only together with mqtt_host above."
+  mqtt_username:
+    name: "MQTT username (override)"
+    description: "Used only together with mqtt_host above."
+  mqtt_password:
+    name: "MQTT password (override)"
+    description: "Used only together with mqtt_host above."
+network:
+  26666/udp: "Netconsole UDP datagrams"

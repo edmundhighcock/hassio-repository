@@ -1,0 +1,84 @@
+name: "Netconsole Receiver"
+description: "Receives Linux netconsole kernel logs over UDP, keeps rotated per-host log files, and publishes per-host status and alerts to Home Assistant via MQTT"
+version: "0.1.0"
+slug: "netconsole_receiver"
+init: false
+startup: application
+boot: auto
+arch:
+  - aarch64
+  - amd64
+# Outputs: MQTT discovery to the Mosquitto add-on. `want`, not `need`: the
+# Supervisor's service registry has been seen to report mqtt unavailable
+# while Mosquitto was running (see virtual_sensors), and `need` would then
+# refuse to start the add-on. With `want` it starts, logs the missing
+# credentials loudly, keeps writing log files and retries; the mqtt_*
+# options below can override. See DOCS.md "MQTT credentials".
+services:
+  - "mqtt:want"
+# Published UDP ports bind EVERY host interface, not just the LAN you
+# have in mind - hence the `sources` allow-list. See DOCS.md "Security".
+# The container-side port is fixed here; the `listen_port` option must
+# match it (see DOCS.md). The host-side port can be changed in the
+# add-on's Network tab.
+ports:
+  "26666/udp": 26666
+ports_description:
+  "26666/udp": "Netconsole UDP datagrams from the kernels listed under `sources`"
+# The add-on's own config folder (/config in the container, and
+# /addon_configs/<repo-prefix>_netconsole_receiver/ on the host, readable
+# over the SSH add-on). Log files live here by default.
+map:
+  - addon_config:rw
+# Keep the (potentially large, diagnostic-only) logs out of Home Assistant
+# backups. The Supervisor applies backup_exclude to BOTH the add-on's
+# /data and its addon_config (/config) folder: see DOCS.md "Backups".
+# The globs are matched against the file's full path with Python's
+# PurePath.match, i.e. against the trailing path components, so these
+# catch name.log and the rotated name.log.1 ... name.log.N.
+backup_exclude:
+  - "*.log"
+  - "*.log.*"
+options:
+  sources: []
+  alert_rules:
+    - name: "hard_lockup"
+      regex: "hard LOCKUP"
+      cooldown_min: 1
+    - name: "kernel_panic"
+      regex: "Kernel panic"
+      cooldown_min: 1
+    - name: "ata_error"
+      regex: "ata[0-9.]+: .*(timeout|reset|failed command)"
+      cooldown_min: 15
+    - name: "btrfs_error"
+      regex: "BTRFS (error|warning|critical)"
+      cooldown_min: 15
+  log_level: "info"
+  go_memlimit_mib: 24
+# Every key added after the first release MUST be optional ("?") with its
+# default applied in Go (internal/config), so a later schema change can
+# never stop an installed add-on from starting. The two lists cannot be
+# marked optional in the Supervisor's schema language (a list of objects
+# has no "?" form), so they carry defaults under `options:` instead, and
+# Go also tolerates their absence.
+schema:
+  listen_port: "port?" # default 26666 (must match the container port in `ports`)
+  sources:
+    - name: "match(^[a-z0-9][a-z0-9_]*$)"
+      address: "str"
+      port: "port?" # default: any source port
+  log_dir: "str?" # default /config (the addon_config mount)
+  log_max_mb: "int(1,1024)?" # default 5
+  log_files: "int(1,100)?" # default 5
+  alert_rules:
+    - name: "match(^[a-z0-9][a-z0-9_]*$)"
+      regex: "str"
+      cooldown_min: "int(1,1440)?" # default 15
+  silence_after_min: "int(1,10080)?" # default 15; attribute and docs only
+  log_level: "list(debug|info|warning|error)?"
+  go_memlimit_mib: "int(16,512)?" # default 24
+  mqtt_host: "str?"
+  mqtt_port: "port?"
+  mqtt_username: "str?"
+  mqtt_password: "password?"
