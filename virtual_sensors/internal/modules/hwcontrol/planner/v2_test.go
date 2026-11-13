@@ -58,12 +58,13 @@ func rec(start time.Time, dur time.Duration) core.ReheatRec {
 func TestLearnDefaultsBelowFiveSamples(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, sto)
 	cfg := DefaultV2Config()
+	cfg.LearnFrom = time.Time{}
 	var rs []core.ReheatRec
 	for i := 0; i < 4; i++ {
 		rs = append(rs, rec(now.Add(-time.Duration(i+1)*24*time.Hour), 200*time.Minute))
 	}
 	l := Learn(now, rs, cfg)
-	if l.Full != 150*time.Minute || !l.FullDefault || l.Topup != 60*time.Minute || !l.TopDef {
+	if l.Full != 180*time.Minute || !l.FullDefault || l.Topup != 60*time.Minute || !l.TopDef {
 		t.Fatalf("%+v", l)
 	}
 }
@@ -71,6 +72,7 @@ func TestLearnDefaultsBelowFiveSamples(t *testing.T) {
 func TestLearnFullP85FloorCap(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, sto)
 	cfg := DefaultV2Config()
+	cfg.LearnFrom = time.Time{}
 	mk := func(mins ...int) []core.ReheatRec {
 		var rs []core.ReheatRec
 		for i, m := range mins {
@@ -79,16 +81,22 @@ func TestLearnFullP85FloorCap(t *testing.T) {
 		return rs
 	}
 	// p85 of 100,110,120,130,140 = 100 + 0.85*4 -> index 3.4 -> 130+0.4*10 = 134.
-	l := Learn(now, mk(100, 110, 120, 130, 140), cfg)
+	cfg90 := cfg
+	cfg90.FullFloor = 90 * time.Minute
+	l := Learn(now, mk(100, 110, 120, 130, 140), cfg90)
 	if l.Full != 134*time.Minute || l.FullDefault || l.NFull != 5 {
 		t.Fatalf("p85: %+v", l)
 	}
-	// Floor 90 min.
+	// With the 0.6.2 default floor the same history gives the floor.
+	if l := Learn(now, mk(100, 110, 120, 130, 140), cfg); l.Full != 180*time.Minute {
+		t.Fatalf("default floor: %+v", l)
+	}
+	// Floor 180 min (0.6.2).
 	if l := Learn(now, mk(30, 35, 40, 45, 50), cfg); l.Full != FullFloor {
 		t.Fatalf("floor: %v", l.Full)
 	}
-	// Cap 4 h.
-	if l := Learn(now, mk(300, 310, 320, 330, 340), cfg); l.Full != FullCap {
+	// Cap 6 h.
+	if l := Learn(now, mk(400, 410, 420, 430, 440), cfg); l.Full != FullCap {
 		t.Fatalf("cap: %v", l.Full)
 	}
 	// Cut reheats say nothing about the full time.
@@ -110,6 +118,7 @@ func TestLearnFullP85FloorCap(t *testing.T) {
 func TestLearnTopupP50Clamp(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, sto)
 	cfg := DefaultV2Config()
+	cfg.LearnFrom = time.Time{}
 	mk := func(mins ...int) []core.ReheatRec {
 		var rs []core.ReheatRec
 		for i, m := range mins {
@@ -122,7 +131,7 @@ func TestLearnTopupP50Clamp(t *testing.T) {
 	if l := Learn(now, mk(40, 50, 45, 55, 60), cfg); l.Topup != 50*time.Minute || l.TopDef || l.NTopup != 5 {
 		t.Fatalf("p50: %+v", l)
 	}
-	if l := Learn(now, mk(10, 12, 14, 16, 18), cfg); l.Topup != TopupFloor {
+	if l := Learn(now, mk(16, 17, 18, 19, 20), cfg); l.Topup != TopupFloor {
 		t.Fatalf("floor: %v", l.Topup)
 	}
 	if l := Learn(now, mk(200, 210, 220, 230, 240), cfg); l.Topup != TopupCap {
@@ -143,7 +152,9 @@ func TestLearnClassifiesUntaggedByGap(t *testing.T) {
 		night := base.Add(time.Duration(d) * 24 * time.Hour)
 		rs = append(rs, rec(night, 130*time.Minute), rec(night.Add(8*time.Hour), 40*time.Minute), rec(night.Add(8*time.Hour+50*time.Minute), 20*time.Minute))
 	}
-	l := Learn(now, rs, DefaultV2Config())
+	cfgG := DefaultV2Config()
+	cfgG.LearnFrom = time.Time{}
+	l := Learn(now, rs, cfgG)
 	// 6 full (first of each day, gap >= 4 h) and the rest top-ups.
 	if l.NFull != 12 && l.NFull != 6 {
 		t.Fatalf("NFull %d", l.NFull)
@@ -200,16 +211,16 @@ func TestV2FullAndTopupPlacement(t *testing.T) {
 	if len(full) < 1 || len(top) < 1 {
 		t.Fatalf("windows %+v", res.Plan.Windows)
 	}
-	// First full window: inside 22-07, 150 min + 30 s margin = 11 quarters,
+	// First full window: inside 22-07, 180 min + 30 s margin = 13 quarters,
 	// the cheapest such run: the 02-04 trough region.
 	f := full[0]
 	if !inBand(f.Start, 22*60, 7*60) || !inBand(f.End.Add(-time.Second), 22*60, 7*60) {
 		t.Fatalf("full outside the night band: %v-%v", f.Start.In(sto), f.End.In(sto))
 	}
-	if f.End.Sub(f.Start) != 11*quarter {
+	if f.End.Sub(f.Start) != 13*quarter {
 		t.Fatalf("full length %v", f.End.Sub(f.Start))
 	}
-	best := bruteCheapest(prices, cfg, time.Date(2026, 11, 10, 22, 0, 0, 0, sto), time.Date(2026, 11, 11, 7, 0, 0, 0, sto), 11)
+	best := bruteCheapest(prices, cfg, time.Date(2026, 11, 10, 22, 0, 0, 0, sto), time.Date(2026, 11, 11, 7, 0, 0, 0, sto), 13)
 	if !f.Start.Equal(best) {
 		t.Fatalf("full starts %v, brute-force cheapest %v", f.Start.In(sto), best.In(sto))
 	}
@@ -656,7 +667,7 @@ func TestV2DST(t *testing.T) {
 				if !inBand(f.Start, 22*60, 7*60) || !inBand(f.End.Add(-time.Second), 22*60, 7*60) {
 					t.Fatalf("full %v-%v outside the local night band", f.Start.In(sto), f.End.In(sto))
 				}
-				if f.End.Sub(f.Start) != 11*quarter {
+				if f.End.Sub(f.Start) != 13*quarter {
 					t.Fatalf("full length %v", f.End.Sub(f.Start))
 				}
 			}
@@ -668,7 +679,7 @@ func TestV2DST(t *testing.T) {
 				ns = ns.AddDate(0, 0, -1)
 			}
 			ne := time.Date(ns.Year(), ns.Month(), ns.Day()+1, 7, 0, 0, 0, sto)
-			if want := bruteCheapest(prices, cfg, ns, ne, 11); !cn.Start.Equal(want) {
+			if want := bruteCheapest(prices, cfg, ns, ne, 13); !cn.Start.Equal(want) {
 				t.Fatalf("night window %v, cheapest %v", cn.Start.In(sto), want.In(sto))
 			}
 			// A 24 h day count: the DST day has 23 or 25 hours; the plan's
@@ -713,5 +724,91 @@ func TestV2WindowStableAcrossReplans(t *testing.T) {
 	// Across the start of the midday window the window stays where it was.
 	if first[KindTopup].IsZero() || first[KindFull].IsZero() {
 		t.Fatalf("windows seen %v", first)
+	}
+}
+
+// 0.6.2: short thermostat top-ups (switch ON, tank near set-point) feed
+// neither the full nor the top-up statistics. 2026-11-13: five 5-10 min
+// reheats had made "full p50 = 6 min" while the real full heat ran 94 min.
+func TestLearnIgnoresThermostatMaintenance(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, sto)
+	cfg := DefaultV2Config()
+	cfg.LearnFrom = time.Time{}
+	var rs []core.ReheatRec
+	for d := 0; d < 6; d++ {
+		// a tagged FULL that drew 6 min, and untagged 5-10 min top-ups
+		// after long gaps: none may count.
+		st := now.Add(-time.Duration(6-d) * 24 * time.Hour)
+		r := rec(st, 6*time.Minute)
+		r.Kind = KindFull
+		rs = append(rs, r, rec(st.Add(9*time.Hour), time.Duration(5+d)*time.Minute))
+	}
+	l := Learn(now, rs, cfg)
+	if l.NFull != 0 || l.NTopup != 0 || !l.FullDefault || l.Full != 180*time.Minute {
+		t.Fatalf("maintenance counted: %+v", l)
+	}
+	// Add five real full heats: they alone set the statistics.
+	for d := 0; d < 5; d++ {
+		rs = append(rs, rec(now.Add(-time.Duration(30-d)*time.Hour), 94*time.Minute+time.Duration(d)*time.Minute))
+	}
+	l = Learn(now, rs, cfg)
+	if l.NFull != 5 || l.FullP50 < 90*time.Minute || l.FullP50 > 100*time.Minute || l.Full != 180*time.Minute {
+		t.Fatalf("real full heats: %+v", l)
+	}
+}
+
+// Heats from before the thermostat change are ignored (LearnFrom).
+func TestLearnFromIgnoresOlderHeats(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, sto)
+	cfg := DefaultV2Config() // LearnFrom 2026-11-13 20:00
+	var rs []core.ReheatRec
+	for d := 0; d < 6; d++ {
+		rs = append(rs, rec(time.Date(2026, 11, 5+d, 1, 0, 0, 0, sto), 200*time.Minute))
+	}
+	if l := Learn(now, rs, cfg); l.NFull != 0 || !l.FullDefault {
+		t.Fatalf("pre-cutoff heats used: %+v", l)
+	}
+}
+
+// The reheats the detector logged 2026-11-11 .. 11-13 (hot_water_estimated_power
+// on/off times, UTC), thermostat top-ups of 4-14 min among them. 0.6.1 read
+// them as "full" heats (full p50 = 6 min, n = 5) while the real full heat of
+// the night of 11-13 ran 96 min.
+func realReheats2026_11() []core.ReheatRec {
+	z := func(day, h, m, s int) time.Time { return time.Date(2026, 11, day, h, m, s, 0, time.UTC) }
+	type pr struct{ a, b time.Time }
+	var rs []core.ReheatRec
+	for _, p := range []pr{
+		{z(11, 19, 15, 31), z(11, 20, 5, 3)}, {z(11, 20, 30, 19), z(11, 21, 32, 47)},
+		{z(12, 0, 46, 52), z(12, 0, 54, 22)}, {z(12, 3, 55, 6), z(12, 4, 3, 1)},
+		{z(12, 5, 15, 40), z(12, 5, 29, 56)}, {z(12, 7, 27, 55), z(12, 7, 36, 41)},
+		{z(12, 10, 26, 33), z(12, 10, 33, 53)}, {z(12, 13, 15, 20), z(12, 13, 22, 46)},
+		{z(12, 15, 40, 31), z(12, 15, 51, 57)}, {z(12, 19, 41, 53), z(12, 19, 46, 8)},
+		{z(13, 1, 10, 56), z(13, 2, 46, 40)}, {z(13, 10, 30, 1), z(13, 11, 0, 52)},
+		{z(13, 14, 45, 26), z(13, 14, 56, 1)}, {z(13, 17, 2, 26), z(13, 17, 10, 21)},
+		{z(13, 19, 8, 1), z(13, 19, 15, 31)},
+	} {
+		rs = append(rs, core.ReheatRec{Start: p.a, End: p.b})
+	}
+	return rs
+}
+
+func TestLearnRealReheats20261113(t *testing.T) {
+	now := time.Date(2026, 11, 13, 22, 0, 0, 0, time.UTC)
+	cfg := DefaultV2Config()
+	cfg.LearnFrom = time.Time{}
+	l := Learn(now, realReheats2026_11(), cfg)
+	// Only the heats of 30 min or more are full-heat samples (50, 62, 96, 30.9 min);
+	// none of the 4-14 min thermostat top-ups is a sample of any kind.
+	if l.NFull != 4 || l.NTopup != 0 {
+		t.Fatalf("NFull %d NTopup %d: %+v", l.NFull, l.NTopup, l)
+	}
+	if !l.FullDefault || l.Full != 180*time.Minute {
+		t.Fatalf("full window must stay at the 180 min floor: %+v", l)
+	}
+	// With the production LearnFrom the whole log is ignored.
+	l = Learn(now, realReheats2026_11(), DefaultV2Config())
+	if l.NFull != 0 || l.NTopup != 0 || l.Full != 180*time.Minute {
+		t.Fatalf("LearnFrom: %+v", l)
 	}
 }

@@ -44,8 +44,11 @@ const (
 
 // Bounds of the learned durations.
 const (
-	FullFloor   = 90 * time.Minute
-	FullCap     = 4 * time.Hour
+	// FullFloor is the default floor of the learned FULL window (0.6.2:
+	// 90 -> 180 min, the tank thermostat is now 80 C; option
+	// hwc_v2_full_min_min). FullCap bounds the learned value above.
+	FullFloor   = 180 * time.Minute
+	FullCap     = 6 * time.Hour
 	TopupFloor  = 30 * time.Minute
 	TopupCap    = 2 * time.Hour
 	minSamples  = 5
@@ -54,6 +57,15 @@ const (
 	// ended, and has no window tag, is a full-type reheat (the tank had
 	// time to cool); a shorter gap makes it a top-up type.
 	fullGap = 4 * time.Hour
+	// MaintMax (0.6.2): a reheat shorter than this is thermostat
+	// maintenance (the tank was already near its set-point); it feeds
+	// neither the full nor the top-up statistics.
+	MaintMax = 15 * time.Minute
+	// fullDraw: an untagged reheat that drew at least this long is a full
+	// heat whatever the gap before it; one that drew at least fullDrawGap
+	// after a gap of fullGap or more is too.
+	fullDraw    = 45 * time.Minute
+	fullDrawGap = 30 * time.Minute
 )
 
 // V2Config is planner v2's configuration. None of it is a safety limit.
@@ -65,7 +77,9 @@ type V2Config struct {
 	MiddayFrom, MiddayTo int // default 10:00, 16:00
 	Topup                bool
 
-	FullDefault, TopupDefault time.Duration // before there is history: 150 min, 60 min
+	FullDefault, TopupDefault time.Duration // before there is history: 180 min, 60 min
+	FullFloor                 time.Duration // floor of the learned full window (default 180 min)
+	LearnFrom                 time.Time     // reheats that ended before this are ignored (zero: none)
 	EarlyEnd                  time.Duration // heater off this long: end the window (10 min)
 	EveningTopup              bool          // hwc_v2_evening_topup, default off
 	EveningFrom               int           // minutes after midnight: demand counts from here (17:00)
@@ -88,8 +102,11 @@ func DefaultV2Config() V2Config {
 	}
 	return V2Config{
 		Price: DefaultConfig(), Loc: loc,
+		// Tank thermostat raised 60 -> 80 C on 2026-11-13 evening: earlier
+		// reheats (and the mis-classified top-ups) are ignored.
+		LearnFrom: time.Date(2026, 11, 13, 20, 0, 0, 0, loc),
 		NightFrom: 22 * 60, NightTo: 7 * 60, MiddayFrom: 10 * 60, MiddayTo: 16 * 60, Topup: true,
-		FullDefault: 150 * time.Minute, TopupDefault: 60 * time.Minute,
+		FullDefault: 180 * time.Minute, FullFloor: FullFloor, TopupDefault: 60 * time.Minute,
 		EarlyEnd: 10 * time.Minute, EveningFrom: 17 * 60, EveningGap: 3 * time.Hour,
 		HeaterKW: 3.0, MotorMargin: 30 * time.Second, MaxExtend: 60 * time.Minute, HystOre: 3,
 		MaxMovesDay: 8, MoveReserve: 3, MaxMovesHour: 6, Horizon: 36 * time.Hour,
@@ -142,10 +159,14 @@ func isFullType(rs []core.ReheatRec, i int) bool {
 	case KindTopup, KindEvening:
 		return false
 	}
-	if i == 0 {
+	d := rs[i].Duration()
+	if d >= fullDraw {
 		return true
 	}
-	return rs[i].Start.Sub(rs[i-1].End) >= fullGap
+	if i == 0 {
+		return d >= fullDrawGap
+	}
+	return d >= fullDrawGap && rs[i].Start.Sub(rs[i-1].End) >= fullGap
 }
 
 // Learn builds the duration model from the reheat log: the on-time from the
@@ -153,15 +174,28 @@ func isFullType(rs []core.ReheatRec, i int) bool {
 // by our own OFF are excluded, they say nothing about the full time.
 func Learn(now time.Time, rs []core.ReheatRec, cfg V2Config) Learned {
 	l := Learned{Full: cfg.FullDefault, Topup: cfg.TopupDefault, FullDefault: true, TopDef: true,
-		FullP50: 120 * time.Minute, TopupP50: 40 * time.Minute}
-	l.Full = clampD(l.Full, FullFloor, FullCap)
+		FullP50: 150 * time.Minute, TopupP50: 40 * time.Minute}
+	floor := cfg.FullFloor
+	if floor <= 0 {
+		floor = FullFloor
+	}
+	l.Full = clampD(l.Full, floor, FullCap)
 	l.Topup = clampD(l.Topup, TopupFloor, TopupCap)
 	var full, top []time.Duration
 	for i, r := range rs {
 		if r.Cut || now.Sub(r.End) > learnWindow || r.End.Before(r.Start) {
 			continue
 		}
+		if !cfg.LearnFrom.IsZero() && r.End.Before(cfg.LearnFrom) {
+			continue
+		}
+		if r.Duration() < MaintMax {
+			continue // thermostat maintenance: no statistic at all
+		}
 		if isFullType(rs, i) {
+			if r.Duration() < fullDrawGap {
+				continue // a "full" that drew <30 min was a near-setpoint top-up: not a full-heat sample
+			}
 			full = append(full, r.Duration())
 		} else {
 			top = append(top, r.Duration())
@@ -170,7 +204,7 @@ func Learn(now time.Time, rs []core.ReheatRec, cfg V2Config) Learned {
 	l.NFull, l.NTopup = len(full), len(top)
 	if len(full) >= minSamples {
 		l.FullP85Raw = percentile(full, 0.85)
-		l.Full = clampD(l.FullP85Raw, FullFloor, FullCap)
+		l.Full = clampD(l.FullP85Raw, floor, FullCap)
 		l.FullP50 = percentile(full, 0.5)
 		l.FullDefault = false
 	}

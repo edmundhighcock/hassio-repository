@@ -267,3 +267,27 @@ func TestTestMovesOnlyOverridesPlanner(t *testing.T) {
 		}
 	}
 }
+
+// 0.6.2 options: the full-heat floor and the learner cutoff.
+func TestV2FullFloorAndLearnFromOptions(t *testing.T) {
+	m := New()
+	if err := m.Configure([]byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if m.v2cfg.FullFloor != 180*time.Minute || m.v2cfg.FullDefault != 180*time.Minute ||
+		!m.v2cfg.LearnFrom.Equal(time.Date(2026, 11, 13, 20, 0, 0, 0, m.v2cfg.Loc)) {
+		t.Fatalf("defaults: %+v", m.v2cfg)
+	}
+	m = New()
+	if err := m.Configure([]byte(`{"hwc_v2_full_min_min": 240, "hwc_v2_full_default_min": 150, "hwc_v2_learn_from": ""}`)); err != nil {
+		t.Fatal(err)
+	}
+	if m.v2cfg.FullFloor != 240*time.Minute || m.v2cfg.FullDefault != 240*time.Minute || !m.v2cfg.LearnFrom.IsZero() {
+		t.Fatalf("set: %+v", m.v2cfg)
+	}
+	m = New()
+	_ = m.Configure([]byte(`{"hwc_v2_full_min_min": 10, "hwc_v2_learn_from": "2026-12-01"}`))
+	if m.v2cfg.FullFloor != 180*time.Minute || m.v2cfg.LearnFrom.Day() != 1 || m.v2cfg.LearnFrom.Month() != 12 {
+		t.Fatalf("range/format: %+v", m.v2cfg)
+	}
+}

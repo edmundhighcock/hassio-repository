@@ -218,11 +218,23 @@ type options struct {
 	V2Topup         *bool    `json:"hwc_v2_topup"`
 	V2FullDefaultM  *int     `json:"hwc_v2_full_default_min"`
 	V2TopupDefaultM *int     `json:"hwc_v2_topup_default_min"`
+	V2FullMinM      *int     `json:"hwc_v2_full_min_min"` // 0.6.2
+	V2LearnFrom     *string  `json:"hwc_v2_learn_from"`   // 0.6.2
 	V2EarlyEndMin   *int     `json:"hwc_v2_early_end_min"`
 	V2EveningTopup  *bool    `json:"hwc_v2_evening_topup"`
 	V2EveningGapH   *float64 `json:"hwc_v2_evening_gap_h"`
 	V2EveningDropC  *float64 `json:"hwc_v2_evening_drop_c"`
 	V2WindowClock   *bool    `json:"hwc_v2_window_resets_clock"`
+}
+
+// parseLocalStamp parses "2006-01-02" or "2006-01-02T15:04" in loc.
+func parseLocalStamp(s string, loc *time.Location) (time.Time, bool) {
+	for _, f := range []string{"2006-01-02T15:04", "2006-01-02"} {
+		if t, err := time.ParseInLocation(f, s, loc); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func hours(v float64) time.Duration { return time.Duration(v * float64(time.Hour)) }
@@ -371,6 +383,25 @@ func (m *Module) Configure(raw []byte) error {
 	}
 	if o.V2FullDefaultM != nil && *o.V2FullDefaultM >= 60 && *o.V2FullDefaultM <= 300 {
 		v.FullDefault = time.Duration(*o.V2FullDefaultM) * time.Minute
+	}
+	if o.V2FullMinM != nil {
+		if *o.V2FullMinM >= 60 && *o.V2FullMinM <= 360 {
+			v.FullFloor = time.Duration(*o.V2FullMinM) * time.Minute
+		} else {
+			msgs = append(msgs, "option hwc_v2_full_min_min out of range 60..360; default applied")
+		}
+	}
+	if o.V2LearnFrom != nil {
+		if *o.V2LearnFrom == "" {
+			v.LearnFrom = time.Time{}
+		} else if t, ok := parseLocalStamp(*o.V2LearnFrom, v.Loc); ok {
+			v.LearnFrom = t
+		} else {
+			msgs = append(msgs, "option hwc_v2_learn_from does not parse (YYYY-MM-DD or YYYY-MM-DDTHH:MM local); default applied")
+		}
+	}
+	if v.FullDefault < v.FullFloor {
+		v.FullDefault = v.FullFloor
 	}
 	if o.V2TopupDefaultM != nil && *o.V2TopupDefaultM >= 15 && *o.V2TopupDefaultM <= 180 {
 		v.TopupDefault = time.Duration(*o.V2TopupDefaultM) * time.Minute
