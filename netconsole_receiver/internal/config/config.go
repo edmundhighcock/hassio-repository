@@ -17,7 +17,10 @@ import (
 
 // Defaults.
 const (
-	DefaultListenPort   = 26666
+	// ListenPort is fixed: the add-on publishes container port 26666/udp and
+	// users change the HOST port in the Network tab. An old options.json that
+	// still carries listen_port is ignored (unknown keys are skipped).
+	ListenPort          = 26666
 	DefaultLogDir       = "/config" // the add-on's own addon_config mount
 	DefaultLogMaxMB     = 5
 	DefaultLogFiles     = 5
@@ -44,7 +47,6 @@ type RuleOpt struct {
 
 // Options mirrors config.yaml. Scalars use zero for "absent".
 type Options struct {
-	ListenPort    int         `json:"listen_port"`
 	Sources       []SourceOpt `json:"sources"`
 	LogDir        string      `json:"log_dir"`
 	LogMaxMB      int         `json:"log_max_mb"`
@@ -109,13 +111,6 @@ func Resolve(o Options) Resolved {
 	r := Resolved{Options: o}
 	warn := func(f string, a ...any) { r.Warnings = append(r.Warnings, fmt.Sprintf(f, a...)) }
 
-	if o.ListenPort < 0 || o.ListenPort > 65535 {
-		warn("listen_port %d out of range; using %d", o.ListenPort, DefaultListenPort)
-		r.ListenPort = 0
-	}
-	if r.ListenPort == 0 {
-		r.ListenPort = DefaultListenPort
-	}
 	if r.LogDir == "" {
 		r.LogDir = DefaultLogDir
 	}

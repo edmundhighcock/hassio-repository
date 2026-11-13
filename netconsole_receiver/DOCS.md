@@ -20,7 +20,6 @@ out-of-range value takes the default shown.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `listen_port` | `26666` | UDP port inside the container. The add-on publishes container port `26666/udp`, so leave this alone; change the host port in the add-on's Network tab. |
 | `sources` | `[]` | The allow-list: `{name, address, port?}`. See below. |
 | `log_dir` | `/config` | Where the logs go. `/config` is the add-on's own `addon_config` folder. |
 | `log_max_mb` | `5` | Rotate a source's log at this size. |
@@ -30,6 +29,13 @@ out-of-range value takes the default shown.
 | `log_level` | `info` | `debug`, `info`, `warning`, `error`. |
 | `go_memlimit_mib` | `24` | Soft memory limit for the Go runtime. |
 | `mqtt_host`, `mqtt_port`, `mqtt_username`, `mqtt_password` | blank / `1883` | Override for the Supervisor's MQTT details. See "MQTT credentials". |
+
+### Port
+
+The receiver always listens on UDP 26666 inside the container; there is no
+option for it. To have senders use a different port, change the HOST port in
+the add-on's Network tab (the Supervisor maps it onto 26666) and set the
+sender's `remote_port` to that host port.
 
 ### sources
 

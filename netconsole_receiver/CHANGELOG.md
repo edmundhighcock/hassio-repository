@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Removed the `listen_port` option: the receiver always listens on 26666/udp
+  inside the container, and the host port is changed in the Network tab. An
+  old `listen_port` in options.json is ignored. (Bumped rather than amended
+  to keep the options history honest.)
+
 ## 0.1.0
 
 First release.

@@ -1,12 +1,4 @@
 configuration:
-  listen_port:
-    name: "Listen port (UDP)"
-    description: >-
-      The UDP port inside the container. Leave at 26666 unless you know
-      you need otherwise: the add-on publishes container port 26666/udp,
-      so a different value here also needs a matching change to the port
-      mapping, which only works with host networking. To change the port
-      the sender uses, change the host port in the Network tab instead.
   sources:
     name: "Sources (allow-list)"
     description: >-

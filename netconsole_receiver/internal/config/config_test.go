@@ -10,7 +10,7 @@ import (
 
 func TestDefaultsWhenOptionsMissing(t *testing.T) {
 	r := Load(filepath.Join(t.TempDir(), "nope.json"))
-	if r.ListenPort != 26666 || r.LogDir != "/config" || r.LogMaxMB != 5 || r.LogFiles != 5 ||
+	if r.LogDir != "/config" || r.LogMaxMB != 5 || r.LogFiles != 5 ||
 		r.GoMemLimitMiB != 24 || r.MQTTPort != 1883 || r.SilenceMin != 15 || r.LogLevel != "info" {
 		t.Fatalf("%+v", r.Options)
 	}
@@ -74,12 +74,21 @@ func TestLoadFromFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "options.json")
 	os.WriteFile(p, []byte(`{"listen_port": 4444, "sources":[{"name":"a","address":"10.1.1.1"}], "log_level":"debug", "unknown_future_key": 1}`), 0o600)
 	r := Load(p)
-	if r.ListenPort != 4444 || len(r.Srcs) != 1 || r.LogLevel != "debug" || len(r.Warnings) != 0 {
+	if len(r.Srcs) != 1 || r.LogLevel != "debug" || len(r.Warnings) != 0 {
 		t.Fatalf("%+v %v", r.Options, r.Warnings)
 	}
 	os.WriteFile(p, []byte(`{not json`), 0o600)
 	r = Load(p)
-	if r.ListenPort != 26666 || !strings.Contains(strings.Join(r.Warnings, ""), "parse") {
+	if !strings.Contains(strings.Join(r.Warnings, ""), "parse") {
 		t.Fatalf("%v", r.Warnings)
+	}
+}
+
+func TestLegacyListenPortIgnored(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "options.json")
+	os.WriteFile(p, []byte(`{"listen_port": 4444, "sources":[{"name":"a","address":"10.1.1.1"}]}`), 0o600)
+	r := Load(p)
+	if len(r.Srcs) != 1 || len(r.Warnings) != 0 || ListenPort != 26666 {
+		t.Fatalf("%v %v", r.Srcs, r.Warnings)
 	}
 }

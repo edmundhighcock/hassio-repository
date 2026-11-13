@@ -128,8 +128,8 @@ func main() {
 	c := config.Load(envOr("NETCONSOLE_OPTIONS", "/data/options.json"))
 	level = c.LogLevel
 	debug.SetMemoryLimit(int64(c.GoMemLimitMiB) << 20)
-	log.Printf("netconsole_receiver: starting, listen_port=%d sources=%d rules=%d log_dir=%s log_max_mb=%d log_files=%d log_level=%s GOMEMLIMIT=%dMiB",
-		c.ListenPort, len(c.Srcs), len(c.Rules), c.LogDir, c.LogMaxMB, c.LogFiles, c.LogLevel, c.GoMemLimitMiB)
+	log.Printf("netconsole_receiver: starting, port=%d sources=%d rules=%d log_dir=%s log_max_mb=%d log_files=%d log_level=%s GOMEMLIMIT=%dMiB",
+		config.ListenPort, len(c.Srcs), len(c.Rules), c.LogDir, c.LogMaxMB, c.LogFiles, c.LogLevel, c.GoMemLimitMiB)
 	for _, w := range c.Warnings {
 		log.Printf("ERROR: options: %s", w)
 	}
@@ -154,9 +154,9 @@ func main() {
 	pub := mqttpub.New(metas, ruleNames, config.CounterPublishEvery, func() recv.Snapshot { return eng.Snapshot() })
 	eng = recv.New(c, open, pub, logf)
 
-	conn, granted, err := listen(c.ListenPort)
+	conn, granted, err := listen(config.ListenPort)
 	if err != nil {
-		log.Fatalf("ERROR: cannot listen on udp :%d: %v", c.ListenPort, err)
+		log.Fatalf("ERROR: cannot listen on udp :%d: %v", config.ListenPort, err)
 	}
 	log.Printf("listening on udp %s; SO_RCVBUF requested %d bytes, kernel reports %d (Linux doubles the value; the cap is net.core.rmem_max)",
 		conn.LocalAddr(), rcvBufWanted, granted)

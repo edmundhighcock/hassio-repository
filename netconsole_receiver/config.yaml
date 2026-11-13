@@ -1,6 +1,6 @@
 name: "Netconsole Receiver"
 description: "Receives Linux netconsole kernel logs over UDP, keeps rotated per-host log files, and publishes per-host status and alerts to Home Assistant via MQTT"
-version: "0.1.0"
+version: "0.1.1"
 slug: "netconsole_receiver"
 init: false
 startup: application
@@ -18,9 +18,8 @@ services:
   - "mqtt:want"
 # Published UDP ports bind EVERY host interface, not just the LAN you
 # have in mind - hence the `sources` allow-list. See DOCS.md "Security".
-# The container-side port is fixed here; the `listen_port` option must
-# match it (see DOCS.md). The host-side port can be changed in the
-# add-on's Network tab.
+# The container-side port is fixed at 26666 (no option for it). The
+# host-side port can be changed in the add-on's Network tab.
 ports:
   "26666/udp": 26666
 ports_description:
@@ -63,7 +62,6 @@ options:
 # has no "?" form), so they carry defaults under `options:` instead, and
 # Go also tolerates their absence.
 schema:
-  listen_port: "port?" # default 26666 (must match the container port in `ports`)
   sources:
     - name: "match(^[a-z0-9][a-z0-9_]*$)"
       address: "str"
