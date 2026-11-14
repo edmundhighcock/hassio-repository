@@ -254,6 +254,16 @@ planner (no planned OFF), so only test moves switch OFF.
 Interpretations taken where PLAN is silent or inconsistent are listed in
 the 0.2.0 CHANGELOG entry.
 
+### Override Off vs Boost (0.6.8)
+
+**Override Off vs Boost**: Override Off is an explicit user intent and wins
+over Boost. Selecting it while a boost is active ends the boost
+(`boost ended: override_off`) and the controller returns to IDLE_ON, then the
+normal Override Off checks run. If they refuse (tank clock, stale inputs,
+strikes, battery, move reserve) an alert fires and the boost stays cancelled;
+the heater stays ON. A boost pressed while Override Off is already selected
+still wins (until the selector is changed again).
+
 ### Boot waits for the plan (0.6.1)
 
 At process start the controller stays in BOOT, holding the switch where it

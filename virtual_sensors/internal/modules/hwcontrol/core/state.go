@@ -82,6 +82,7 @@ type Controller struct {
 
 	// R3 manual test moves (PLAN §8).
 	buttonPrev    map[Role]string
+	buttonSnap    map[Role]bool
 	testPending   string // "move" | "probe" | ""
 	testPendingAt time.Time
 	testOff       bool // the running OFF is a test move
@@ -130,6 +131,13 @@ type Controller struct {
 	lastSummaryDay  string
 	shadowOffsToday int
 
+	// overrideOffCancelBoost: the selector just changed to Override Off;
+	// evaluate() ends an active boost once. overrideOffPendingLogged: the
+	// "pending" line was logged for this selection.
+	overrideOffCancelBoost   bool
+	overrideOffPendingLogged bool
+	boostSnapSeen            bool
+
 	effects []Effect
 }
 
@@ -142,6 +150,7 @@ func New(cfg Config, persisted []byte, coverEntity string) *Controller {
 		cfg: cfg, P: p, coverEntity: coverEntity,
 		in: map[Role]*held{}, conflicts: map[string]bool{}, lastPub: map[string]string{},
 		buttonPrev: map[Role]string{},
+		buttonSnap: map[Role]bool{},
 	}
 	c.res.keep = 20 * time.Minute
 	c.corrected.keep = 20 * time.Minute
@@ -362,8 +371,12 @@ func (c *Controller) onEntity(u EntityUpdate) {
 		c.onBattery(u.Num)
 	}
 	if u.Role == RoleSelect && u.State != c.lastSelect {
+		first := c.lastSelect == ""
 		c.lastSelect = u.State
 		c.overrideOffDone = false
+		c.overrideOffPendingLogged = false
+		// The first value is the connect snapshot, not a user selection.
+		c.overrideOffCancelBoost = !first && u.State == SelectOverrideOff
 	}
 }
 
@@ -384,9 +397,13 @@ func (c *Controller) onBattery(v float64) {
 func (c *Controller) onBoostState(u EntityUpdate) {
 	val := u.State
 	valid := val != "unavailable" && val != "unknown" && val != ""
-	if c.boostPrevKnown && valid && val != c.boostPrev {
+	// The snapshot counts as seen even when it is unknown/unavailable (a
+	// never-pressed helper), so the first real press is a change, not the
+	// baseline. Replays never reach here (onEntity returns early).
+	if c.boostSnapSeen && valid && (!c.boostPrevKnown || val != c.boostPrev) {
 		c.pressBoost()
 	}
+	c.boostSnapSeen = true
 	if valid {
 		c.boostPrev, c.boostPrevKnown = val, true
 	}
@@ -398,11 +415,13 @@ func (c *Controller) onBoostState(u EntityUpdate) {
 func (c *Controller) onTestButton(u EntityUpdate) {
 	val := u.State
 	valid := val != "unavailable" && val != "unknown" && val != ""
-	prev, known := c.buttonPrev[u.Role]
+	prev, havePrev := c.buttonPrev[u.Role]
+	seen := c.buttonSnap[u.Role]
+	c.buttonSnap[u.Role] = true // the snapshot counts even when unknown
 	if valid {
 		c.buttonPrev[u.Role] = val
 	}
-	if !known || !valid || val == prev {
+	if !seen || !valid || (havePrev && val == prev) {
 		return
 	}
 	kind := "move"

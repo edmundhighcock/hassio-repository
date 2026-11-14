@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.8
+
+- hot_water_control: selecting "Override Off" now cancels an active Boost
+  (explicit user intent wins over Boost). The boost ends (`boost ended:
+  override_off`), the controller leaves HOLD_ON(boost) by its normal exit to
+  IDLE_ON, then the usual Override Off logic runs. If it refuses (tank clock,
+  stale inputs, strikes, battery, move reserve) the alert fires and the boost
+  stays cancelled: the controller is on its normal ON path. If Override Off is
+  selected in a state where it cannot act yet, logs
+  `hot_water_control: override_off pending (state X)` once.
+- The first press of a never-pressed input_button (boost, test move, test
+  probe) is no longer swallowed: an unknown/unavailable snapshot now counts as
+  the baseline. Replayed warm-up values and restart snapshots still never press.
+
 ## 0.6.7
 
 - hot_water_control: new `sensor.hot_water_controller_off_gate` ("Hot water

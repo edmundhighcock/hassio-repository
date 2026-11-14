@@ -242,6 +242,17 @@ func (c *Controller) evaluate() {
 		c.evaluateShadow()
 		return
 	}
+	if c.overrideOffCancelBoost {
+		// Override Off is an explicit user intent and wins over Boost. The
+		// boost ends through the normal exit (HOLD_ON(boost) -> leaveHold ->
+		// boot check -> IDLE_ON); the Override Off logic then runs on its
+		// usual path and may still refuse (alert), in which case the boost
+		// stays cancelled and the controller is on its normal ON path.
+		c.overrideOffCancelBoost = false
+		if c.P.Boost.Active {
+			c.endBoost("override_off")
+		}
+	}
 	hold := c.desiredHold()
 	if c.probeUnderHold != "" {
 		if c.P.State == StProbe && hold == c.probeUnderHold {
@@ -1007,6 +1018,10 @@ func (c *Controller) maybeOverrideOff() bool {
 		return false
 	}
 	if c.P.State != StIdleOn && c.P.State != StIdleOff {
+		if !c.overrideOffPendingLogged {
+			c.overrideOffPendingLogged = true
+			c.logf("override_off pending (state %s)", c.stateLabel())
+		}
 		return false
 	}
 	c.overrideOffDone = true
