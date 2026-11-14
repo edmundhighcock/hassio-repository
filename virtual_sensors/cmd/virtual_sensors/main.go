@@ -31,6 +31,7 @@ import (
 	_ "virtual_sensors/internal/modules/housebudget" // side-effect: registers "house_planner"
 	_ "virtual_sensors/internal/modules/hpcontrol"   // side-effect: registers "hp_control"
 	_ "virtual_sensors/internal/modules/hwcontrol"   // side-effect: registers "hot_water_control"
+	_ "virtual_sensors/internal/modules/priceshed"   // side-effect: registers "price_shed"
 	"virtual_sensors/internal/mqttpub"
 )
 
@@ -200,14 +201,7 @@ func runLive() {
 		log.Fatalf("ERROR: no modules enabled - nothing to do (check the `modules` option)")
 	}
 
-	var outputs []modules.OutputSpec
-	var buttons []modules.ButtonSpec
-	for _, m := range active {
-		outputs = append(outputs, m.Outputs()...)
-		if b, ok := m.(modules.Buttoned); ok {
-			buttons = append(buttons, b.Buttons()...)
-		}
-	}
+	outputs, buttons := collectSpecs(active)
 	// Button presses arrive on the MQTT client goroutine, possibly before
 	// the host exists; they queue here and are moved onto the loop below.
 	presses := make(chan string, 16)
@@ -305,6 +299,20 @@ func runLive() {
 			f(h)
 		}
 	}
+}
+
+// collectSpecs gathers every active module's sensors and buttons: what is
+// handed to mqttpub.Connect for discovery and button subscriptions.
+func collectSpecs(active []modules.Module) ([]modules.OutputSpec, []modules.ButtonSpec) {
+	var outputs []modules.OutputSpec
+	var buttons []modules.ButtonSpec
+	for _, m := range active {
+		outputs = append(outputs, m.Outputs()...)
+		if b, ok := m.(modules.Buttoned); ok {
+			buttons = append(buttons, b.Buttons()...)
+		}
+	}
+	return outputs, buttons
 }
 
 // ask runs f on the loop goroutine and waits for it.

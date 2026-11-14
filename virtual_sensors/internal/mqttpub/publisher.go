@@ -96,21 +96,7 @@ func Connect(creds Credentials, outputs []modules.OutputSpec, buttons []modules.
 	p := &Publisher{outputs: outputs, outputByID: outputByID, buttons: buttons, onPress: onPress}
 	opts.OnConnect = func(c mqtt.Client) {
 		log.Printf("mqttpub: connected to %s:%d (credentials from %s)", creds.Host, creds.Port, creds.Source)
-		p.client = c
-		if err := p.publishDiscovery(); err != nil {
-			log.Printf("mqttpub: ERROR publishing discovery: %v", err)
-		}
-		if tok := c.Subscribe("homeassistant/status", 1, p.onHAStatus); tok.Wait() && tok.Error() != nil {
-			log.Printf("mqttpub: ERROR subscribing to homeassistant/status: %v", tok.Error())
-		}
-		// Button command topics: subscribed on every (re)connect, since a
-		// clean session drops subscriptions with the connection.
-		for _, b := range p.buttons {
-			id := b.ObjectID
-			if tok := c.Subscribe(commandTopic(id), 1, func(_ mqtt.Client, msg mqtt.Message) { p.handlePress(id, msg) }); tok.Wait() && tok.Error() != nil {
-				log.Printf("mqttpub: ERROR subscribing to %s: %v", commandTopic(id), tok.Error())
-			}
-		}
+		p.setup(c)
 	}
 	opts.OnConnectionLost = func(_ mqtt.Client, err error) {
 		log.Printf("mqttpub: ERROR connection to broker lost: %v - paho will keep retrying", err)
@@ -124,6 +110,26 @@ func Connect(creds Credentials, outputs []modules.OutputSpec, buttons []modules.
 	}
 	p.client = client
 	return p, nil
+}
+
+// setup runs on every (re)connect: discovery, the HA status subscription and
+// every button's command-topic subscription.
+func (p *Publisher) setup(c mqtt.Client) {
+	p.client = c
+	if err := p.publishDiscovery(); err != nil {
+		log.Printf("mqttpub: ERROR publishing discovery: %v", err)
+	}
+	if tok := c.Subscribe("homeassistant/status", 1, p.onHAStatus); tok.Wait() && tok.Error() != nil {
+		log.Printf("mqttpub: ERROR subscribing to homeassistant/status: %v", tok.Error())
+	}
+	// Button command topics: subscribed on every (re)connect, since a
+	// clean session drops subscriptions with the connection.
+	for _, b := range p.buttons {
+		id := b.ObjectID
+		if tok := c.Subscribe(commandTopic(id), 1, func(_ mqtt.Client, msg mqtt.Message) { p.handlePress(id, msg) }); tok.Wait() && tok.Error() != nil {
+			log.Printf("mqttpub: ERROR subscribing to %s: %v", commandTopic(id), tok.Error())
+		}
+	}
 }
 
 // handlePress runs on the MQTT client goroutine for one button command.
@@ -149,13 +155,13 @@ type discoveryConfig struct {
 	// default_entity_id is what current Home Assistant uses to choose the
 	// entity id; object_id alone was ignored on 2026.8 and the device name
 	// was prefixed (sensor.virtual_sensors_...).
-	DefaultEntityID   string         `json:"default_entity_id"`
-	Name              string         `json:"name"`
-	DeviceClass       string         `json:"device_class,omitempty"`
-	StateClass        string         `json:"state_class,omitempty"`
-	UnitOfMeasurement string         `json:"unit_of_measurement,omitempty"`
-	StateTopic        string         `json:"state_topic"`
-	AvailabilityTopic string         `json:"availability_topic"`
+	DefaultEntityID   string `json:"default_entity_id"`
+	Name              string `json:"name"`
+	DeviceClass       string `json:"device_class,omitempty"`
+	StateClass        string `json:"state_class,omitempty"`
+	UnitOfMeasurement string `json:"unit_of_measurement,omitempty"`
+	StateTopic        string `json:"state_topic"`
+	AvailabilityTopic string `json:"availability_topic"`
 	// JSONAttributesTopic (0.1.7): set only when OutputSpec.HasAttributes
 	// is true - see that field's doc comment.
 	JSONAttributesTopic string         `json:"json_attributes_topic,omitempty"`

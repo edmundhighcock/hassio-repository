@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.9
+
+- New module `price_shed` (add it to `modules`): keeps a load ON except during
+  the N most expensive clock hours of each local day, with a manual override
+  (a person switching it ON in an off period keeps it on until that period
+  ends). First load: `switch.tool_shed_lights`. Publishes
+  `sensor.price_shed_tool_shed_lights` and `button.replan_price_shed`. Options
+  `ps_enabled`, `ps_switch`, `ps_off_hours` (all optional). See DOCS.md
+  "Price shed".
+- Internal: mqttpub's connect handler is now `setup`, and main's spec gathering
+  `collectSpecs`, so button/sensor wiring is unit-tested.
+
 ## 0.6.8
 
 - hot_water_control: selecting "Override Off" now cancels an active Boost

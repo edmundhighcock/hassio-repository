@@ -672,6 +672,54 @@ Options (all optional, defaults in Go): `house_budget_a`, `house_phase_map`,
 `house_horizon_h`. The base load is a fixed option; a learned per-phase
 median is not built.
 
+## Price shed (`price_shed`, 0.6.9)
+
+Keeps a simple on/off load ON except during the N most expensive clock hours
+of each local day (Europe/Stockholm), with a manual override. One load for
+now: the tool-shed lights, `switch.tool_shed_lights` (a Zigbee plug; the
+lights are left on deliberately to keep the shed slightly warmer than outside
+against moisture). Enable it by adding `price_shed` to the `modules` option.
+
+**Plan.** From today's Nordpool prices (`hwc_price_entity`, parsed like the
+hot-water controller, seeded from the warm-up replay) the mean price of each
+local clock hour (23/25-hour DST days included) is ranked; the N most
+expensive (`ps_off_hours`, default 4, ties go to the earlier hour) are the
+OFF hours, all others ON. Hours need not be contiguous; an off period is a
+maximal run of consecutive off hours. No prices for today: no off hours (the
+load stays ON, state `no_prices`). Today's plan is persisted, so a restart
+without prices keeps it.
+
+**Acting.** On transitions only: the start of an off period commands
+`switch.turn_off`; the start of an on period commands `switch.turn_on` and
+clears any override. Also re-asserted (only if the switch is not already in
+the wanted state) once the HA link is up and prices are known (or 60 s have
+passed), and whenever the switch returns from `unavailable`/`unknown` (the
+plug forgets its state after a power cut), except while an override is
+active. A failed command is retried after 60 s. Warm-up replay never causes a
+command.
+
+**Override.** If the switch turns ON during an off period and it was not our
+command, the override lasts until the end of that off period (persisted;
+state `override`, attribute `override_until`). Our own commands are told
+apart by time and target: any switch state change within 30 s of our command
+is ignored, whatever it reports (a Dyson on this estate once reported a stale
+state 156 ms after a command); only an OFF to ON change after that window
+counts as a person. A return from `unavailable` is not a person. HA's event
+context is not used (it is not passed through to modules). A manual change in
+an on period is left alone until the next transition.
+
+**Entities.** `sensor.price_shed_tool_shed_lights`: state `on` | `off_period` |
+`override` | `no_prices`; attributes `off_hours` (list of "HH:00"),
+`next_change` (local RFC3339), `override_until`, `last_command`,
+`last_command_at`. `button.replan_price_shed` recomputes the plan now; it
+switches nothing unless that changes whether now is an off hour.
+
+**Options** (all optional): `ps_enabled` (bool, default true; false makes the
+module inert), `ps_switch` (default `switch.tool_shed_lights`), `ps_off_hours`
+(0..12, default 4). Logs: `price_shed: tool_shed_lights off_period start ->
+turn_off`, `... on period start -> turn_on`, `... manual on during off period
+-> override until HH:MM`, `... override ended`.
+
 ## MQTT discovery
 
 Discovery configs are published retained to
@@ -701,7 +749,8 @@ Each planner module publishes one `button` entity (discovery topic
 `homeassistant/button/virtual_sensors/<object_id>/config`, command topic
 `virtual_sensors/<object_id>/press`, payload `PRESS`, shared availability):
 `button.replan_hot_water` (hot_water_control), `button.replan_ev`
-(ev_control), `button.replan_heat_pump` (hp_control). Pressing one calls that
+(ev_control), `button.replan_heat_pump` (hp_control), `button.replan_price_shed`
+(price_shed, 0.6.9). Pressing one calls that
 module's replan immediately instead of waiting for the 1/15 min timer and logs
 `hot_water_control: replan requested (button)` (likewise `ev_control`,
 `hp_control`). No helper YAML is needed. A press with no prices, no session or

@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.6.8"
+version: "0.6.9"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -32,7 +32,7 @@ options:
   go_memlimit_mib: 24
 schema:
   modules:
-    - "list(hot_water|hot_water_control|ev_control|hp_control|house_planner|example_passthrough)"
+    - "list(hot_water|hot_water_control|ev_control|hp_control|house_planner|price_shed|example_passthrough)"
   log_level: "list(debug|info|warning|error)"
   mqtt_host: "str?"
   mqtt_port: "port?"
@@ -179,6 +179,12 @@ schema:
   house_overload_delay_s: "int(5,600)?" # default 30
   house_hp_cooldown_min: "int(1,240)?" # default 15
   house_horizon_h: "int(1,48)?" # default 24
+  # --- price_shed (0.6.9): a simple load kept ON except in the N most
+  # expensive local hours of each day, with a manual override. Enable via the
+  # `modules` list. Every key optional, NO entry under options:. ---
+  ps_enabled: "bool?" # default true
+  ps_switch: "str?" # default switch.tool_shed_lights
+  ps_off_hours: "int(0,12)?" # default 4
 # This add-on's own /data (energy totals, open-cycle state - see DOCS.md
 # "Restart semantics") is small; it is included in Home Assistant's
 # normal backups like any other add-on's /data, with no backup_exclude.
