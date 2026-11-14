@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3
+
+- Own log history: every log line now also goes to `/data/logs/virtual_sensors.log`
+  (rotated at 5 MiB, 5 backups `.1`-`.5`, about 30 MiB max), because the HAOS
+  journal is size-capped and shared and loses everything older than a few hours.
+  If the file cannot be opened a warning goes to stderr and logging continues
+  there only. The `backfill` subcommand does not write the file.
+
 ## 0.6.2
 
 Detector and learner fixes after 2026-11-13.

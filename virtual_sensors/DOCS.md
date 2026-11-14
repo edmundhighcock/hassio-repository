@@ -850,3 +850,11 @@ add-on subscribes to `state_changed` only, which does not fire on unchanged
 reports; using it needs a second `state_reported` subscription in
 `internal/haws`, which is not built. A steady reading older than the window
 falls back to the grid-power estimate until the next change.
+
+## Log file
+
+Besides stdout (HAOS journal, short-lived), the add-on writes its log to
+`/data/logs/virtual_sensors.log` (rotated at 5 MiB, backups `.1` to `.5`).
+Read it with:
+
+    docker exec app_9547a9e0_virtual_sensors tail -n 200 /data/logs/virtual_sensors.log

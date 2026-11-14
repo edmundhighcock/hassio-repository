@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 
 	"virtual_sensors/internal/haws"
 	"virtual_sensors/internal/host"
+	"virtual_sensors/internal/logfile"
 	"virtual_sensors/internal/modules"
 	_ "virtual_sensors/internal/modules/evcontrol"   // side-effect: registers "ev_control"
 	_ "virtual_sensors/internal/modules/example"     // side-effect: registers "example_passthrough"
@@ -152,6 +154,12 @@ func resolveMQTTCredentials(token string, opts addonOptions) (mqttpub.Credential
 type loopFn func(h *host.Host)
 
 func runLive() {
+	// 0.6.3: keep our own log history on disk (the HAOS journal is capped).
+	if lw, err := logfile.NewDefault(); err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: file logging disabled (%v); logging to stderr only\n", err)
+	} else {
+		log.SetOutput(io.MultiWriter(os.Stderr, lw))
+	}
 	optsPath := os.Getenv("VIRTUAL_SENSORS_OPTIONS")
 	if optsPath == "" {
 		optsPath = "/data/options.json"
