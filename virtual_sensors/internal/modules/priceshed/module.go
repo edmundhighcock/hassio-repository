@@ -32,7 +32,7 @@ const ButtonReplan = "replan_price_shed"
 
 const (
 	defaultSwitch   = "switch.tool_shed_lights"
-	defaultPrice    = "sensor.nordpool_kwh_se3_sek_3_06_0"
+	defaultPrice    = "nordpool_kwh_se3_sek_3_06_0" // host convention: no "sensor." prefix
 	defaultOffHours = 4
 
 	// Grace is how long after our own command switch state changes are
@@ -169,6 +169,9 @@ func (m *Module) Configure(raw []byte) error {
 	if o.Price != nil && *o.Price != "" {
 		m.priceEnt = *o.Price
 	}
+	// Host convention (host.moduleID): sensor inputs are named and delivered
+	// WITHOUT the "sensor." prefix. 0.6.9 kept it, so no price ever arrived.
+	m.priceEnt = strings.TrimPrefix(m.priceEnt, "sensor.")
 	return nil
 }
 

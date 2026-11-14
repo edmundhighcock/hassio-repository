@@ -525,7 +525,7 @@ func TestConfigure(t *testing.T) {
 	if err := m.Configure([]byte(`{"ps_switch":"switch.x_y","ps_off_hours":6,"hwc_price_entity":"sensor.p"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if m.offHours != 6 || m.loads[0].object != "price_shed_x_y" || m.priceEnt != "sensor.p" {
+	if m.offHours != 6 || m.loads[0].object != "price_shed_x_y" || m.priceEnt != "p" {
 		t.Fatalf("%+v", m)
 	}
 	m = New()
@@ -554,7 +554,7 @@ func TestConfigure(t *testing.T) {
 	for _, in := range m.Inputs() {
 		ids[in.EntityID] = true
 	}
-	if !ids["switch.tool_shed_lights"] || !ids["sensor.nordpool_kwh_se3_sek_3_06_0"] {
+	if !ids["switch.tool_shed_lights"] || !ids["nordpool_kwh_se3_sek_3_06_0"] {
 		t.Fatalf("%v", ids)
 	}
 }
@@ -579,4 +579,21 @@ func TestDSTDayTransitions(t *testing.T) {
 	r.wantCmds("switch.turn_off")
 	r.run(at(d, 0, 0, 0).Add(4*time.Hour + 10*time.Second))
 	r.wantCmds("switch.turn_off", "switch.turn_on")
+}
+
+// TestPriceInputUsesHostConvention: the host strips "sensor." from sensor
+// ids (host.moduleID); an input named with the prefix is never delivered.
+func TestPriceInputUsesHostConvention(t *testing.T) {
+	m := New()
+	if err := m.Configure([]byte(`{"hwc_price_entity":"sensor.nordpool_kwh_se3_sek_3_06_0"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range m.Inputs() {
+		if strings.HasPrefix(in.EntityID, "sensor.") {
+			t.Fatalf("input %q keeps the sensor. prefix; the host never delivers it", in.EntityID)
+		}
+	}
+	if New().priceEnt != "nordpool_kwh_se3_sek_3_06_0" {
+		t.Fatalf("default price entity %q", New().priceEnt)
+	}
 }

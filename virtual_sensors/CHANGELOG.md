@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.10
+
+- Fix: price_shed named its price input `sensor.nordpool_…`, but the host
+  delivers sensor inputs without the `sensor.` prefix, so no price ever
+  arrived and the module treated every hour as ON. The prefix is now
+  stripped (default and option), with a regression test.
+
 ## 0.6.9
 
 - New module `price_shed` (add it to `modules`): keeps a load ON except during
