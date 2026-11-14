@@ -165,6 +165,7 @@ func (m *Module) Outputs() []modules.OutputSpec {
 		core.ObjShadowWould:   {"Hot water controller shadow would", "", ""},
 		core.ObjAlert:         {"Hot water controller alert", "", ""},
 		core.ObjStrikes:       {"Hot water controller strikes", "", "measurement"},
+		core.ObjOffGate:       {"Hot water controller OFF gate", "", ""},
 	}
 	var out []modules.OutputSpec
 	for _, obj := range core.TelemetryObjects {

@@ -342,3 +342,27 @@ func TestReplanButton(t *testing.T) {
 		t.Fatalf("button did not replan: %v vs %v", w.ctl.lastPlanAt, before)
 	}
 }
+
+// 0.6.7: the OFF-gate output must be a registered OutputSpec (that is what
+// MQTT discovery is built from) AND reach the publisher through the host.
+func TestOffGateRegisteredAndPublished(t *testing.T) {
+	found := false
+	for _, o := range New().Outputs() {
+		if o.ObjectID == "hot_water_controller_off_gate" {
+			found = true
+			if o.Name != "Hot water controller OFF gate" || !o.HasAttributes || o.UniqueID == "" {
+				t.Fatalf("bad spec %+v", o)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("off_gate OutputSpec not registered")
+	}
+	w := newWorld(t, `{"modules":["hot_water","hot_water_control"]}`)
+	w.bootInputs("on", 0)
+	w.run(5*time.Minute, 500)
+	u, ok := w.pub.last["hot_water_controller_off_gate"]
+	if !ok || u.StateString == "" || u.AttributesJSON == "" {
+		t.Fatalf("off_gate never published through the host: %+v", u)
+	}
+}

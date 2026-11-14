@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.7
+
+- hot_water_control: new `sensor.hot_water_controller_off_gate` ("Hot water
+  controller OFF gate") says why the heater is or is not being switched OFF.
+  Observability only; no control change. Logs `hot_water_control: off_gate -> <value>` on change.
+
 ## 0.6.6
 
 - hot_water_control duration learner: a reheat cut by our own OFF is now a lower

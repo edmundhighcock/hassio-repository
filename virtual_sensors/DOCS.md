@@ -234,7 +234,7 @@ Published (MQTT discovery, prefix `hot_water_controller_`, never
 `hwc_`): `heartbeat` (Unix s, every 60 s only while healthy), `state`,
 `desired`, `verdict`, `on_hours_since_genuine_start`,
 `hours_since_reheat_end`, `moves_today`, `plan`, `shadow_would`, `alert`,
-`strikes`, and `plan_v2` (the v2 shadow plan, only while `greedy_v1` drives). PLAN's `saving_month` is not published until a saving
+`strikes`, `off_gate`, and `plan_v2` (the v2 shadow plan, only while `greedy_v1` drives). PLAN's `saving_month` is not published until a saving
 estimate is computed. State persists in
 `/data/hot_water_control-state.json`; a missing or corrupt file means
 every clock is unknown, so no OFF until a finished reheat is seen live or
@@ -319,6 +319,20 @@ cost against greedy_v1's estimated cost for the same energy, `off_periods`,
 `notes`). It never reaches the controller. With v2 selected the same
 attributes appear on `sensor.hot_water_controller_plan` (re-planned every
 minute) and the shadow sensor is not published.
+
+**OFF gate (0.6.7).** `sensor.hot_water_controller_off_gate` is why the
+controller is or is not switching the heater OFF. In IDLE_ON it is the first
+failing condition of the OFF rule: `plan_period` (OFF allowed, about to be
+commanded), `outside_plan_period` (the plan does not want OFF now),
+`no_valid_plan`, or a blocker (`not_live`, `select_not_auto`, `boost`,
+`period_abandoned`, `settling`, `strikes`, `hold`, `stale_<input>`,
+`recent_discontinuity`, `cover_not_on`, `battery`, `move_reserve`,
+`deliberate_gap`, `tank_limit`, `tank_clock_unknown`,
+`evening_no_reheat_today`, `probe_due`, `ev_guard_time`, `ev_moved`). In other
+states: `off` (IDLE_OFF, CMD_OFF, VERIFY_OFF), `degraded:<reason>`, `boot`,
+else the lowercased state name. Attributes: `blocked_since` (when the value
+began), `plan_off_now` (the plan has a permitted OFF period covering now),
+`evaluated_at`. Published on change, and at least every 15 min.
 
 **Learned durations (0.6.6).** `learned` holds `full_min`, `topup_min`,
 `n_full`, `n_topup`, `n_full_cut`, `full_lower_bound_min` and more. A reheat

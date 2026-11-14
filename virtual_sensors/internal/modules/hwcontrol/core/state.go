@@ -111,6 +111,10 @@ type Controller struct {
 	lastHeartbeat   time.Time
 	lastPub         map[string]string
 	lastSig         string
+	offGateVal      string
+	offGateSince    time.Time
+	offGatePlanOff  bool
+	offGateAt       time.Time
 	verdict         string
 	verdictAttrs    map[string]any
 	verdictAt       time.Time
@@ -281,6 +285,7 @@ func (c *Controller) Step(in Input) []Effect {
 			break
 		}
 	}
+	c.publishOffGate()
 	c.telemetry(tick)
 	out := c.effects
 	c.effects = nil
