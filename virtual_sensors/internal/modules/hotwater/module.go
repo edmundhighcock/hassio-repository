@@ -1008,7 +1008,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			off := *m.pendingOff
 			dur := off.TStart - m.onTime
 			out = append(out, modules.OutputUpdate{ObjectID: OutPowerObjectID, Time: unixTime(off.TStart), Value: 0})
-			closed := CycleClosed{OnTime: unixTime(m.onTime).UTC(), OffTime: unixTime(off.TStart).UTC(), Reason: "short", Replay: m.replay}
+			closed := CycleClosed{OnTime: unixTime(m.onTime).UTC(), OffTime: unixTime(off.TStart).UTC(), Reason: "short", Replay: m.replay, PhaseEnd: m.phaseEnd(off.TStart)}
 			if dur >= m.params.MinOnDurationS {
 				power := (abs(m.onMagnitude) + abs(off.Magnitude)) / 2.0
 				kwh := power * (dur / 3600.0) / 1000.0

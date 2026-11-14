@@ -291,3 +291,40 @@ func TestPlateauFallback(t *testing.T) {
 		t.Fatal("hw_plateau_rescue=false opened a cycle")
 	}
 }
+
+// 0.6.6: phaseEnd confirms a thermostat end from the per-phase drop.
+func TestPhaseEnd(t *testing.T) {
+	cases := []struct {
+		name   string
+		before [3]float64
+		after  *[3]float64
+		want   int
+	}{
+		{"both drop", [3]float64{8, 7.8, 0.2}, &[3]float64{0.7, 0.5, 0.2}, 1},
+		{"l1 only", [3]float64{8, 7.8, 0.2}, &[3]float64{0.7, 7.6, 0.2}, 2},
+		{"no reading after", [3]float64{8, 7.8, 0.2}, nil, 0},
+	}
+	for _, c := range cases {
+		r := newRig(t, `{}`, "open")
+		pushEq(r.m, 19990, c.before[0], c.before[1], c.before[2])
+		if c.after != nil {
+			pushEq(r.m, 20020, c.after[0], c.after[1], c.after[2])
+		}
+		if got := r.m.phaseEnd(20000); got != c.want {
+			t.Errorf("%s: %d want %d", c.name, got, c.want)
+		}
+	}
+	// a reading beyond the 60 s window does not count
+	r := newRig(t, `{}`, "open")
+	pushEq(r.m, 19990, 8, 7.8, 0.2)
+	pushEq(r.m, 20100, 0.7, 0.5, 0.2)
+	if got := r.m.phaseEnd(20000); got != 0 {
+		t.Errorf("late reading: %d", got)
+	}
+	// gate disabled: unknown
+	r = newRig(t, `{"hw_phase_gate":false}`, "open")
+	pushEq(r.m, 19990, 8, 7.8, 0.2)
+	if got := r.m.phaseEnd(20000); got != 0 {
+		t.Errorf("gate off: %d", got)
+	}
+}

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.6
+
+- hot_water_control duration learner: a reheat cut by our own OFF is now a lower
+  bound for the full-heat time. `Full` = max(estimate, longest cut full-type run),
+  clamped to the 6 h cap; cuts raise but never lower it and never count in
+  `n_full`. New plan attributes `learned.n_full_cut` and
+  `learned.full_lower_bound_min`.
+- Phase-confirmed thermostat end: `hot_water` reports whether L1 and L2 each
+  dropped >= 5 A within 60 s of a cycle's end; the reheat record gains
+  `satisfied` / `phase_seen`. An uncut reheat is a learning sample only if
+  satisfied or if no phase data existed (silent Equalizer = as before). Old
+  records load unchanged. Logs `hot_water_control: reheat logged 50m cut=false satisfied=true`.
+
 ## 0.6.5
 
 - Fix: 0.6.4 published the replan buttons but never subscribed to their

@@ -84,7 +84,7 @@ func (c *Controller) onCycleClosed(e CycleClosed) {
 	// A finished reheat: the tank clock (§4.1 rule 6).
 	c.P.LastFinishedReheatStart = cy.OnTime
 	c.P.LastFinishedReheatEnd = e.OffTime
-	c.logReheat(cy.OnTime, e.OffTime, e.Replay)
+	c.logReheat(cy.OnTime, e.OffTime, e.Replay, e.PhaseEnd)
 	c.logf("finished reheat %s - %s", cy.OnTime.Format(time.RFC3339), e.OffTime.Format(time.RFC3339))
 	if c.P.Boost.Active && c.P.Boost.ReheatSeenStart {
 		c.endBoost("reheat_finished")
@@ -96,7 +96,7 @@ func (c *Controller) onCycleClosed(e CycleClosed) {
 // reheat is "cut" if our own OFF command fell inside its last minutes: the
 // controller, not the thermostat, ended it. Replayed (warm-up) cycles are
 // logged too, without a kind, and duplicates are dropped.
-func (c *Controller) logReheat(on, off time.Time, replay bool) {
+func (c *Controller) logReheat(on, off time.Time, replay bool, phaseEnd int) {
 	for _, r := range c.P.Reheats {
 		if r.Start.Equal(on) {
 			return
@@ -108,6 +108,8 @@ func (c *Controller) logReheat(on, off time.Time, replay bool) {
 		!off.Before(lc.At.Add(-time.Minute)) && off.Before(lc.At.Add(4*time.Minute)) {
 		rec.Cut = true
 	}
+	rec.PhaseSeen = phaseEnd == 1 || phaseEnd == 2
+	rec.Satisfied = !rec.Cut && phaseEnd == 1
 	if !replay && c.plan != nil && c.plan.DefaultOff {
 		for _, w := range c.P.Windows {
 			if !on.Before(w.Start.Add(-2*time.Minute)) && on.Before(w.End) {
@@ -116,6 +118,7 @@ func (c *Controller) logReheat(on, off time.Time, replay bool) {
 		}
 	}
 	c.P.Reheats = append(c.P.Reheats, rec)
+	c.logf("reheat logged %dm cut=%v satisfied=%v", int(rec.Duration().Minutes()), rec.Cut, rec.Satisfied)
 	sort.SliceStable(c.P.Reheats, func(i, j int) bool { return c.P.Reheats[i].Start.Before(c.P.Reheats[j].Start) })
 	if n := len(c.P.Reheats); n > MaxReheatLog {
 		c.P.Reheats = append([]ReheatRec(nil), c.P.Reheats[n-MaxReheatLog:]...)
@@ -279,7 +282,7 @@ func (c *Controller) onSeed(s Seed) {
 		lastGenuine = cy
 		if !cy.Off.IsZero() && cy.Accepted {
 			lastFinished = cy
-			c.logReheat(cy.On, cy.Off, true)
+			c.logReheat(cy.On, cy.Off, true, 0)
 		}
 	}
 	if lastGenuine != nil && c.P.LastGenuineStart.IsZero() {

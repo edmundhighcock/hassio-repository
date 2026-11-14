@@ -320,6 +320,19 @@ cost against greedy_v1's estimated cost for the same energy, `off_periods`,
 attributes appear on `sensor.hot_water_controller_plan` (re-planned every
 minute) and the shadow sensor is not published.
 
+**Learned durations (0.6.6).** `learned` holds `full_min`, `topup_min`,
+`n_full`, `n_topup`, `n_full_cut`, `full_lower_bound_min` and more. A reheat
+ended by our own OFF is never a sample (`n_full` ignores it), but a cut
+full-type run lasting at least 30 min proves full heating takes at least that
+long: `full_lower_bound_min` is the longest such run in the 60-day window,
+`n_full_cut` their count, and `full_min` = max(normal estimate, lower bound),
+clamped to the 6 h cap. The normal estimate is the p85 of uncut samples (5 or
+more) or else the default; cuts can raise it, never lower it. An uncut reheat
+is a sample only if the Equalizer showed L1 and L2 each dropping by 5 A or
+more at its end (the heater's thermostat), or if there was no per-phase
+reading for it (then it counts as before). The reheat log line reads
+`reheat logged 50m cut=false satisfied=true`.
+
 **Safety rows.** The core still decides every OFF through `MayGoOff`; a v2
 plan only permits. Forced ON as before: tank clock (14 h), evening rule,
 boost, override, backstops (ON-time only), battery and detector faults,

@@ -44,6 +44,12 @@ type ReheatRec struct {
 	End   time.Time `json:"end"`
 	Cut   bool      `json:"cut,omitempty"`
 	Kind  string    `json:"kind,omitempty"` // window kind it started in, "" if none
+	// Satisfied (0.6.6): the end coincided with L1 and L2 each dropping by
+	// >= 5 A (the thermostat cut the heater) and the record is not Cut.
+	// PhaseSeen: per-phase evidence existed for the end. Both false (old
+	// records, silent Equalizer) = unknown, treated as before 0.6.6.
+	Satisfied bool `json:"satisfied,omitempty"`
+	PhaseSeen bool `json:"phase_seen,omitempty"`
 }
 
 // Duration is the on-time.

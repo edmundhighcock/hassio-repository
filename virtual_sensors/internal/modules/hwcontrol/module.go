@@ -807,7 +807,7 @@ func (m *Module) OnSignal(s any) {
 	case hotwater.CycleOpened:
 		m.step(core.CycleOpened{At: v.OnTime, OnTime: v.OnTime, Magnitude: v.Magnitude, Replay: v.Replay})
 	case hotwater.CycleClosed:
-		m.step(core.CycleClosed{At: v.OffTime, OnTime: v.OnTime, OffTime: v.OffTime, Accepted: v.Accepted, Replay: v.Replay})
+		m.step(core.CycleClosed{At: v.OffTime, OnTime: v.OnTime, OffTime: v.OffTime, Accepted: v.Accepted, Replay: v.Replay, PhaseEnd: v.PhaseEnd})
 		if m.v2 && !v.Replay && !m.lastPlanAt.IsZero() {
 			m.replan(m.now) // a reheat just finished: the window may end early
 		}

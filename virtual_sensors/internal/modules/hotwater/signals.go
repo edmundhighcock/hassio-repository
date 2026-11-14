@@ -59,6 +59,9 @@ type CycleClosed struct {
 	Kwh             float64
 	Reason          string // "dwell_confirmed" | "short" | "floor" | "timeout"
 	Replay          bool
+	// PhaseEnd (0.6.6): 0 unknown, 1 L1 and L2 each dropped >= 5 A within
+	// ~60 s of OffTime with the switch not known OFF, 2 data but no such drop.
+	PhaseEnd int
 }
 
 // SetSignalSink implements modules.SignalSource.

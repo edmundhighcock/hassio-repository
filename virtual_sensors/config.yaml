@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.6.5"
+version: "0.6.6"
 slug: "virtual_sensors"
 init: false
 startup: application

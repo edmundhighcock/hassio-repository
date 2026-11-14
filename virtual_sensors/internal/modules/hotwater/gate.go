@@ -299,6 +299,45 @@ func (m *Module) phaseCheck(now, tBefore, tAfter float64) (phaseVerdict, [3]floa
 	return pvReject, d, false
 }
 
+// phaseEndDropA is the per-phase drop that marks the heater leaving.
+const (
+	phaseEndDropA = 5.0
+	phaseEndWinS  = 60.0
+)
+
+// phaseEnd reports the Equalizer evidence for a heater end at tOff: 1 when
+// L1 and L2 each dropped by >= phaseEndDropA between the reading at tOff and
+// the last reading within phaseEndWinS after it (the Equalizer reports about
+// every 30 s), 2 when readings exist but show no such drop, 0 (unknown) when
+// the gate is off, the switch is known OFF, or there is no reading before or
+// after tOff. Only used to confirm a thermostat end, never to reject a cycle.
+func (m *Module) phaseEnd(tOff float64) int {
+	if !m.phaseGate {
+		return 0
+	}
+	if off, _ := m.switchKnownOffAt(tOff); off {
+		return 0
+	}
+	b, ok := m.phaseAt(tOff)
+	if !ok {
+		return 0
+	}
+	var a phaseSample
+	found := false
+	for _, s := range m.eq {
+		if s.T > tOff && s.T <= tOff+phaseEndWinS {
+			a, found = s, true
+		}
+	}
+	if !found {
+		return 0
+	}
+	if b.L1-a.L1 >= phaseEndDropA && b.L2-a.L2 >= phaseEndDropA {
+		return 1
+	}
+	return 2
+}
+
 // pendingOn is an ON step waiting for the Equalizer to confirm it.
 type pendingOnStep struct {
 	TStart, TEnd, Magnitude float64

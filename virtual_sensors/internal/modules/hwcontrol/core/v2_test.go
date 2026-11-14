@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -182,7 +183,7 @@ func TestReheatLogCutAndKind(t *testing.T) {
 	// The log is bounded.
 	for i := 0; i < MaxReheatLog+10; i++ {
 		s := t0.Add(time.Duration(10+i) * time.Hour)
-		r.c.logReheat(s, s.Add(time.Hour), true)
+		r.c.logReheat(s, s.Add(time.Hour), true, 0)
 	}
 	if len(r.c.P.Reheats) != MaxReheatLog {
 		t.Fatalf("log %d", len(r.c.P.Reheats))
@@ -316,4 +317,52 @@ func TestWindowStampNeedsStrictEvidence(t *testing.T) {
 	// SHADOW: the controller has no authority, nothing to observe.
 	r, w = stampRig(t, func(c *Config) { c.Live = false }, 10*time.Hour, 70*time.Minute)
 	check("shadow", r, w, 2*time.Hour+15*time.Minute)
+}
+
+// 0.6.6: the phase evidence on CycleClosed reaches the reheat record; a cut
+// record is never Satisfied; no evidence leaves both flags false.
+func TestReheatLogPhaseEnd(t *testing.T) {
+	r := newRig(t, liveCfg(), nil)
+	r.boot(true)
+	t0 := r.now
+	for i, pe := range []int{1, 2, 0} {
+		on := t0.Add(time.Duration(i) * 6 * time.Hour)
+		off := on.Add(100 * time.Minute)
+		r.step(CycleOpened{At: on, OnTime: on, Magnitude: 3000})
+		r.step(CycleClosed{At: off, OnTime: on, OffTime: off, Accepted: true, PhaseEnd: pe})
+	}
+	// A cut one with positive phase evidence: not satisfied.
+	on := t0.Add(18 * time.Hour)
+	r.c.P.LastCommand = LastCommand{Target: 0, At: on.Add(100 * time.Minute)}
+	r.step(CycleOpened{At: on, OnTime: on, Magnitude: 3000})
+	off := on.Add(100*time.Minute + 20*time.Second)
+	r.step(CycleClosed{At: off, OnTime: on, OffTime: off, Accepted: true, PhaseEnd: 1})
+	rs := r.c.P.Reheats
+	if len(rs) != 4 {
+		t.Fatalf("reheats %+v", rs)
+	}
+	want := []struct{ sat, seen, cut bool }{{true, true, false}, {false, true, false}, {false, false, false}, {false, true, true}}
+	for i, w := range want {
+		if rs[i].Satisfied != w.sat || rs[i].PhaseSeen != w.seen || rs[i].Cut != w.cut {
+			t.Errorf("rec %d: %+v want %+v", i, rs[i], w)
+		}
+	}
+}
+
+func TestReheatRecJSONCompat(t *testing.T) {
+	old := `{"start":"2026-11-10T10:00:00Z","end":"2026-11-10T11:00:00Z","kind":"full"}`
+	var r ReheatRec
+	if err := json.Unmarshal([]byte(old), &r); err != nil || r.Satisfied || r.PhaseSeen {
+		t.Fatalf("old record: %v %+v", err, r)
+	}
+	b, _ := json.Marshal(r)
+	if strings.Contains(string(b), "satisfied") || strings.Contains(string(b), "phase_seen") {
+		t.Fatalf("zero fields serialized: %s", b)
+	}
+	r.Satisfied, r.PhaseSeen = true, true
+	b, _ = json.Marshal(r)
+	var r2 ReheatRec
+	if err := json.Unmarshal(b, &r2); err != nil || !r2.Satisfied || !r2.PhaseSeen || !strings.Contains(string(b), `"satisfied":true`) {
+		t.Fatalf("round trip: %s %v %+v", b, err, r2)
+	}
 }

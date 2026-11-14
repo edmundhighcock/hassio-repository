@@ -118,6 +118,8 @@ type Learned struct {
 	Full, Topup           time.Duration // window lengths (full: p85 clamped 90 min..4 h)
 	FullP50, TopupP50     time.Duration // expected on-time, for cost estimates
 	NFull, NTopup         int
+	NFullCut              int           // cut full-type runs in the window (lower bounds, not in NFull)
+	FullLowerBound        time.Duration // longest cut full-type run in the window, 0 if none
 	FullDefault, TopDef   bool
 	FullP85Raw, TopupP50R time.Duration
 }
@@ -170,8 +172,16 @@ func isFullType(rs []core.ReheatRec, i int) bool {
 }
 
 // Learn builds the duration model from the reheat log: the on-time from the
-// heater's step on to its step off (the thermostat satisfied). Reheats cut
-// by our own OFF are excluded, they say nothing about the full time.
+// heater's step on to its step off (the thermostat satisfied).
+//
+// Uncut records are samples only if Satisfied (L1 and L2 dropped together at
+// the end) or no phase evidence existed (PhaseSeen false: old records, silent
+// Equalizer). Reheats cut by our own OFF are never samples (NFull ignores
+// them) but a cut full-type run (isFullType, duration >= fullDrawGap) is a
+// lower bound: full heating takes at least that long. The rule: Full =
+// max(estimate, longest cut full-type run in the window), clamped to FullCap,
+// where estimate is the clamped p85 of uncut samples if there are >=
+// minSamples, else the clamped default. Cuts can raise Full, never lower it.
 func Learn(now time.Time, rs []core.ReheatRec, cfg V2Config) Learned {
 	l := Learned{Full: cfg.FullDefault, Topup: cfg.TopupDefault, FullDefault: true, TopDef: true,
 		FullP50: 150 * time.Minute, TopupP50: 40 * time.Minute}
@@ -182,12 +192,26 @@ func Learn(now time.Time, rs []core.ReheatRec, cfg V2Config) Learned {
 	l.Full = clampD(l.Full, floor, FullCap)
 	l.Topup = clampD(l.Topup, TopupFloor, TopupCap)
 	var full, top []time.Duration
+	var lb time.Duration
+	nCut := 0
 	for i, r := range rs {
-		if r.Cut || now.Sub(r.End) > learnWindow || r.End.Before(r.Start) {
+		if now.Sub(r.End) > learnWindow || r.End.Before(r.Start) {
 			continue
 		}
 		if !cfg.LearnFrom.IsZero() && r.End.Before(cfg.LearnFrom) {
 			continue
+		}
+		if r.Cut {
+			if r.Duration() >= fullDrawGap && isFullType(rs, i) {
+				nCut++
+				if r.Duration() > lb {
+					lb = r.Duration()
+				}
+			}
+			continue
+		}
+		if r.PhaseSeen && !r.Satisfied {
+			continue // ended without the heater's two-phase drop: not the thermostat
 		}
 		if r.Duration() < MaintMax {
 			continue // thermostat maintenance: no statistic at all
@@ -202,11 +226,15 @@ func Learn(now time.Time, rs []core.ReheatRec, cfg V2Config) Learned {
 		}
 	}
 	l.NFull, l.NTopup = len(full), len(top)
+	l.NFullCut, l.FullLowerBound = nCut, lb
 	if len(full) >= minSamples {
 		l.FullP85Raw = percentile(full, 0.85)
 		l.Full = clampD(l.FullP85Raw, floor, FullCap)
 		l.FullP50 = percentile(full, 0.5)
 		l.FullDefault = false
+	}
+	if lb > l.Full {
+		l.Full = clampD(lb, floor, FullCap)
 	}
 	if len(top) >= minSamples {
 		l.TopupP50R = percentile(top, 0.5)
@@ -858,7 +886,7 @@ func extra(now time.Time, res V2Result, ws []core.PlanWindow, cfg V2Config, note
 		"windows": wins,
 		"learned": map[string]any{
 			"full_min": int(l.Full.Minutes()), "topup_min": int(l.Topup.Minutes()),
-			"n_full": l.NFull, "n_topup": l.NTopup, "full_default": l.FullDefault, "topup_default": l.TopDef,
+			"n_full": l.NFull, "n_full_cut": l.NFullCut, "full_lower_bound_min": int(l.FullLowerBound.Minutes()), "n_topup": l.NTopup, "full_default": l.FullDefault, "topup_default": l.TopDef,
 			"full_p50_min": int(l.FullP50.Minutes()), "topup_p50_min": int(l.TopupP50.Minutes()),
 		},
 		"expected_24h": map[string]any{

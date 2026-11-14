@@ -812,3 +812,99 @@ func TestLearnRealReheats20261113(t *testing.T) {
 		t.Fatalf("LearnFrom: %+v", l)
 	}
 }
+
+func cutRec(start time.Time, dur time.Duration) core.ReheatRec {
+	r := rec(start, dur)
+	r.Cut = true
+	return r
+}
+
+func daysAgo(now time.Time, d int) time.Time { return now.Add(-time.Duration(d) * 24 * time.Hour) }
+
+func learnNow() (time.Time, V2Config) {
+	cfg := DefaultV2Config()
+	cfg.LearnFrom = time.Time{}
+	return time.Date(2026, 11, 10, 12, 0, 0, 0, sto), cfg
+}
+
+func TestLearnCutOnlyRaisesFull(t *testing.T) {
+	now, cfg := learnNow()
+	rs := []core.ReheatRec{cutRec(daysAgo(now, 3), 200*time.Minute), cutRec(daysAgo(now, 2), 230*time.Minute)}
+	l := Learn(now, rs, cfg)
+	if l.Full != 230*time.Minute || l.NFull != 0 || l.NFullCut != 2 || l.FullLowerBound != 230*time.Minute {
+		t.Fatalf("%+v", l)
+	}
+	// capped
+	l = Learn(now, []core.ReheatRec{cutRec(daysAgo(now, 2), 500*time.Minute)}, cfg)
+	if l.Full != FullCap {
+		t.Fatalf("cap %v", l.Full)
+	}
+}
+
+func TestLearnCutNeverLowers(t *testing.T) {
+	now, cfg := learnNow()
+	// short cut (still full-type: >= fullDraw) below the default
+	l := Learn(now, []core.ReheatRec{cutRec(daysAgo(now, 2), 100*time.Minute)}, cfg)
+	if l.Full != 180*time.Minute || !l.FullDefault || l.NFullCut != 1 {
+		t.Fatalf("below default: %+v", l)
+	}
+	var rs []core.ReheatRec
+	for i := 0; i < 5; i++ {
+		rs = append(rs, rec(daysAgo(now, 10-i), 250*time.Minute))
+	}
+	rs = append(rs, cutRec(daysAgo(now, 1), 120*time.Minute))
+	l = Learn(now, rs, cfg)
+	if l.Full != 250*time.Minute || l.NFull != 5 {
+		t.Fatalf("below p85: %+v", l)
+	}
+}
+
+func TestLearnUncutAndCutMix(t *testing.T) {
+	now, cfg := learnNow()
+	var rs []core.ReheatRec
+	for i := 0; i < 5; i++ {
+		rs = append(rs, rec(daysAgo(now, 10-i), 200*time.Minute))
+	}
+	rs = append(rs, cutRec(daysAgo(now, 1), 260*time.Minute))
+	l := Learn(now, rs, cfg)
+	if l.Full != 260*time.Minute || l.NFull != 5 || l.NFullCut != 1 || l.FullDefault || l.FullP50 != 200*time.Minute {
+		t.Fatalf("%+v", l)
+	}
+	// a cut top-up-kind run is not a full lower bound
+	c := cutRec(daysAgo(now, 1), 300*time.Minute)
+	c.Kind = KindTopup
+	if l := Learn(now, []core.ReheatRec{c}, cfg); l.Full != 180*time.Minute || l.NFullCut != 0 {
+		t.Fatalf("topup cut: %+v", l)
+	}
+	// a cut run under fullDrawGap is not either
+	if l := Learn(now, []core.ReheatRec{cutRec(daysAgo(now, 1), 20*time.Minute)}, cfg); l.NFullCut != 0 || l.FullLowerBound != 0 {
+		t.Fatalf("short cut: %+v", l)
+	}
+}
+
+func TestLearnSatisfiedUnsatisfiedUnknown(t *testing.T) {
+	now, cfg := learnNow()
+	mk := func(sat, seen bool, i int) core.ReheatRec {
+		r := rec(daysAgo(now, 10-i), 200*time.Minute)
+		r.Satisfied, r.PhaseSeen = sat, seen
+		return r
+	}
+	var rs []core.ReheatRec
+	for i := 0; i < 5; i++ {
+		rs = append(rs, mk(false, true, i)) // phase data, no drop: not samples
+	}
+	if l := Learn(now, rs, cfg); l.NFull != 0 || !l.FullDefault {
+		t.Fatalf("unsatisfied counted: %+v", l)
+	}
+	rs = nil
+	for i := 0; i < 5; i++ {
+		rs = append(rs, mk(i%2 == 0, i%2 == 0, i)) // satisfied or unknown: samples
+	}
+	if l := Learn(now, rs, cfg); l.NFull != 5 {
+		t.Fatalf("satisfied/unknown: %+v", l)
+	}
+	rs = append(rs, mk(false, true, 6))
+	if l := Learn(now, rs, cfg); l.NFull != 5 {
+		t.Fatalf("one unsatisfied among: %+v", l)
+	}
+}

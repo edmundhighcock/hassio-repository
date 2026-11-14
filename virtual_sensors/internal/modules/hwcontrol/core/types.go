@@ -80,6 +80,9 @@ type CycleClosed struct {
 	OffTime  time.Time
 	Accepted bool
 	Replay   bool
+	// PhaseEnd (0.6.6): per-phase evidence at the end. 0 unknown, 1 L1 and
+	// L2 both dropped >= 5 A, 2 data seen but no such drop.
+	PhaseEnd int
 }
 
 // Tick is the host's 5 s tick.
