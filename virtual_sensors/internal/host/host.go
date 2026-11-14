@@ -269,6 +269,37 @@ func (h *Host) Tick() {
 	}
 }
 
+// Buttons returns every button the modules declare (modules.Buttoned).
+func (h *Host) Buttons() []modules.ButtonSpec {
+	var out []modules.ButtonSpec
+	for _, m := range h.mods {
+		if b, ok := m.(modules.Buttoned); ok {
+			out = append(out, b.Buttons()...)
+		}
+	}
+	return out
+}
+
+// Press delivers a button press to the module that declared objectID. An
+// unknown id is ignored. Must run on the loop goroutine like Tick.
+func (h *Host) Press(objectID string) {
+	now := h.Clock.Now()
+	for _, m := range h.mods {
+		b, ok := m.(modules.Buttoned)
+		if !ok {
+			continue
+		}
+		for _, spec := range b.Buttons() {
+			if spec.ObjectID == objectID {
+				h.publish(b.OnButton(objectID, now))
+				h.afterCall()
+				return
+			}
+		}
+	}
+	h.Logf("host: button press for unknown id %q ignored", objectID)
+}
+
 // LinkUp tells the host (and LinkAware modules) that HA is reachable
 // through ha: subscribed, and the current-state snapshot dispatched.
 func (h *Host) LinkUp(ha HA) {

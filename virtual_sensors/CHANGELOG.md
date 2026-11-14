@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.4
+
+- Replan buttons: three MQTT-discovery `button` entities, `button.replan_hot_water`,
+  `button.replan_ev` and `button.replan_heat_pump` (shown only for enabled modules).
+  A press replans that module at once and logs `<module>: replan requested (button)`.
+  Harmless with no prices or no session (the plan is just cleared, as a tick would).
+- hot_water_control: replayed price updates now seed the prices when no live price
+  has been seen, so a restart no longer leaves it with no plan (the boot logic gave
+  up after 3 min). The next tick replans. `ev_control` and `hp_control` already
+  consumed replayed prices and were unchanged.
+
 ## 0.6.3
 
 - Own log history: every log line now also goes to `/data/logs/virtual_sensors.log`

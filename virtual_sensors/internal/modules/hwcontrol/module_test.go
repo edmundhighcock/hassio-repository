@@ -291,3 +291,54 @@ func TestV2FullFloorAndLearnFromOptions(t *testing.T) {
 		t.Fatalf("range/format: %+v", m.v2cfg)
 	}
 }
+
+func testPrices() map[string]any {
+	var raw []map[string]any
+	base := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 96; i++ {
+		v := 0.4
+		if i >= 68 && i < 80 {
+			v = 3.0
+		}
+		s := base.Add(time.Duration(i) * 15 * time.Minute)
+		raw = append(raw, map[string]any{"start": s.Format(time.RFC3339), "end": s.Add(15 * time.Minute).Format(time.RFC3339), "value": v})
+	}
+	return map[string]any{"raw_today": raw, "tomorrow_valid": false}
+}
+
+// 0.6.4: a replayed price update seeds the prices (no live update yet), so
+// after a restart a plan exists without waiting for the next price change.
+func TestReplayedPriceSeedsPlan(t *testing.T) {
+	w := newWorld(t, `{"hwc_mode":"live"}`)
+	w.bootInputs("on", 99)
+	attrs := map[string]json.RawMessage{}
+	for k, v := range testPrices() {
+		b, _ := json.Marshal(v)
+		attrs[k] = b
+	}
+	w.clk.t = w.clk.t.Add(time.Millisecond)
+	w.h.HandleState(haws.StateEvent{EntityID: "sensor.nordpool_kwh_se3_sek_3_06_0", Time: w.clk.t.Add(-time.Hour), State: "0.4", Attrs: attrs}, true)
+	if len(w.ctl.prices) == 0 {
+		t.Fatal("replayed price update did not seed prices")
+	}
+	w.run(2*time.Minute, 500)
+	if got := w.pub.last["hot_water_controller_plan"].AttributesJSON; !strings.Contains(got, `"planner":"greedy_v1"`) {
+		t.Fatalf("no plan after replayed prices: %s", got)
+	}
+}
+
+// 0.6.4: the replan button replans now, and is harmless with no prices.
+func TestReplanButton(t *testing.T) {
+	w := newWorld(t, `{"hwc_mode":"live"}`)
+	w.bootInputs("on", 99)
+	w.run(time.Minute, 500)
+	w.h.Press(ButtonReplan) // no prices: must not panic
+	w.h.Press("replan_nothing")
+	w.state("sensor.nordpool_kwh_se3_sek_3_06_0", "0.4", testPrices())
+	before := w.ctl.lastPlanAt
+	w.clk.t = w.clk.t.Add(10 * time.Second)
+	w.h.Press(ButtonReplan)
+	if !w.ctl.lastPlanAt.After(before) {
+		t.Fatalf("button did not replan: %v vs %v", w.ctl.lastPlanAt, before)
+	}
+}

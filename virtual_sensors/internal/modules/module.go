@@ -197,6 +197,22 @@ type InitialStater interface {
 	InitialStates() []OutputUpdate
 }
 
+// ButtonSpec (0.6.4) describes one MQTT-discovery `button` entity a module
+// publishes; its entity id is `button.<ObjectID>`.
+type ButtonSpec struct {
+	ObjectID string
+	UniqueID string
+	Name     string
+}
+
+// Buttoned is optional: a module with buttons. The host calls OnButton on
+// its loop goroutine when one is pressed, publishes the returned outputs
+// and drains effects as after any other call.
+type Buttoned interface {
+	Buttons() []ButtonSpec
+	OnButton(objectID string, now time.Time) []OutputUpdate
+}
+
 // Module is the interface every virtual-sensor module implements.
 type Module interface {
 	// Name is the registry key - must match what's registered with Register.

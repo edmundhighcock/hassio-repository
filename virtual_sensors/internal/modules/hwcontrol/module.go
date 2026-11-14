@@ -24,6 +24,9 @@ import (
 // Name is the module's registry key.
 const Name = "hot_water_control"
 
+// ButtonReplan is the object id of the "Replan hot water" button.
+const ButtonReplan = "replan_hot_water"
+
 func init() {
 	modules.Register(Name, func() modules.Module { return New() })
 }
@@ -67,6 +70,7 @@ type Module struct {
 	started bool
 
 	prices     []planner.Price
+	pricesLive bool // a non-replay price update has been seen; replayed ones no longer seed
 	lastPlanAt time.Time
 
 	lastShadowSig string
@@ -573,9 +577,18 @@ func (m *Module) drainOuts() []modules.OutputUpdate {
 // OnStateUpdate implements modules.Module.
 func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	if u.EntityID == m.ent.Price {
-		if !u.Replay && len(u.Attrs) > 0 {
-			m.prices = planner.ParseNordpool(u.Attrs, u.Time, m.cfg.Loc)
-			m.replan(u.Time)
+		if len(u.Attrs) > 0 {
+			if !u.Replay {
+				m.pricesLive = true
+				m.prices = planner.ParseNordpool(u.Attrs, u.Time, m.cfg.Loc)
+				m.replan(u.Time)
+			} else if !m.pricesLive {
+				// 0.6.4: seed from the warm-up replay (the latest point wins;
+				// history is time-ordered) so a restart has prices at once.
+				// No replan here: replay time is the past; OnTick replans.
+				m.prices = planner.ParseNordpool(u.Attrs, u.Time, m.cfg.Loc)
+				m.lastPlanAt = time.Time{}
+			}
 		}
 		return m.drainOuts()
 	}
@@ -731,6 +744,25 @@ func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
 		m.replan(now)
 	}
 	m.step(core.Tick{At: now})
+	return m.drainOuts()
+}
+
+// Buttons implements modules.Buttoned.
+func (m *Module) Buttons() []modules.ButtonSpec {
+	return []modules.ButtonSpec{{ObjectID: ButtonReplan, UniqueID: "virtual_sensors_" + ButtonReplan, Name: "Replan hot water"}}
+}
+
+// OnButton implements modules.Buttoned: replan immediately. With no prices
+// (or test-moves-only) replan hands the core a nil plan, as OnTick would.
+func (m *Module) OnButton(objectID string, now time.Time) []modules.OutputUpdate {
+	if objectID != ButtonReplan {
+		return nil
+	}
+	log.Printf("%s: replan requested (button)", Name)
+	if now.After(m.now) {
+		m.now = now
+	}
+	m.replan(now)
 	return m.drainOuts()
 }
 

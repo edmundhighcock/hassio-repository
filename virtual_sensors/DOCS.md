@@ -658,6 +658,18 @@ add-on start AND whenever `homeassistant/status` reports `online` (an HA
 restart, or an MQTT integration reload with "clean start" that would
 otherwise have wiped the retained discovery configs).
 
+### Replan buttons (0.6.4)
+
+Each planner module publishes one `button` entity (discovery topic
+`homeassistant/button/virtual_sensors/<object_id>/config`, command topic
+`virtual_sensors/<object_id>/press`, payload `PRESS`, shared availability):
+`button.replan_hot_water` (hot_water_control), `button.replan_ev`
+(ev_control), `button.replan_heat_pump` (hp_control). Pressing one calls that
+module's replan immediately instead of waiting for the 1/15 min timer and logs
+`hot_water_control: replan requested (button)` (likewise `ev_control`,
+`hp_control`). No helper YAML is needed. A press with no prices, no session or
+a disabled module is harmless (a disabled module has no button).
+
 ### MQTT credentials
 
 Resolved from the Supervisor's services API (`GET

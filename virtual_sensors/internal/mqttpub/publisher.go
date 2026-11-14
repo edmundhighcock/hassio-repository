@@ -48,6 +48,8 @@ type Publisher struct {
 	client     mqtt.Client
 	outputs    []modules.OutputSpec
 	outputByID map[string]modules.OutputSpec
+	buttons    []modules.ButtonSpec
+	onPress    func(objectID string)
 }
 
 // perEntityAvailabilityTopic is the retained online/offline topic for one
@@ -70,7 +72,11 @@ func attributesTopic(objectID string) string {
 // homeassistant/status to re-publish discovery whenever HA's MQTT
 // integration reports itself online (e.g. after an HA restart that
 // out-raced this add-on, or wiped retained discovery with "clean start").
-func Connect(creds Credentials, outputs []modules.OutputSpec) (*Publisher, error) {
+//
+// buttons (0.6.4) are published as MQTT `button` entities; a press calls
+// onPress(objectID) from the MQTT client's goroutine, so it must only
+// enqueue work (main.go hands it to the host loop). Both may be nil/empty.
+func Connect(creds Credentials, outputs []modules.OutputSpec, buttons []modules.ButtonSpec, onPress func(objectID string)) (*Publisher, error) {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(fmt.Sprintf("tcp://%s:%d", creds.Host, creds.Port))
 	opts.SetClientID("virtual_sensors")
@@ -87,7 +93,7 @@ func Connect(creds Credentials, outputs []modules.OutputSpec) (*Publisher, error
 	for _, o := range outputs {
 		outputByID[o.ObjectID] = o
 	}
-	p := &Publisher{outputs: outputs, outputByID: outputByID}
+	p := &Publisher{outputs: outputs, outputByID: outputByID, buttons: buttons, onPress: onPress}
 	opts.OnConnect = func(c mqtt.Client) {
 		log.Printf("mqttpub: connected to %s:%d (credentials from %s)", creds.Host, creds.Port, creds.Source)
 		p.client = c
@@ -110,6 +116,14 @@ func Connect(creds Credentials, outputs []modules.OutputSpec) (*Publisher, error
 	}
 	p.client = client
 	return p, nil
+}
+
+// handlePress runs on the MQTT client goroutine for one button command.
+func (p *Publisher) handlePress(objectID string, msg mqtt.Message) {
+	if string(msg.Payload()) != pressPayload || p.onPress == nil {
+		return
+	}
+	p.onPress(objectID)
 }
 
 func (p *Publisher) onHAStatus(_ mqtt.Client, msg mqtt.Message) {
@@ -138,6 +152,28 @@ type discoveryConfig struct {
 	// is true - see that field's doc comment.
 	JSONAttributesTopic string         `json:"json_attributes_topic,omitempty"`
 	Device              map[string]any `json:"device"`
+}
+
+const pressPayload = "PRESS"
+
+// commandTopic is where Home Assistant publishes a button's press.
+func commandTopic(objectID string) string {
+	return fmt.Sprintf("%s/%s/press", nodeID, objectID)
+}
+
+func buttonDiscoveryTopic(objectID string) string {
+	return fmt.Sprintf("%s/button/%s/%s/config", discoveryPrefix, nodeID, objectID)
+}
+
+type buttonConfig struct {
+	UniqueID          string         `json:"unique_id"`
+	ObjectID          string         `json:"object_id"`
+	DefaultEntityID   string         `json:"default_entity_id"`
+	Name              string         `json:"name"`
+	CommandTopic      string         `json:"command_topic"`
+	PayloadPress      string         `json:"payload_press"`
+	AvailabilityTopic string         `json:"availability_topic"`
+	Device            map[string]any `json:"device"`
 }
 
 func stateTopic(objectID string) string {
@@ -179,6 +215,17 @@ func (p *Publisher) publishDiscovery() error {
 		}
 		if tok := p.client.Publish(discoveryTopic(o.ObjectID), 1, true, b); tok.Wait() && tok.Error() != nil {
 			return fmt.Errorf("publish discovery for %s: %w", o.ObjectID, tok.Error())
+		}
+	}
+	for _, b := range p.buttons {
+		cfg := buttonConfig{UniqueID: b.UniqueID, ObjectID: b.ObjectID, DefaultEntityID: "button." + b.ObjectID, Name: b.Name,
+			CommandTopic: commandTopic(b.ObjectID), PayloadPress: pressPayload, AvailabilityTopic: availabilityTopic, Device: Device}
+		bs, err := json.Marshal(cfg)
+		if err != nil {
+			return err
+		}
+		if tok := p.client.Publish(buttonDiscoveryTopic(b.ObjectID), 1, true, bs); tok.Wait() && tok.Error() != nil {
+			return fmt.Errorf("publish discovery for button %s: %w", b.ObjectID, tok.Error())
 		}
 	}
 	return nil

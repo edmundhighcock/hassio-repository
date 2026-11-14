@@ -201,8 +201,22 @@ func runLive() {
 	}
 
 	var outputs []modules.OutputSpec
+	var buttons []modules.ButtonSpec
 	for _, m := range active {
 		outputs = append(outputs, m.Outputs()...)
+		if b, ok := m.(modules.Buttoned); ok {
+			buttons = append(buttons, b.Buttons()...)
+		}
+	}
+	// Button presses arrive on the MQTT client goroutine, possibly before
+	// the host exists; they queue here and are moved onto the loop below.
+	presses := make(chan string, 16)
+	onPress := func(id string) {
+		select {
+		case presses <- id:
+		default:
+			log.Printf("mqttpub: button press %q dropped (queue full)", id)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -215,7 +229,7 @@ func runLive() {
 	for pub == nil {
 		creds, err := resolveMQTTCredentials(token, opts)
 		if err == nil {
-			pub, err = mqttpub.Connect(creds, outputs)
+			pub, err = mqttpub.Connect(creds, outputs, buttons, onPress)
 		}
 		if err != nil {
 			log.Printf("ERROR: MQTT not available yet: %v - retrying in %s", err, backoff)
@@ -259,6 +273,19 @@ func runLive() {
 				return
 			case <-t.C:
 				if !enqueue(func(h *host.Host) { h.Tick() }) {
+					return
+				}
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case id := <-presses:
+				if !enqueue(func(h *host.Host) { h.Press(id) }) {
 					return
 				}
 			}

@@ -17,6 +17,9 @@ import (
 // Name is the module's registry key.
 const Name = "hp_control"
 
+// ButtonReplan is the object id of the "Replan heat pump" button.
+const ButtonReplan = "replan_heat_pump"
+
 // Output object ids (sensor.<id>).
 const (
 	ObjState    = "hp_controller_state"
@@ -826,6 +829,25 @@ func (m *Module) resolve(now time.Time) {
 		i++
 	}
 	m.errs = m.errs[i:]
+}
+
+// Buttons implements modules.Buttoned.
+func (m *Module) Buttons() []modules.ButtonSpec {
+	return []modules.ButtonSpec{{ObjectID: ButtonReplan, UniqueID: "virtual_sensors_" + ButtonReplan, Name: "Replan heat pump"}}
+}
+
+// OnButton implements modules.Buttoned: replan now. Without comfort/outdoor
+// readings or prices replan just clears the plan, so a press is harmless.
+func (m *Module) OnButton(objectID string, now time.Time) []modules.OutputUpdate {
+	if objectID != ButtonReplan {
+		return nil
+	}
+	log.Printf("%s: replan requested (button)", Name)
+	if now.After(m.now) {
+		m.now = now
+	}
+	m.replan(now)
+	return m.publishAll(now, true)
 }
 
 // OnTick implements modules.Ticker.
