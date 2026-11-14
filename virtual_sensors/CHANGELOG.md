@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5
+
+- Fix: 0.6.4 published the replan buttons but never subscribed to their
+  command topics, so presses did nothing. They are now subscribed on every
+  MQTT (re)connect.
+
 ## 0.6.4
 
 - Replan buttons: three MQTT-discovery `button` entities, `button.replan_hot_water`,

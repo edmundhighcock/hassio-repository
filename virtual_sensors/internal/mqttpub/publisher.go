@@ -103,6 +103,14 @@ func Connect(creds Credentials, outputs []modules.OutputSpec, buttons []modules.
 		if tok := c.Subscribe("homeassistant/status", 1, p.onHAStatus); tok.Wait() && tok.Error() != nil {
 			log.Printf("mqttpub: ERROR subscribing to homeassistant/status: %v", tok.Error())
 		}
+		// Button command topics: subscribed on every (re)connect, since a
+		// clean session drops subscriptions with the connection.
+		for _, b := range p.buttons {
+			id := b.ObjectID
+			if tok := c.Subscribe(commandTopic(id), 1, func(_ mqtt.Client, msg mqtt.Message) { p.handlePress(id, msg) }); tok.Wait() && tok.Error() != nil {
+				log.Printf("mqttpub: ERROR subscribing to %s: %v", commandTopic(id), tok.Error())
+			}
+		}
 	}
 	opts.OnConnectionLost = func(_ mqtt.Client, err error) {
 		log.Printf("mqttpub: ERROR connection to broker lost: %v - paho will keep retrying", err)
