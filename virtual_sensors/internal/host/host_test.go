@@ -15,12 +15,16 @@ type fakeClock struct{ t time.Time }
 func (c *fakeClock) Now() time.Time { return c.t }
 
 type fakeHA struct {
-	calls  []string
-	nextID int
-	fail   bool
+	calls   []string
+	nextID  int
+	fail    bool
+	datas   []map[string]any
+	targets []map[string]any
 }
 
 func (f *fakeHA) CallService(domain, service string, data, target map[string]any) (int, error) {
+	f.datas = append(f.datas, data)
+	f.targets = append(f.targets, target)
 	f.calls = append(f.calls, domain+"."+service)
 	f.nextID++
 	if f.fail {
@@ -212,5 +216,29 @@ func TestReturnResponsePassthrough(t *testing.T) {
 	h.HandleResult(haws.Result{ID: 1, Success: true, Response: []byte(`{"weather.x":{"forecast":[]}}`)})
 	if len(a.results) != 1 || string(a.results[0].Response) != `{"weather.x":{"forecast":[]}}` {
 		t.Fatalf("%+v", a.results)
+	}
+}
+
+// 0.6.14: logbook.log must carry entity_id as a string in service data (not
+// in target, where HA makes it a list and rejects it). Covers every
+// notifying controller's logbook entity.
+func TestLogbookEntityIDIsStringInData(t *testing.T) {
+	for _, ent := range []string{"sensor.ev_last_command", "sensor.hot_water_controller_alert", "sensor.hp_controller_state"} {
+		a := &actor{}
+		h := New([]modules.Module{a}, &fakePub{}, &fakeClock{t: time.Unix(1000, 0)}, "")
+		ha := &fakeHA{}
+		h.LinkUp(ha)
+		a.effects = []modules.Effect{{Kind: modules.EffectCallService, Domain: "logbook", Service: "log",
+			Data: map[string]any{"name": "n", "message": "m", "entity_id": ent}, CorrID: 1}}
+		h.Tick()
+		if len(ha.datas) != 1 {
+			t.Fatalf("%s: calls %d", ent, len(ha.datas))
+		}
+		if v, ok := ha.datas[0]["entity_id"].(string); !ok || v != ent {
+			t.Fatalf("%s: data entity_id %#v", ent, ha.datas[0]["entity_id"])
+		}
+		if ha.targets[0] != nil {
+			t.Fatalf("%s: unexpected target %v", ent, ha.targets[0])
+		}
 	}
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.14
+
+- Fix: controller alert Logbook entries (added in 0.6.12) failed with
+  `invalid_format: value should be a string at 'entity_id'`. The host sent
+  `entity_id` of every service call as a call target, which HA turns into a
+  list; `logbook.log` wants it as a string in the service data. For
+  `logbook` calls the host now keeps `entity_id` in the data. Affects the EV,
+  hot-water and heat-pump controllers alike (shared host path). Phone pushes
+  were unaffected. New test covers all three logbook entities.
+
 ## 0.6.13
 
 - ev_control: the charger status `completed` now means the car is full. The

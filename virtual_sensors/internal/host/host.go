@@ -383,7 +383,10 @@ func (h *Host) execute(m modules.Module, a modules.Actor, e modules.Effect) {
 		var target map[string]any
 		data := map[string]any{}
 		for k, v := range e.Data {
-			if k == "entity_id" {
+			// logbook.log takes entity_id as a plain string service-data
+			// field; as a target, HA's WS layer turns it into a list and
+			// rejects it ("value should be a string at 'entity_id'").
+			if k == "entity_id" && e.Domain != "logbook" {
 				target = map[string]any{"entity_id": v}
 				continue
 			}
