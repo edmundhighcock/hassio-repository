@@ -210,8 +210,10 @@ func (m *Module) notifyNow(kind, title, text string) {
 	m.x.effects = append(m.x.effects, modules.Effect{Kind: modules.EffectCallService, Domain: dom, Service: svc,
 		Data: map[string]any{"title": title, "message": text}, CorrID: corrNotify + m.x.notifyC})
 	m.x.notifyC++
-	m.x.effects = append(m.x.effects, modules.Effect{Kind: modules.EffectCallService, Domain: "persistent_notification", Service: "create",
-		Data: map[string]any{"title": title, "message": text, "notification_id": "ev_controller_" + kind}, CorrID: corrNotify + m.x.notifyC})
+	// 0.6.12: the second channel is a Logbook entry, not a persistent
+	// notification (those show to every HA user; Edmund's choice).
+	m.x.effects = append(m.x.effects, modules.Effect{Kind: modules.EffectCallService, Domain: "logbook", Service: "log",
+		Data: map[string]any{"name": title, "message": text, "entity_id": "sensor.ev_last_command"}, CorrID: corrNotify + m.x.notifyC, Tag: "ev_controller_" + kind})
 }
 
 // phaseLimits are the guard's per-phase ceilings for the circuit: the

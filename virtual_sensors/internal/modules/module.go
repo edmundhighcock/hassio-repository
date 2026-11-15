@@ -92,6 +92,8 @@ type Effect struct {
 	// services such as weather.get_forecasts); it arrives in
 	// CommandResult.Response.
 	ReturnResponse bool
+	// Tag labels the effect for logs and tests; it is never sent to HA.
+	Tag string
 }
 
 // EffectKind enumerates Effect kinds.

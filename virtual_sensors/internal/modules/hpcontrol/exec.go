@@ -594,9 +594,11 @@ func (m *Module) notify(now time.Time, code, title, text string) {
 	e.effects = append(e.effects, modules.Effect{Kind: modules.EffectCallService, Domain: dom, Service: svc,
 		Data: map[string]any{"title": title, "message": text}, CorrID: notifyCorr + e.nextCorr})
 	e.nextCorr++
-	e.effects = append(e.effects, modules.Effect{Kind: modules.EffectCallService, Domain: "persistent_notification",
-		Service: "create", Data: map[string]any{"title": title, "message": text, "notification_id": "hp_controller_" + code},
-		CorrID: notifyCorr + e.nextCorr})
+	// 0.6.12: Logbook entry instead of a persistent notification (those show
+	// to every HA user; Edmund's choice).
+	e.effects = append(e.effects, modules.Effect{Kind: modules.EffectCallService, Domain: "logbook",
+		Service: "log", Data: map[string]any{"name": title, "message": text, "entity_id": "sensor.hp_controller_state"},
+		CorrID: notifyCorr + e.nextCorr, Tag: "hp_controller_" + code})
 }
 
 // ---- forecast ----

@@ -169,7 +169,7 @@ func TestLiveCommandsCoverAndNotifiesBothChannels(t *testing.T) {
 		if c.domain == "notify" && c.service == "mobile_app_edmund15max" {
 			phone = true
 		}
-		if c.domain == "persistent_notification" && c.service == "create" {
+		if c.domain == "logbook" && c.service == "log" {
 			persistent = true
 		}
 	}

@@ -176,7 +176,7 @@ func (l *loop) effects() {
 		if e.Kind != modules.EffectCallService {
 			continue
 		}
-		if e.Domain == "notify" || e.Domain == "persistent_notification" {
+		if e.Domain == "notify" || e.Domain == "logbook" {
 			if e.Domain == "notify" {
 				l.notes = append(l.notes, fmt.Sprint(e.Data["message"]))
 			}

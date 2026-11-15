@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.12
+
+- Controller alerts (hot water, heat pump, EV) no longer create persistent
+  notifications, which every Home Assistant user sees. The second channel is
+  now a Logbook entry on the controller's own sensor
+  (`sensor.hot_water_controller_alert`, `sensor.hp_controller_state`,
+  `sensor.ev_last_command`); the phone push is unchanged.
+- `modules.Effect` gains `Tag`, a label for logs and tests that is never sent
+  to Home Assistant.
+
 ## 0.6.11
 
 - hot_water_control: overload pause. The immersion heater draws ~7.3 A on both

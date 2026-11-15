@@ -71,7 +71,7 @@ func (e *env) drain() {
 			return
 		}
 		for _, f := range effs {
-			if f.Domain == "notify" || f.Domain == "persistent_notification" {
+			if f.Domain == "notify" || f.Domain == "logbook" {
 				e.notes = append(e.notes, f)
 				e.m.OnCommandResult(modules.CommandResult{CorrID: f.CorrID, OK: true, At: e.now})
 				continue

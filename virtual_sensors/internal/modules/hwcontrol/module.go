@@ -582,16 +582,17 @@ func (m *Module) apply(effs []core.Effect) {
 	}
 }
 
-// notify sends an alert to the phone and as a persistent notification
-// (PLAN §2.5: a second channel). Their results are not fed to the core.
+// notify sends an alert to the phone and, as the second channel (PLAN §2.5),
+// a Logbook entry on the alert sensor (0.6.12: no longer a persistent
+// notification, which every HA user sees). Results are not fed to the core.
 func (m *Module) notify(e core.Effect) {
 	dom, svc, _ := strings.Cut(m.ent.NotifyService, ".")
 	m.notifyC++
 	m.effects = append(m.effects, modules.Effect{Kind: modules.EffectCallService, Domain: dom, Service: svc,
 		Data: map[string]any{"title": e.Title, "message": e.Text}, CorrID: 1<<40 + m.notifyC})
 	m.notifyC++
-	m.effects = append(m.effects, modules.Effect{Kind: modules.EffectCallService, Domain: "persistent_notification", Service: "create",
-		Data: map[string]any{"title": e.Title, "message": e.Text, "notification_id": "hot_water_controller_" + strings.ToLower(e.Code)}, CorrID: 1<<40 + m.notifyC})
+	m.effects = append(m.effects, modules.Effect{Kind: modules.EffectCallService, Domain: "logbook", Service: "log",
+		Data: map[string]any{"name": e.Title, "message": e.Text, "entity_id": "sensor.hot_water_controller_alert"}, CorrID: 1<<40 + m.notifyC, Tag: "hot_water_controller_" + strings.ToLower(e.Code)})
 }
 
 func (m *Module) drainOuts() []modules.OutputUpdate {

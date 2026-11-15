@@ -164,7 +164,7 @@ func (r *rig) devCalls(mark int) []modules.Effect {
 func (r *rig) notes(mark int, code string) int {
 	n := 0
 	for _, e := range r.all[mark:] {
-		if e.Domain == "persistent_notification" && e.Data["notification_id"] == "hp_controller_"+code {
+		if e.Domain == "logbook" && e.Tag == "hp_controller_"+code {
 			n++
 		}
 	}
@@ -174,7 +174,7 @@ func (r *rig) notes(mark int, code string) int {
 func (r *rig) anyNotes(mark int) int {
 	n := 0
 	for _, e := range r.all[mark:] {
-		if e.Domain == "persistent_notification" || e.Domain == "notify" {
+		if e.Domain == "logbook" || e.Domain == "notify" {
 			n++
 		}
 	}
