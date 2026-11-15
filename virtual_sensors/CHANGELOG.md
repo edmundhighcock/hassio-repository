@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.11
+
+- hot_water_control: overload pause. The immersion heater draws ~7.3 A on both
+  L1 and L2; a kettle on L1 during a reheat pushed the 20 A main fuse over
+  (2026-11-15 10:55, L1 20.1 A). When `max(L1, L2)` from `sensor.equalizer_current`
+  is above `hwc_overload_amps` (default 19.8) on two consecutive fresh samples
+  at least 30 s apart, while the heater is drawing, the controller switches the
+  heater OFF as `HOLD_OFF(overload)` (log `overload pause: L1=..A L2=..A -> OFF`).
+  The cover is moved only by hwcontrol's own state machine, with the usual move
+  caps, move reserve, strikes and electrical verification; a pause the reserve
+  forbids is logged and not done. Resume when `max(L1, L2) + 7.4 <= 19.8` on
+  fresh samples for 60 s, after at least 3 min; or after 20 min regardless. At
+  most one pause per 30 min. On resume: an active Boost continues; a plan OFF
+  period still covering now keeps it OFF; otherwise ON is commanded. Stale
+  (>90 s) or offline Equalizer data never triggers. An overload pause may
+  interrupt a Boost; it never interrupts Override On/Off (Override Off is
+  already off). A reheat cut by a pause does not stamp the tank clock.
+- New `sensor.hot_water_overload` (state `off`/`paused`; attributes
+  `last_pause_at`, `phase`, `amps`, `resumes_at`, ...); `off_gate` reads
+  `overload_pause` while paused. Options `hwc_overload_enabled` (default true),
+  `hwc_overload_amps` (default 19.8, 10..20), both optional. The Equalizer
+  inputs are declared without the `sensor.` prefix (host convention) and use
+  the existing `ev_equalizer_entity` / `ev_equalizer_online_entity` options.
+
 ## 0.6.10
 
 - Fix: price_shed named its price input `sensor.nordpool_…`, but the host

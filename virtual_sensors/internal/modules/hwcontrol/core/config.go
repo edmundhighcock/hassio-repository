@@ -106,6 +106,17 @@ type Config struct {
 	// clock, on strict evidence. Default false.
 	WindowStamp bool
 
+	// Overload pause (0.6.11, overload.go).
+	OverloadEnabled       bool          // default true
+	OverloadAmps          float64       // 19.8 A: a heater phase above this triggers
+	OverloadSustain       time.Duration // 30 s over, on two consecutive fresh samples
+	OverloadFresh         time.Duration // 90 s: older Equalizer data never triggers
+	OverloadResumeMargin  float64       // 7.4 A: the heater's own draw on a phase
+	OverloadResumeSustain time.Duration // 60 s of room before resuming
+	OverloadMinHold       time.Duration // 3 min
+	OverloadMaxPause      time.Duration // 20 min
+	OverloadMinGap        time.Duration // at most one pause per 30 min
+
 	// Version is published with the heartbeat.
 	Version string
 }
@@ -179,6 +190,10 @@ func Defaults() Config {
 		MedianWindow:    20 * time.Second,
 		BurstWindow:     10 * time.Second,
 
+		OverloadEnabled: true, OverloadAmps: 19.8, OverloadSustain: 30 * time.Second,
+		OverloadFresh: 90 * time.Second, OverloadResumeMargin: 7.4, OverloadResumeSustain: 60 * time.Second,
+		OverloadMinHold: 3 * time.Minute, OverloadMaxPause: 20 * time.Minute, OverloadMinGap: 30 * time.Minute,
+
 		ShadowSummaryHour: 9,
 		TestOffDuration:   10 * time.Minute,
 		Version:           "0.2.0",
@@ -219,6 +234,7 @@ func (c *Config) Clamp() []string {
 	fix(c.BatteryAlert < 0 || c.BatteryAlert > 100, "hwc_battery_alert_pct", func() { c.BatteryAlert = d.BatteryAlert })
 	fix(c.Heartbeat < 15*time.Second || c.Heartbeat > 300*time.Second, "hwc_heartbeat_s", func() { c.Heartbeat = d.Heartbeat })
 	fix(c.TestOffDuration < 2*time.Minute || c.TestOffDuration > time.Hour, "hwc_test_off_min", func() { c.TestOffDuration = d.TestOffDuration })
+	fix(c.OverloadAmps < 10 || c.OverloadAmps > 20, "hwc_overload_amps", func() { c.OverloadAmps = d.OverloadAmps })
 	return msgs
 }
 

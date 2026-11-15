@@ -234,7 +234,7 @@ Published (MQTT discovery, prefix `hot_water_controller_`, never
 `hwc_`): `heartbeat` (Unix s, every 60 s only while healthy), `state`,
 `desired`, `verdict`, `on_hours_since_genuine_start`,
 `hours_since_reheat_end`, `moves_today`, `plan`, `shadow_would`, `alert`,
-`strikes`, `off_gate`, and `plan_v2` (the v2 shadow plan, only while `greedy_v1` drives). PLAN's `saving_month` is not published until a saving
+`strikes`, `off_gate`, `hot_water_overload` (unprefixed, 0.6.11) and `plan_v2` (the v2 shadow plan, only while `greedy_v1` drives). PLAN's `saving_month` is not published until a saving
 estimate is computed. State persists in
 `/data/hot_water_control-state.json`; a missing or corrupt file means
 every clock is unknown, so no OFF until a finished reheat is seen live or
@@ -253,6 +253,44 @@ planner (no planned OFF), so only test moves switch OFF.
 
 Interpretations taken where PLAN is silent or inconsistent are listed in
 the 0.2.0 CHANGELOG entry.
+
+### Overload pause (0.6.11)
+
+The two-phase heater draws ~7.3 A on L1 and L2. With 20 A main fuses, a kettle
+(L1) plus the heat pump (L2) during a reheat can trip one. The controller reads
+`sensor.equalizer_current` (`state_currentL1..L3`, and
+`binary_sensor.equalizer_online`) and pauses the heater itself; house_planner
+only plans budgets and never moves the cover.
+
+- Trigger: heater drawing (cover ON and the step tracker or an open detector
+  cycle of genuine magnitude) AND `max(L1, L2) > hwc_overload_amps` (default
+  19.8) on two consecutive fresh Equalizer samples at least 30 s apart. Data
+  older than 90 s, a gap over 90 s between the two samples, or an offline
+  Equalizer never triggers. Not started if inputs are stale, HA is unlinked or
+  the move reserve/caps would be violated (logged, heater stays ON).
+- Action: `HOLD_OFF(overload)`, off_gate `overload_pause`, log
+  `hot_water_control: overload pause: L1=..A L2=..A -> OFF`. The OFF is the
+  normal verified OFF move (caps, reserve of 3, strikes).
+- Resume: `max(L1, L2) + 7.4 <= threshold` (12.4 A) on fresh samples for 60 s,
+  after a minimum hold of 3 min; or after 20 min whatever the currents. At most
+  one pause per 30 min (protects the move budget). Then: an active Boost
+  continues; if a plan OFF period still covers now it stays OFF (no move);
+  otherwise ON is commanded by the normal ON path.
+- Boost and overrides: a pause may interrupt a Boost (resume continues it; a
+  Boost pressed during a pause waits for it). Override On is not interrupted
+  (explicit user choice, fuse risk accepted). Override Off is already off;
+  selecting it during a pause turns the pause into the Override Off. Every
+  other hold (watchdog, conflict, strikes, battery, on_failed, backstop) keeps
+  the heater ON and ends a pause. A restart during a pause goes through BOOT:
+  the heater is switched back ON (or stays OFF if the plan says so).
+- A reheat cut by a pause does not stamp the tank clock (logged as
+  interrupted). The pause does not require the tank clock to be OK: it is
+  bounded by 20 min.
+- Output `sensor.hot_water_overload`: `off`/`paused`; attributes `enabled`,
+  `threshold_a`, `last_pause_at`, `phase`, `amps`, `l1_a`, `l2_a`,
+  `resumes_at` (latest), `earliest_resume_at`, `last_resume_at`.
+- Options `hwc_overload_enabled` (default true) and `hwc_overload_amps`
+  (default 19.8, 10..20).
 
 ### Override Off vs Boost (0.6.8)
 

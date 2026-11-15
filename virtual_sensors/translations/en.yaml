@@ -224,6 +224,12 @@ configuration:
     description: >-
       Overrides the planner: no planned OFF. Only the test-move and
       test-probe buttons switch the heater, and only when LIVE.
+  hwc_overload_enabled:
+    name: "Overload pause enabled"
+    description: "Pause the hot-water heater while L1 or L2 is above the overload threshold. Default on."
+  hwc_overload_amps:
+    name: "Overload threshold (A)"
+    description: "Phase current above which (for 30 s, heater drawing) the heater is paused. Default 19.8, range 10 to 20."
   hwc_test_off_min:
     name: "Test OFF length (min)"
     description: "How long a test move holds OFF before switching ON. Default 10."

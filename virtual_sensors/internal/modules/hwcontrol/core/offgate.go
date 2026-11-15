@@ -21,6 +21,11 @@ func (c *Controller) OffGate() string {
 		return why
 	case StIdleOff, StCmdOff, StVerifyOff:
 		return "off"
+	case StHoldOff:
+		if c.overloadPaused() {
+			return "overload_pause"
+		}
+		return "hold_off"
 	case StDegraded:
 		return "degraded:" + c.reason
 	case StBoot:

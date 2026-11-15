@@ -38,6 +38,7 @@ type Entities struct {
 	Select, Armed, Latch, Boost                  string
 	TestMove, TestProbe                          string // R3 manual test buttons (PLAN §8)
 	EV, TankTemp, Price                          string
+	Eq, EqOnline                                 string // Equalizer phase currents / online flag (0.6.11)
 	Conflicts                                    []string
 	ConflictPrefix                               string
 	NotifyService                                string
@@ -105,6 +106,7 @@ const ObjPlanV2 = "hot_water_controller_plan_v2"
 func New() *Module {
 	m := &Module{cfg: core.Defaults(), pcfg: planner.DefaultConfig(), v2cfg: planner.DefaultV2Config(), eveningDrp: 3}
 	m.ent = entitiesFor("cover.hot_water_switch", "sensor.nordpool_kwh_se3_sek_3_06_0", "notify.mobile_app_edmund15max")
+	m.ent.Eq, m.ent.EqOnline = "equalizer_current", "binary_sensor.equalizer_online"
 	m.buildRoles()
 	return m
 }
@@ -135,6 +137,8 @@ func (m *Module) Inputs() []modules.InputSpec {
 		{EntityID: e.Select}, {EntityID: e.Armed}, {EntityID: e.Latch}, {EntityID: e.Boost},
 		{EntityID: e.TestMove}, {EntityID: e.TestProbe},
 		{EntityID: e.EV}, {EntityID: e.TankTemp},
+		{EntityID: e.Eq, Attributes: []string{"state_currentL1", "state_currentL2", "state_currentL3"}},
+		{EntityID: e.EqOnline},
 		{EntityID: e.Price, Attributes: []string{"today", "tomorrow", "raw_today", "raw_tomorrow", "tomorrow_valid"}},
 		{EntityID: e.ConflictPrefix, Prefix: true},
 	}
@@ -166,6 +170,7 @@ func (m *Module) Outputs() []modules.OutputSpec {
 		core.ObjAlert:         {"Hot water controller alert", "", ""},
 		core.ObjStrikes:       {"Hot water controller strikes", "", "measurement"},
 		core.ObjOffGate:       {"Hot water controller OFF gate", "", ""},
+		core.ObjOverload:      {"Hot water overload", "", ""},
 	}
 	var out []modules.OutputSpec
 	for _, obj := range core.TelemetryObjects {
@@ -213,6 +218,12 @@ type options struct {
 	TestMovesOnly      *bool    `json:"hwc_test_moves_only"` // R3: no planned OFF, only manual test moves
 	TestOffMin         *int     `json:"hwc_test_off_min"`
 	BootPlanWaitS      *int     `json:"hwc_boot_plan_wait_s"` // 0.6.1
+
+	// overload pause (0.6.11)
+	OverloadEnabled *bool    `json:"hwc_overload_enabled"`
+	OverloadAmps    *float64 `json:"hwc_overload_amps"`
+	EqEntity        *string  `json:"ev_equalizer_entity"` // shared with hot_water's phase gate
+	EqOnline        *string  `json:"ev_equalizer_online_entity"`
 
 	// planner v2 (0.6.0)
 	Planner         *string  `json:"hwc_planner"`
@@ -287,6 +298,20 @@ func (m *Module) Configure(raw []byte) error {
 		if len(states) > 0 {
 			c.MotorStoppedStates = states
 		}
+	}
+	// The host strips "sensor." from sensor ids: inputs are declared without it.
+	m.ent.Eq, m.ent.EqOnline = "equalizer_current", "binary_sensor.equalizer_online"
+	if o.EqEntity != nil && *o.EqEntity != "" {
+		m.ent.Eq = strings.TrimPrefix(*o.EqEntity, "sensor.")
+	}
+	if o.EqOnline != nil && *o.EqOnline != "" {
+		m.ent.EqOnline = strings.TrimPrefix(*o.EqOnline, "sensor.")
+	}
+	if o.OverloadEnabled != nil {
+		c.OverloadEnabled = *o.OverloadEnabled
+	}
+	if o.OverloadAmps != nil {
+		c.OverloadAmps = *o.OverloadAmps // Clamp replaces an out-of-range value
 	}
 	m.buildRoles()
 	setH := func(dst *time.Duration, v *float64) {
@@ -593,6 +618,16 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		}
 		return m.drainOuts()
 	}
+	if u.EntityID == m.ent.Eq {
+		m.onEqualizer(u)
+		return m.drainOuts()
+	}
+	if u.EntityID == m.ent.EqOnline {
+		if !u.Replay {
+			m.step(core.PhaseOnline{At: u.Time, Online: u.State == "on"})
+		}
+		return m.drainOuts()
+	}
 	if u.EntityID == m.ent.TankTemp {
 		m.recordTemp(u)
 	}
@@ -617,6 +652,23 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 	}
 	m.step(in)
 	return m.drainOuts()
+}
+
+// onEqualizer feeds the live per-phase currents to the core's overload
+// pause. A state without all three attributes (unavailable, no attrs) is
+// not a sample: it simply stops fresh data arriving.
+func (m *Module) onEqualizer(u modules.StateUpdate) {
+	if u.Replay {
+		return
+	}
+	var a [3]float64
+	for i, k := range []string{"state_currentL1", "state_currentL2", "state_currentL3"} {
+		raw, has := u.Attrs[k]
+		if !has || json.Unmarshal(raw, &a[i]) != nil {
+			return
+		}
+	}
+	m.step(core.PhaseSample{At: u.Time, L1: a[0], L2: a[1], L3: a[2]})
 }
 
 // v2ReplanEvery is how often planner v2 re-plans when it drives the

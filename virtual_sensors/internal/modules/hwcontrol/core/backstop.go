@@ -81,6 +81,13 @@ func (c *Controller) onCycleClosed(e CycleClosed) {
 	if !cy.Genuine || !e.Accepted {
 		return
 	}
+	if c.cutByOverload(e.OffTime) {
+		// Interrupted by an overload pause: not a finished reheat. The tank
+		// clock and a Boost's reheat_finished exit stay as they were.
+		c.logReheat(cy.OnTime, e.OffTime, e.Replay, e.PhaseEnd)
+		c.logf("reheat %s - %s interrupted by an overload pause: tank clock not stamped", cy.OnTime.Format(time.RFC3339), e.OffTime.Format(time.RFC3339))
+		return
+	}
 	// A finished reheat: the tank clock (§4.1 rule 6).
 	c.P.LastFinishedReheatStart = cy.OnTime
 	c.P.LastFinishedReheatEnd = e.OffTime

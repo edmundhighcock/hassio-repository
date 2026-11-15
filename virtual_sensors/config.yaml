@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.6.10"
+version: "0.6.11"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -87,6 +87,8 @@ schema:
   hw_phase_tol_a: "float?" # default 2.0 (0.5..6)
   hw_plateau_rescue: "bool?" # default true (0.6.2): residual at heater level for 120 s opens a cycle
   hwc_boot_plan_wait_s: "int(0,900)?" # default 180: at start the controller holds (no move) until the planner has a plan, or this long
+  hwc_overload_enabled: "bool?" # default true (0.6.11): pause the heater while a phase is overloaded
+  hwc_overload_amps: "float?" # default 19.8 (10..20): max(L1,L2) above this for 30 s pauses the heater
   # planner v2 (0.6.0): a 24 h hot-water planner. hwc_planner defaults to
   # greedy_v1 (unchanged behaviour); v2 then runs in SHADOW on
   # sensor.hot_water_controller_plan_v2. None of these is a safety limit.

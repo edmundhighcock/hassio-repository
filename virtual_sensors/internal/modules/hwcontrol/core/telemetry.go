@@ -218,6 +218,7 @@ func (c *Controller) telemetry(tick bool) {
 		c.publish(ObjAlert, c.lastAlert, map[string]any{"text": c.lastAlertText, "at": c.lastAlertAt.Format(time.RFC3339)}, refresh)
 	}
 	c.publish(ObjStrikes, itoa(int64(c.P.Strikes)), map[string]any{}, refresh)
+	c.publishOverload(refresh)
 }
 
 func (c *Controller) publishPlan(force bool) {

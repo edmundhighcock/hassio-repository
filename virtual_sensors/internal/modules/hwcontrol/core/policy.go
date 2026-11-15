@@ -8,7 +8,12 @@ import (
 // desiredHold returns the HOLD_ON reason demanded right now, in priority
 // order (rows 29, 31-34, 38; the backstop hold of §4.4; row 20's
 // on_failed latch). "" means no hold.
-func (c *Controller) desiredHold() string {
+func (c *Controller) desiredHold() string { return c.desiredHoldX(false) }
+
+// desiredHoldX is desiredHold; skipBoost leaves an active Boost out (used to
+// ask whether anything ELSE holds the heater ON, and automatically while an
+// overload pause interrupts a Boost).
+func (c *Controller) desiredHoldX(skipBoost bool) string {
 	switch {
 	case c.entityFresh(RoleLatch) && c.str(RoleLatch) == "on":
 		return HoldWatchdog
@@ -20,7 +25,7 @@ func (c *Controller) desiredHold() string {
 		return HoldBattery
 	case c.P.Hold.Latched && c.P.Hold.Reason == HoldOnFailed:
 		return HoldOnFailed
-	case c.P.Boost.Active:
+	case c.P.Boost.Active && !skipBoost && !c.overloadPaused():
 		return HoldBoost
 	case c.backstopHold():
 		return HoldBackstop
@@ -252,6 +257,9 @@ func (c *Controller) evaluate() {
 		if c.P.Boost.Active {
 			c.endBoost("override_off")
 		}
+	}
+	if c.maybeOverloadPause() {
+		return
 	}
 	hold := c.desiredHold()
 	if c.probeUnderHold != "" {
@@ -1039,9 +1047,18 @@ func (c *Controller) maybeOverrideOff() bool {
 	}
 	c.offPeriod = nil
 	c.subStep = 0
+	c.holdOffKind = holdOffOverride
 	c.setState(StHoldOff, "override_off")
 	c.runHoldOff()
 	return true
+}
+
+// holdOffPurpose names the HOLD_OFF's OFF move and its failure causes.
+func (c *Controller) holdOffPurpose() string {
+	if c.holdOffKind == holdOffOverload {
+		return "overload_pause"
+	}
+	return "override_off"
 }
 
 func (c *Controller) runHoldOff() {
@@ -1055,9 +1072,9 @@ func (c *Controller) runHoldOff() {
 			return
 		}
 		c.beginVerification(false)
-		if !c.startMove(c.cfg.CmdOff, "override_off") {
+		if !c.startMove(c.cfg.CmdOff, c.holdOffPurpose()) {
 			c.ver = nil
-			c.startOn("override_off_no_moves", false)
+			c.startOn(c.holdOffPurpose()+"_no_moves", false)
 			return
 		}
 		c.subStep = 1
@@ -1068,8 +1085,8 @@ func (c *Controller) runHoldOff() {
 			return
 		}
 		if m.outcome != mvOK {
-			c.strike("override_off_" + map[int]string{mvRetreat: "retreat", mvStuck: "stuck", mvCmdFailed: "call_failed"}[m.outcome])
-			c.startOn("override_off_motor_failure", false)
+			c.strike(c.holdOffPurpose() + "_" + map[int]string{mvRetreat: "retreat", mvStuck: "stuck", mvCmdFailed: "call_failed"}[m.outcome])
+			c.startOn(c.holdOffPurpose()+"_motor_failure", false)
 			return
 		}
 		c.P.OffSince = m.stopAt
@@ -1098,6 +1115,10 @@ func (c *Controller) runHoldOff() {
 				c.setVerdict(VOffUnverified, c.verAttrs(c.ver))
 				c.ver = nil
 			}
+		}
+		if c.overloadPaused() {
+			c.runOverloadPause()
+			return
 		}
 		c.heatWhileOff()
 		if why := c.offRevoked(true); why != "" {

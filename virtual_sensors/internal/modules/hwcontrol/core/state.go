@@ -138,6 +138,10 @@ type Controller struct {
 	overrideOffPendingLogged bool
 	boostSnapSeen            bool
 
+	// Overload pause (0.6.11): live Equalizer phase evidence and the pause.
+	ov          overloadState
+	holdOffKind string // StHoldOff: holdOffOverride | holdOffOverload
+
 	effects []Effect
 }
 
@@ -275,6 +279,10 @@ func (c *Controller) Step(in Input) []Effect {
 		}
 	case Seed:
 		c.onSeed(v)
+	case PhaseSample:
+		c.onPhase(v)
+	case PhaseOnline:
+		c.onPhaseOnline(v)
 	}
 	if tick {
 		c.onTick()
@@ -743,6 +751,9 @@ func (c *Controller) setState(s State, reason string) {
 func (c *Controller) stateLabel() string {
 	if c.P.State == StHoldOn && c.hold != "" {
 		return fmt.Sprintf("HOLD_ON(%s)", c.hold)
+	}
+	if c.overloadPaused() {
+		return "HOLD_OFF(overload)"
 	}
 	return string(c.P.State)
 }

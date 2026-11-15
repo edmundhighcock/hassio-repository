@@ -246,6 +246,7 @@ const (
 	ObjAlert         = "hot_water_controller_alert"
 	ObjStrikes       = "hot_water_controller_strikes"
 	ObjOffGate       = "hot_water_controller_off_gate"
+	ObjOverload      = "hot_water_overload" // 0.6.11: sensor.hot_water_overload
 	// hot_water_controller_saving_month (PLAN §2.5) is not published: no
 	// saving estimate is computed yet, and an entity that never gets a
 	// value is worse than none. Add it with the estimate.
@@ -254,5 +255,5 @@ const (
 // TelemetryObjects lists every published object id.
 var TelemetryObjects = []string{
 	ObjHeartbeat, ObjState, ObjDesired, ObjVerdict, ObjOnHours, ObjHoursSinceEnd,
-	ObjMovesToday, ObjPlan, ObjShadowWould, ObjAlert, ObjStrikes, ObjOffGate,
+	ObjMovesToday, ObjPlan, ObjShadowWould, ObjAlert, ObjStrikes, ObjOffGate, ObjOverload,
 }
