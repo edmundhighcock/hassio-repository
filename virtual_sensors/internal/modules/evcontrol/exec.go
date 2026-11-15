@@ -111,7 +111,7 @@ type lastCmd struct {
 }
 
 type desired struct {
-	Mode     string // idle, pause, charge
+	Mode     string // idle, pause, charge, full
 	Amps     int
 	Circuit  vec
 	Reason   string
@@ -273,6 +273,10 @@ func (m *Module) desire(now time.Time) desired {
 	if !m.plugged() {
 		return desired{Mode: "idle", Reason: "car not plugged in"}
 	}
+	if m.full {
+		// No charger commands at all; the circuit limit stays in force.
+		return desired{Mode: "full", Circuit: circ, Reason: "car reports charging complete" + capNote}
+	}
 	dep := m.nextDeparture(now)
 	if m.sess != nil {
 		dep = m.sess.Departure
@@ -389,6 +393,8 @@ func (m *Module) control(now time.Time) {
 	switch d.Mode {
 	case "idle":
 		m.release(now)
+	case "full":
+		m.ensureCircuit(d, now)
 	case "pause":
 		m.ensureCircuit(d, now)
 		if m.status == "charging" && !x.pauseFly && now.Sub(x.pauseAt) >= pauseGap {

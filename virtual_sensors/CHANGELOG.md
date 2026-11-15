@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.13
+
+- ev_control: the charger status `completed` now means the car is full. The
+  planner does not know the car's state of charge, so on 2026-11-15 it kept
+  asking for 39.9 kWh (`feasible: false`, deadline mode) after the car had
+  stopped itself at ~5 kWh. While `sensor.loaver_status` is `completed` the
+  controller state is `car_full` (reason "car reports charging complete"),
+  `sensor.ev_plan` has need 0, no slots and `feasible: true`, and no
+  start/resume/pause or charger-limit command is sent. The circuit-limit /
+  phase-current guard keeps running.
+- The full state lasts until the charger reads `disconnected`; the next
+  plug-in plans afresh. If the car starts drawing again by itself (e.g.
+  preheating) it is not paused or throttled; the flag stays set.
+- A restart while the charger reads `completed` comes up full (also persisted).
+  The Replan EV button does not resurrect a plan while full.
+- Tests include a host-level routing test (full `sensor.` ids through
+  `host.HandleState`).
+
 ## 0.6.12
 
 - Controller alerts (hot water, heat pump, EV) no longer create persistent

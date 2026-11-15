@@ -73,6 +73,7 @@ type persisted struct {
 	Prices  map[int64]float64 `json:"prices,omitempty"` // quarter start (unix) -> SEK/kWh ex VAT
 	Sum     savingTotals      `json:"totals"`
 	Exec    *execPersist      `json:"exec,omitempty"`
+	Full    bool              `json:"car_full,omitempty"`
 }
 
 type savingTotals struct {
@@ -119,6 +120,13 @@ type Module struct {
 	hwPlanKnown bool
 	prices      map[int64]float64
 	now         time.Time
+
+	// full: the charger reported "completed" this plug-in. The planner does
+	// not know the car's state of charge, so Easee's "completed" is taken at
+	// its word: need 0, no slots, no start/resume commands. Cleared only by
+	// "disconnected" (a car that starts charging again by itself does not
+	// clear it: we neither pause nor re-plan, only keep guarding currents).
+	full bool
 
 	sess                 *session
 	totals               savingTotals
@@ -365,7 +373,7 @@ func (m *Module) Init(b []byte) error {
 		if err := json.Unmarshal(b, &ps); err != nil {
 			log.Printf("%s: persisted state unreadable (%v); starting fresh", Name, err)
 		} else {
-			m.sess, m.totals = ps.Session, ps.Sum
+			m.sess, m.totals, m.full = ps.Session, ps.Sum, ps.Full
 			if ps.Exec != nil {
 				m.x.st = *ps.Exec
 			}
@@ -384,7 +392,7 @@ func (m *Module) Init(b []byte) error {
 
 // Persist implements modules.Module.
 func (m *Module) Persist() ([]byte, error) {
-	return json.Marshal(persisted{Session: m.sess, Prices: m.prices, Sum: m.totals, Exec: &m.x.st})
+	return json.Marshal(persisted{Session: m.sess, Prices: m.prices, Sum: m.totals, Exec: &m.x.st, Full: m.full})
 }
 
 // InitialStates implements modules.InitialStater.
@@ -451,6 +459,19 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			m.status = ""
 		}
 		now := m.plugged()
+		switch m.status {
+		case "completed":
+			if !m.full {
+				log.Printf("%s: charger reports completed: car treated as full until unplugged", Name)
+				replan = true
+			}
+			m.full = true
+		case "disconnected":
+			if m.full {
+				log.Printf("%s: charger disconnected: full flag cleared", Name)
+			}
+			m.full = false
+		}
 		switch {
 		case now && !was:
 			m.startSession(u.Time)
@@ -653,6 +674,12 @@ func round(v float64, n int) float64 { p := math.Pow10(n); return math.Round(v*p
 
 func (m *Module) replan(now time.Time) {
 	m.lastPlanAt = now
+	if m.full && m.plugged() {
+		// Car full: nothing to plan. Feasible, so nothing reads as a failure.
+		m.plan = Result{Feasible: true}
+		m.havePlan = true
+		return
+	}
 	if m.sess == nil || !m.plugged() || len(m.prices) == 0 {
 		m.havePlan = false
 		return
@@ -752,6 +779,9 @@ func (m *Module) slotAt(t time.Time) (Slot, bool) {
 func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	if !m.plugged() || m.sess == nil {
 		return "idle", "none", "car not plugged in"
+	}
+	if m.full {
+		return "car_full", "none", "car reports charging complete"
 	}
 	if !now.Before(m.sess.Departure) {
 		return "idle", "none", "past departure"
