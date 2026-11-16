@@ -3,7 +3,7 @@
 An [MCP](https://modelcontextprotocol.io) server (streamable HTTP) that lets
 household AI agents create, find, update, move and close Taiga 6 user stories
 and tasks. It runs [taiga-mcp](https://github.com/edmundhighcock/taiga-mcp)
-v0.1.0, installed from that tag (commit `f170155d`) with the dependency
+v0.1.1, installed from that tag (commit `da80cb34`) with the dependency
 versions locked in its `uv.lock`. There are no delete tools. See the server's
 README for the tool list.
 
@@ -56,7 +56,7 @@ Keep the token in a file readable only by you
   "mcpServers": {
     "taiga": {
       "type": "http",
-      "url": "http://taiga-mcp.lan:8095/mcp",
+      "url": "http://192.168.0.36:8095/mcp",
       "headersHelper": "sh -c 'printf \"{\\\"Authorization\\\": \\\"Bearer %s\\\"}\" \"$(cat ~/.config/taiga/agent.token)\"'"
     }
   }

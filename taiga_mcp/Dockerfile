@@ -5,8 +5,8 @@ ARG PYTHON_IMAGE=python:3.12-slim-bookworm
 
 # ---- build stage: fetch the pinned tag, verify its commit, install from uv.lock
 FROM ${PYTHON_IMAGE} AS build
-ARG TAIGA_MCP_TAG=v0.1.0
-ARG TAIGA_MCP_COMMIT=f170155dfd7a66190b80c4737c6e91bb1bd278f3
+ARG TAIGA_MCP_TAG=v0.1.1
+ARG TAIGA_MCP_COMMIT=da80cb346434faed75fc206aa6309812486cffaf
 COPY --from=ghcr.io/astral-sh/uv:0.12.6 /uv /usr/local/bin/uv
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates && \
