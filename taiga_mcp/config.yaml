@@ -1,0 +1,37 @@
+name: "Taiga MCP Server"
+description: "MCP server (streamable HTTP) that lets household AI agents manage Taiga stories and tasks, each with its own Taiga token"
+version: "0.1.0"
+slug: "taiga_mcp"
+init: false
+startup: application
+boot: auto
+arch:
+  - aarch64
+  - amd64
+# /health is the server's only unauthenticated path.
+watchdog: "http://[HOST]:[PORT:8095]/health"
+# Plain HTTP on the LAN/tailnet only. Must never be port-forwarded. Every
+# request needs a per-agent Taiga token as `Authorization: Bearer ...`; the
+# server holds no credentials of its own. Other add-ons can also reach it at
+# http://9547a9e0-taiga-mcp:8095 regardless of this mapping. See DOCS.md.
+ports:
+  "8095/tcp": 8095
+ports_description:
+  "8095/tcp": "Taiga MCP (plain HTTP, per-agent bearer token) - LAN/tailnet only, never port-forward"
+# Every option has a default, so adding options later never blocks start.
+options:
+  taiga_url: "http://9547a9e0-taiga:8001"
+  project_id: 1
+  log_level: "info"
+schema:
+  taiga_url: "url?"
+  project_id: "int(1,)?"
+  log_level: "list(debug|info|warning|error)?"
+# No data is stored, so nothing needs backing up.
+hassio_api: false
+homeassistant_api: false
+docker_api: false
+auth_api: false
+host_network: false
+ingress: false
+privileged: []

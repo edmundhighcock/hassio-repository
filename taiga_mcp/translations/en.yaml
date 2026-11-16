@@ -1,0 +1,17 @@
+configuration:
+  taiga_url:
+    name: "Taiga URL"
+    description: >-
+      Base URL of the Taiga back-end (the API is under /api/v1/). The default
+      is the Taiga add-on's internal hostname and gunicorn port.
+  project_id:
+    name: "Default project id"
+    description: >-
+      Taiga project used when a tool call does not name one. 1 is "Life".
+  log_level:
+    name: "Log level"
+    description: >-
+      Server log level. Request headers, and so tokens, are never logged at
+      any level.
+network:
+  8095/tcp: "Taiga MCP (plain HTTP, per-agent bearer token) - LAN/tailnet only, never port-forward"
