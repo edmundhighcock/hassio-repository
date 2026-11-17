@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.6.14"
+version: "0.6.15"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -127,6 +127,7 @@ schema:
   ev_charger_id: "str?" # default: the id attribute of sensor.<prefix>_status
   ev_limit_ttl_min: "int(3,120)?" # default 15: dynamic-limit time-to-live; refreshed every third of it
   ev_stale_after_min: "int(2,120)?" # default 10: grid reading older than this = stale, charge now
+  ev_charge_now_hours: "float?" # default 12: the Charge now override ends after this many hours (0.1..48)
   ev_equalizer_entity: "str?" # default sensor.equalizer_current (attrs state_currentL1..L3)
   ev_equalizer_online_entity: "str?" # default binary_sensor.equalizer_online
   ev_equalizer_fresh_min: "int(1,60)?" # default 15 (the Equalizer updates on change only)

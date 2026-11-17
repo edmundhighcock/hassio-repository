@@ -22,6 +22,18 @@ const Name = "ev_control"
 // ButtonReplan is the object id of the "Replan EV" button.
 const ButtonReplan = "replan_ev"
 
+// Charge-now override (0.6.15): button.ev_charge_now / button.ev_charge_now_stop
+// and the status sensor.ev_charge_now. Object ids carry no domain prefix: the
+// host routes presses by object id (host.Press).
+const (
+	ButtonChargeNow     = "ev_charge_now"
+	ButtonChargeNowStop = "ev_charge_now_stop"
+	ObjChargeNow        = "ev_charge_now"
+	// DefaultChargeNowHours is the override's timeout when
+	// ev_charge_now_hours is absent.
+	DefaultChargeNowHours = 12.0
+)
+
 // Output object ids (sensor.<id>).
 const (
 	ObjState     = "ev_controller_state"
@@ -65,6 +77,7 @@ type options struct {
 	EqEntity   *string  `json:"ev_equalizer_entity"`
 	EqOnline   *string  `json:"ev_equalizer_online_entity"`
 	EqFreshMin *int     `json:"ev_equalizer_fresh_min"`
+	ChargeNowH *float64 `json:"ev_charge_now_hours"`
 }
 
 // persisted is the module's restart state.
@@ -74,6 +87,19 @@ type persisted struct {
 	Sum     savingTotals      `json:"totals"`
 	Exec    *execPersist      `json:"exec,omitempty"`
 	Full    bool              `json:"car_full,omitempty"`
+	CN      *cnPersist        `json:"charge_now,omitempty"`
+}
+
+// cnPersist is the charge-now override's restart state.
+type cnPersist struct {
+	On            bool      `json:"on"`
+	Since         time.Time `json:"since"`
+	Until         time.Time `json:"until"`
+	FromCompleted bool      `json:"from_completed,omitempty"`
+	Kicked        bool      `json:"kicked,omitempty"`
+	EndedReason   string    `json:"ended_reason,omitempty"`
+	EndedAt       time.Time `json:"ended_at,omitempty"`
+	Note          string    `json:"note,omitempty"`
 }
 
 type savingTotals struct {
@@ -127,6 +153,14 @@ type Module struct {
 	// "disconnected" (a car that starts charging again by itself does not
 	// clear it: we neither pause nor re-plan, only keep guarding currents).
 	full bool
+
+	// charge-now override (0.6.15). While on, the plan's slots are ignored
+	// and the charger is driven at the highest current the phase guard
+	// allows (the guard stays in force). Ends on completed, disconnected,
+	// the timeout or the Stop button.
+	cn      cnPersist
+	cnHours float64
+	cnPub   string // last published status payload
 
 	sess                 *session
 	totals               savingTotals
@@ -204,7 +238,7 @@ type period struct{ start, end time.Time }
 // New returns a module with defaults applied.
 func New() *Module {
 	m := &Module{p: DefaultParams(), prefix: "loaver", depHHMM: 6*60 + 30,
-		priceEnt: "nordpool_kwh_se3_sek_3_06_0", prices: map[int64]float64{},
+		priceEnt: "nordpool_kwh_se3_sek_3_06_0", cnHours: DefaultChargeNowHours, prices: map[int64]float64{},
 		sessionsPath: filepath.Join(SessionsDir, "sessions.jsonl"), appendLine: appendFile,
 		x: newExec(), hub: house.Default, eqEnt: "equalizer_current", eqOnE: "binary_sensor.equalizer_online", eqFresh: DefaultEqFresh}
 	return m
@@ -258,6 +292,7 @@ func (m *Module) Outputs() []modules.OutputSpec {
 		mk(ObjLastCmd, "EV last command", "", ""),
 		mk(ObjLimitForce, "EV limit in force", "A", "measurement"),
 		mk(ObjHeartbeat, "EV controller heartbeat", "s", ""),
+		mk(ObjChargeNow, "EV charge now", "", ""),
 	}
 }
 
@@ -346,6 +381,14 @@ func (m *Module) Configure(raw []byte) error {
 	if o.EqFreshMin != nil && *o.EqFreshMin >= 1 && *o.EqFreshMin <= 60 {
 		m.eqFresh = time.Duration(*o.EqFreshMin) * time.Minute
 	}
+	m.cnHours = DefaultChargeNowHours
+	if o.ChargeNowH != nil {
+		if *o.ChargeNowH >= 0.1 && *o.ChargeNowH <= 48 {
+			m.cnHours = *o.ChargeNowH
+		} else {
+			msgs = append(msgs, "option ev_charge_now_hours out of range 0.1..48; default applied")
+		}
+	}
 	m.x = x
 	if p.MaxA < p.MinA {
 		msgs = append(msgs, "ev_max_a < ev_min_a; defaults applied")
@@ -377,6 +420,12 @@ func (m *Module) Init(b []byte) error {
 			if ps.Exec != nil {
 				m.x.st = *ps.Exec
 			}
+			if ps.CN != nil {
+				m.cn = *ps.CN
+				if m.cn.On {
+					log.Printf("%s: charge now override restored, until %s", Name, m.cn.Until.Format(time.RFC3339))
+				}
+			}
 			if ps.Prices != nil {
 				m.prices = ps.Prices
 			}
@@ -392,7 +441,7 @@ func (m *Module) Init(b []byte) error {
 
 // Persist implements modules.Module.
 func (m *Module) Persist() ([]byte, error) {
-	return json.Marshal(persisted{Session: m.sess, Prices: m.prices, Sum: m.totals, Exec: &m.x.st, Full: m.full})
+	return json.Marshal(persisted{Session: m.sess, Prices: m.prices, Sum: m.totals, Exec: &m.x.st, Full: m.full, CN: &m.cn})
 }
 
 // InitialStates implements modules.InitialStater.
@@ -453,14 +502,24 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 				m.x.chargerID = id
 			}
 		}
+		prevStatus := m.status
 		m.status, m.statusOK = u.State, u.Available || u.State != ""
 		if u.State == "unavailable" || u.State == "unknown" {
 			m.statusOK = false
 			m.status = ""
 		}
 		now := m.plugged()
+		if m.status != "" && m.status != "completed" {
+			m.cn.FromCompleted = false
+		}
 		switch m.status {
 		case "completed":
+			// A press while the car already read completed must not be undone
+			// by a repeat completed update (attribute-only change).
+			if m.cn.On && !(m.cn.FromCompleted && prevStatus == "completed") {
+				outs = append(outs, m.endChargeNow(u.Time, "completed", "car reports charging complete")...)
+				replan = true
+			}
 			if !m.full {
 				log.Printf("%s: charger reports completed: car treated as full until unplugged", Name)
 				replan = true
@@ -471,6 +530,10 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 				log.Printf("%s: charger disconnected: full flag cleared", Name)
 			}
 			m.full = false
+			if m.cn.On {
+				outs = append(outs, m.endChargeNow(u.Time, "disconnected", "car disconnected")...)
+				replan = true
+			}
 		}
 		switch {
 		case now && !was:
@@ -722,21 +785,123 @@ func (m *Module) runGuard(t time.Time) []modules.OutputUpdate {
 
 // Buttons implements modules.Buttoned.
 func (m *Module) Buttons() []modules.ButtonSpec {
-	return []modules.ButtonSpec{{ObjectID: ButtonReplan, UniqueID: "virtual_sensors_" + ButtonReplan, Name: "Replan EV"}}
+	return []modules.ButtonSpec{
+		{ObjectID: ButtonReplan, UniqueID: "virtual_sensors_" + ButtonReplan, Name: "Replan EV"},
+		{ObjectID: ButtonChargeNow, UniqueID: "virtual_sensors_button_" + ButtonChargeNow, Name: "Charge car now"},
+		{ObjectID: ButtonChargeNowStop, UniqueID: "virtual_sensors_button_" + ButtonChargeNowStop, Name: "Stop charge now"},
+	}
 }
 
-// OnButton implements modules.Buttoned: replan now. With no session or no
-// prices replan just clears the plan, so a press is harmless.
+// OnButton implements modules.Buttoned. Replan: replan now (with no session
+// or no prices replan just clears the plan, so a press is harmless).
+// Charge now / Stop: the override (see startChargeNow, endChargeNow).
 func (m *Module) OnButton(objectID string, now time.Time) []modules.OutputUpdate {
-	if objectID != ButtonReplan {
-		return nil
-	}
-	log.Printf("%s: replan requested (button)", Name)
 	if now.After(m.now) {
 		m.now = now
 	}
+	switch objectID {
+	case ButtonReplan:
+		log.Printf("%s: replan requested (button)", Name)
+		m.replan(now)
+		return m.publishAll(now, true)
+	case ButtonChargeNow:
+		outs := m.startChargeNow(now)
+		return append(outs, m.publishAll(now, true)...)
+	case ButtonChargeNowStop:
+		var outs []modules.OutputUpdate
+		if m.cn.On {
+			outs = m.endChargeNow(now, "stopped", "Stop pressed")
+			m.replan(now)
+		} else {
+			log.Printf("%s: charge now stop pressed but the override is not on; ignored", Name)
+		}
+		return append(outs, m.publishAll(now, true)...)
+	}
+	return nil
+}
+
+// logbookOnly writes a Logbook entry (no phone push) through the same
+// logbook.log path as the controller alerts.
+func (m *Module) logbookOnly(kind, title, text string) {
+	m.x.notifyC++
+	m.x.effects = append(m.x.effects, modules.Effect{Kind: modules.EffectCallService, Domain: "logbook", Service: "log",
+		Data: map[string]any{"name": title, "message": text, "entity_id": "sensor." + ObjChargeNow}, CorrID: corrNotify + m.x.notifyC, Tag: "ev_controller_" + kind})
+}
+
+func (m *Module) chargeNowHours() time.Duration {
+	h := m.cnHours
+	if h <= 0 {
+		h = DefaultChargeNowHours
+	}
+	return time.Duration(h * float64(time.Hour))
+}
+
+// startChargeNow turns the override on. Not connected: log and leave a reason
+// on the status sensor, nothing else. While full: the press is the user's
+// explicit wish, so the full flag is cleared for this session (a fresh
+// "completed" ends the override and sets it again).
+func (m *Module) startChargeNow(now time.Time) []modules.OutputUpdate {
+	if !m.plugged() {
+		log.Printf("%s: charge now pressed but the car is not connected (status %q); nothing done", Name, m.status)
+		m.cn.Note = "not started: car not connected"
+		return nil
+	}
+	was := m.cn.On
+	m.cn.On = true
+	m.cn.Until = now.Add(m.chargeNowHours())
+	m.cn.Note = "charge now active"
+	if !was {
+		m.cn.Since = now
+		m.cn.Kicked = false
+		m.cn.EndedReason, m.cn.EndedAt = "", time.Time{}
+		m.cn.FromCompleted = m.status == "completed"
+		if m.full {
+			log.Printf("%s: charge now pressed while full: full flag cleared for this session", Name)
+			m.full = false
+		}
+		m.x.pauseAt = time.Time{} // do not hold the first command back
+		log.Printf("%s: charge now ON until %s", Name, m.cn.Until.In(m.p.Loc).Format(time.RFC3339))
+		m.logbookOnly("charge_now", "EV charge now started", fmt.Sprintf("Charge now is on until %s at the highest current the phase guard allows; the plan is ignored.", m.cn.Until.In(m.p.Loc).Format("15:04")))
+	} else {
+		log.Printf("%s: charge now pressed while on: timeout extended to %s", Name, m.cn.Until.In(m.p.Loc).Format(time.RFC3339))
+	}
 	m.replan(now)
-	return m.publishAll(now, true)
+	return nil
+}
+
+// endChargeNow turns the override off, writes the Logbook entry and leaves
+// the caller to replan (callers set replan or call m.replan).
+func (m *Module) endChargeNow(now time.Time, code, text string) []modules.OutputUpdate {
+	if !m.cn.On {
+		return nil
+	}
+	m.cn.On = false
+	m.cn.EndedReason, m.cn.EndedAt, m.cn.Note = code, now, "ended: "+text
+	m.cn.FromCompleted, m.cn.Kicked = false, false
+	log.Printf("%s: charge now ended (%s)", Name, code)
+	m.logbookOnly("charge_now", "EV charge now ended", fmt.Sprintf("Charge now ended: %s. Normal planning resumes.", text))
+	m.replan(now)
+	return nil
+}
+
+func (m *Module) chargeNowOutput(now time.Time) (modules.OutputUpdate, string) {
+	st, since, until := "off", "", ""
+	if m.cn.On {
+		st = "on"
+	}
+	f := func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.In(m.p.Loc).Format(time.RFC3339)
+	}
+	since, until = f(m.cn.Since), f(m.cn.Until)
+	if !m.cn.On && m.cn.EndedReason == "" {
+		since, until = "", ""
+	}
+	attrs := jsonStr(map[string]any{"since": since, "until": until, "reason": m.cn.Note,
+		"reason_ended": m.cn.EndedReason, "ended_at": f(m.cn.EndedAt), "timeout_h": round(m.chargeNowHours().Hours(), 2)})
+	return modules.OutputUpdate{ObjectID: ObjChargeNow, Time: now, StateString: st, AttributesJSON: attrs}, st + attrs
 }
 
 // OnTick implements modules.Ticker.
@@ -748,6 +913,10 @@ func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
 	if m.sess != nil && !now.Before(m.sess.Departure) && m.status != "charging" {
 		// Past departure with nothing charging: the shadow night is over.
 	}
+	var outs []modules.OutputUpdate
+	if m.cn.On && !now.Before(m.cn.Until) {
+		outs = append(outs, m.endChargeNow(now, "timeout", fmt.Sprintf("timeout after %.4g h", m.chargeNowHours().Hours()))...)
+	}
 	re := m.lastPlanAt.IsZero() || now.Sub(m.lastPlanAt) >= 15*time.Minute
 	if re {
 		m.replan(now)
@@ -758,7 +927,7 @@ func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
 	live := m.armedLive()
 	m.hub.SetArmed(&live, nil)
 	m.control(now)
-	return m.publishAll(now, re)
+	return append(outs, m.publishAll(now, re)...)
 }
 
 // current plan slot at t.
@@ -779,6 +948,9 @@ func (m *Module) slotAt(t time.Time) (Slot, bool) {
 func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	if !m.plugged() || m.sess == nil {
 		return "idle", "none", "car not plugged in"
+	}
+	if m.cn.On {
+		return m.decideChargeNow(now)
 	}
 	if m.full {
 		return "car_full", "none", "car reports charging complete"
@@ -834,6 +1006,34 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	return "planned", "none", "waiting for a planned slot"
 }
 
+// decideChargeNow: the override ignores the plan; the guard and the house
+// budget cap still apply.
+func (m *Module) decideChargeNow(now time.Time) (state, cmd, reason string) {
+	eff := m.p.MaxA
+	why := fmt.Sprintf("charge now at up to %.0f A until %s", eff, m.cn.Until.In(m.p.Loc).Format("15:04"))
+	if m.haveGuard && m.gridOK {
+		if float64(m.guard.LimitA) < eff {
+			eff = float64(m.guard.LimitA)
+			why = fmt.Sprintf("charge now, guard limits to %d A", m.guard.LimitA)
+		}
+	}
+	if c, ok := m.hub.EVCap(now); ok && float64(c) < eff {
+		eff = float64(c)
+		why = fmt.Sprintf("charge now, house budget overload: capped at %d A", c)
+	}
+	if eff < m.p.MinA {
+		return "charge_now", "pause", "charge now: no headroom under the guard (" + why + ")"
+	}
+	if m.status != "charging" {
+		return "charge_now", fmt.Sprintf("resume at %.0f A", eff), why
+	}
+	cur := m.evKW * 1000 / (3 * Volts)
+	if math.Abs(cur-eff) >= 1 {
+		return "charge_now", fmt.Sprintf("limit %.0f A", eff), why
+	}
+	return "charge_now", "none", why
+}
+
 func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 	var outs []modules.OutputUpdate
 	outs = append(outs, m.execOutputs(now, force)...)
@@ -854,6 +1054,10 @@ func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 		m.lastWould = cmd
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjWould, Time: now, StateString: cmd,
 			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": !m.armedLive()})})
+	}
+	if o, key := m.chargeNowOutput(now); force || key != m.cnPub {
+		m.cnPub = key
+		outs = append(outs, o)
 	}
 	if force {
 		outs = append(outs, m.planOutput(now))

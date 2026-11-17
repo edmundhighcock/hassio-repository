@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.15
+
+- ev_control: "Charge now" override. New buttons `button.ev_charge_now`
+  ("Charge car now") and `button.ev_charge_now_stop` ("Stop charge now"), and
+  a status sensor `sensor.ev_charge_now` (`on`/`off`; attributes `since`,
+  `until`, `reason`, `reason_ended`, `ended_at`, `timeout_h`).
+- While on, the plan's slots are ignored and the charger is driven at the
+  highest current the phase guard allows (the 19 A-per-phase guard and the
+  house budget cap stay in force). A paused / awaiting_start / ready_to_charge
+  charger gets start and/or resume as for a planned slot.
+  `sensor.ev_controller_state` reads `charge_now`, with a reason.
+- Ends on charger `completed` (which sets the full flag as before),
+  `disconnected`, a timeout, or the Stop button; planning then resumes at once
+  (and may pause the charger if outside a slot). New OPTIONAL option
+  `ev_charge_now_hours` (default 12).
+- Pressing it while the car is full clears the full flag for the session and
+  starts the override; a new `completed` ends it and sets full again. Pressing
+  it while disconnected does nothing but log and put a reason on the sensor.
+- The override survives an add-on restart until it expires. Start and end are
+  Logbook entries only (no phone push).
+- Tests include host-level routing (`host.Press`) of both buttons.
+
 ## 0.6.14
 
 - Fix: controller alert Logbook entries (added in 0.6.12) failed with

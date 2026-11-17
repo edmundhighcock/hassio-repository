@@ -150,6 +150,9 @@ configuration:
   ev_hp_phase_a:
     name: "EV: heat pump maximum current on phase C (A)"
     description: "Default 7.4."
+  ev_charge_now_hours:
+    name: "EV: charge-now timeout (hours)"
+    description: "The Charge car now override ends after this many hours if nothing else ended it (completed, disconnected, Stop). Default 12."
   hp_model_u:
     name: "HP model: loss coefficient (1/h)"
     description: "Shadow only. PROVISIONAL until the house-model fit. Default 0.08."

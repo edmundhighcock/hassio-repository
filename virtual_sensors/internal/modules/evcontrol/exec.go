@@ -273,6 +273,20 @@ func (m *Module) desire(now time.Time) desired {
 	if !m.plugged() {
 		return desired{Mode: "idle", Reason: "car not plugged in"}
 	}
+	if m.cn.On {
+		// Charge-now override: the plan, need and departure are ignored; the
+		// guard limit (and the house cap) computed above stay in force.
+		if limit < int(m.p.MinA) {
+			return desired{Mode: "pause", Circuit: circ, Reason: "charge now: no headroom under the budget" + capNote}
+		}
+		why := fmt.Sprintf("charge now at %d A", limit)
+		if guardFresh && limit < int(m.p.MaxA) {
+			why = fmt.Sprintf("charge now, guard limits to %d A", limit)
+		} else if !guardFresh {
+			why = fmt.Sprintf("charge now at the forecast ceiling %d A (grid reading stale)", limit)
+		}
+		return desired{Mode: "charge", Amps: limit, Circuit: circ, Reason: why + capNote}
+	}
 	if m.full {
 		// No charger commands at all; the circuit limit stays in force.
 		return desired{Mode: "full", Circuit: circ, Reason: "car reports charging complete" + capNote}
@@ -407,7 +421,16 @@ func (m *Module) control(now time.Time) {
 		if m.needSend(x.charger, want, now) {
 			m.sendCharger(d.Amps, now)
 		}
-		if m.status == "charging" || x.pauseFly || now.Sub(x.pauseAt) < pauseGap || m.status == "completed" {
+		if m.status == "completed" && m.cn.On {
+			// Pressed while the car reads completed: try start/resume once,
+			// not every 90 s for the rest of the timeout.
+			if m.cn.Kicked {
+				return
+			}
+		} else if m.status == "completed" {
+			return
+		}
+		if m.status == "charging" || x.pauseFly || now.Sub(x.pauseAt) < pauseGap {
 			return
 		}
 		ok := m.limitOK(x.charger, want, now) && m.limitOK(x.circuit, d.Circuit, now)
@@ -418,6 +441,10 @@ func (m *Module) control(now time.Time) {
 			return
 		}
 		x.pauseFly, x.pauseAt = true, now
+		if m.cn.On && m.status == "completed" {
+			m.cn.Kicked = true
+			m.cmd("start", pending{kind: "start"})
+		}
 		if m.status == "awaiting_authorization" || m.status == "awaiting_start" {
 			m.cmd("start", pending{kind: "start"})
 		}
