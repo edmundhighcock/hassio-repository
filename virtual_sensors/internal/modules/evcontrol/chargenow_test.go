@@ -142,6 +142,11 @@ func TestChargeNowEndsOnCompleted(t *testing.T) {
 	e.advance(2*time.Minute, 1000)
 	e.reset()
 	e.setStatus("completed")
+	e.advance(5*time.Minute, 1000)
+	if !e.m.cn.On || e.m.full {
+		t.Fatalf("blip ended it: full=%v on=%v", e.m.full, e.m.cn.On)
+	}
+	e.advance(6*time.Minute, 1000)
 	if !e.m.full || e.m.cn.On {
 		t.Fatalf("full=%v on=%v", e.m.full, e.m.cn.On)
 	}
@@ -149,7 +154,7 @@ func TestChargeNowEndsOnCompleted(t *testing.T) {
 	if st != "off" || a["reason_ended"] != "completed" {
 		t.Fatalf("%s %v", st, a)
 	}
-	if got := logbookEntries(e); len(got) != 1 || got[0] != "EV charge now ended" {
+	if got := logbookEntries(e); len(got) != 2 || got[0] != "EV car full" || got[1] != "EV charge now ended" {
 		t.Fatalf("logbook %v", got)
 	}
 	noPhone(t, e)
@@ -231,8 +236,7 @@ func TestStopButton(t *testing.T) {
 
 func TestChargeNowWhileFull(t *testing.T) {
 	e := newEnv(t, cnOpts, true)
-	e.setStatus("completed")
-	e.advance(10*time.Minute, 1000)
+	e.makeFull()
 	e.reset()
 	e.press(ButtonChargeNow)
 	if e.m.full || !e.m.cn.On {
@@ -245,6 +249,10 @@ func TestChargeNowWhileFull(t *testing.T) {
 	// A repeat "completed" update (attributes) is not a new completion... the
 	// car moved to charging via resume, so a fresh completed now ends it.
 	e.setStatus("completed")
+	if e.m.full || !e.m.cn.On {
+		t.Fatalf("a blip must not end it: full=%v on=%v", e.m.full, e.m.cn.On)
+	}
+	e.advance(11*time.Minute, 1000)
 	if !e.m.full || e.m.cn.On {
 		t.Fatalf("full=%v on=%v", e.m.full, e.m.cn.On)
 	}
@@ -259,10 +267,12 @@ func TestChargeNowWhileFullSurvivesRepeatCompleted(t *testing.T) {
 	if !e.m.cn.On {
 		t.Fatal("repeat completed ended the override")
 	}
+	e.m.cn.Kicked = true // the one start/resume attempt is spent; the car stays completed
 	e.setStatus("charging")
 	e.setStatus("completed")
+	e.advance(11*time.Minute, 1000)
 	if e.m.cn.On || !e.m.full {
-		t.Fatalf("real completion must end it: on=%v full=%v", e.m.cn.On, e.m.full)
+		t.Fatalf("confirmed completion must end it: on=%v full=%v", e.m.cn.On, e.m.full)
 	}
 }
 

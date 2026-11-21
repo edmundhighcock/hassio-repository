@@ -152,7 +152,13 @@ configuration:
     description: "Default 7.4."
   ev_charge_now_hours:
     name: "EV: charge-now timeout (hours)"
-    description: "The Charge car now override ends after this many hours if nothing else ended it (completed, disconnected, Stop). Default 12."
+    description: "The Charge car now override ends after this many hours if nothing else ended it (confirmed full, disconnected, Stop). Default 12."
+  ev_full_confirm_min:
+    name: "EV: minutes of 'completed' before the car counts as full"
+    description: "The charger status must stay completed, with no charger current, this long. Default 10."
+  ev_full_clear_min:
+    name: "EV: minutes of 'asking to charge' that clear full"
+    description: "While full, awaiting_start or ready_to_charge for this long clears the full flag and replans. Default 5."
   hp_model_u:
     name: "HP model: loss coefficient (1/h)"
     description: "Shadow only. PROVISIONAL until the house-model fit. Default 0.08."

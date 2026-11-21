@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.6.16
+
+- Fix ev_control: a brief `completed` no longer means the car is full. On
+  2026-11-20 the Zoe flashed `completed` for seconds mid-session; 0.6.13 latched
+  `car_full` and 0.6.15 ended Charge now at once, and the car then sat asking to
+  charge (`awaiting_start`/`ready_to_charge`) all night with no start sent.
+- Debounce: the car counts as full only after `sensor.loaver_status` has stayed
+  `completed` for `ev_full_confirm_min` minutes (new OPTIONAL option, default
+  10) with no charger draw (`sensor.loaver_power` / `sensor.loaver_current`
+  near zero; any draw restarts the clock). Any change away from `completed`
+  cancels it. While pending, `sensor.ev_controller_state` reasons read
+  "completed - confirming full (3/10 min)".
+- Charge now ends only on a confirmed full, `disconnected`, Stop, or the
+  timeout. A `completed` blip does not end it, and a blip no longer triggers
+  its one start/resume attempt (that is only for a press while `completed`).
+- Full clears when the car asks to charge: while full, `awaiting_start` or
+  `ready_to_charge` held for `ev_full_clear_min` minutes (new OPTIONAL option,
+  default 5) clears it and replans (the planner then plans/starts as normal; with
+  the need unknown it uses its default). The preheat rule is unchanged: a car
+  that draws by itself (`charging`) while full is never paused or throttled.
+- Stop (`button.ev_charge_now_stop`) always replans at once and runs one control
+  pass, also when the override was already off, so planned behaviour resumes
+  immediately (pause outside slots, start/resume in slots). Choice: Stop does NOT
+  clear full. It means "stop forcing"; full clears by the rule above, or by
+  Charge now. If full, the sensor reason says so.
+- Logbook entries for confirmed full ("EV car full") and cleared full
+  ("EV car no longer full"); `ev_controller_state` gains attributes `full` and
+  `confirming`.
+- Restart: the full flag persists as before; a pending confirmation does not
+  (the clock restarts from the first tick after the restart, so a restart can
+  only delay confirming, never wrongly latch full). A replayed `completed` no
+  longer comes up full by itself.
+- Tests: the real 11-20/21 status sequence, long completed, draw blocks
+  confirmation, clear by asking, Stop (override on, already off, while full),
+  restart during a pending confirmation, and a host-routed run
+  (`HandleState`/`Press`).
+
 ## 0.6.15
 
 - ev_control: "Charge now" override. New buttons `button.ev_charge_now`

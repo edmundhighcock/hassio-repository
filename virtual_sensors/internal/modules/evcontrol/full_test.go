@@ -2,6 +2,7 @@ package evcontrol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,16 @@ func lastOut(outs []modules.OutputUpdate, id string) (modules.OutputUpdate, bool
 		}
 	}
 	return modules.OutputUpdate{}, false
+}
+
+// makeFull drives the car to a CONFIRMED full state (completed, no draw,
+// held past ev_full_confirm_min).
+func (e *env) makeFull() {
+	e.setStatus("completed")
+	e.advance(DefaultFullConfirm+time.Minute, 1000)
+	if !e.m.full {
+		e.t.Fatal("not full after the confirm window")
+	}
 }
 
 func planAttrs(t *testing.T, u modules.OutputUpdate) map[string]any {
@@ -72,8 +83,7 @@ func TestCompletedMeansFull(t *testing.T) {
 
 func TestFullStaysUntilDisconnectedThenPlansAfresh(t *testing.T) {
 	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
-	e.setStatus("completed")
-	e.advance(time.Hour, 1000)
+	e.makeFull()
 	assertFull(t, e.m, e.now)
 	e.setStatus("disconnected")
 	if e.m.full {
@@ -89,8 +99,7 @@ func TestFullStaysUntilDisconnectedThenPlansAfresh(t *testing.T) {
 
 func TestCarChargesAgainWhileFullIsNotFought(t *testing.T) {
 	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
-	e.setStatus("completed")
-	e.advance(10*time.Minute, 1000)
+	e.makeFull()
 	e.reset()
 	e.setStatus("charging") // e.g. preconditioning
 	e.advance(30*time.Minute, 1000)
@@ -107,12 +116,9 @@ func TestCarChargesAgainWhileFullIsNotFought(t *testing.T) {
 	}
 }
 
-func TestRestartWhileCompletedComesUpFull(t *testing.T) {
-	// No persisted state at all: the replayed status alone must do it.
-	e := newEnv(t, `{"ev_need_kwh":40}`, false)
-	e.setStatus("completed")
-	assertFull(t, e.m, e.now)
-
+func TestRestartWhileCompletedConfirmsFromTheRestart(t *testing.T) {
+	// No persisted state at all: the replayed status alone does not latch
+	// full; the confirmation clock starts at the first tick after restart.
 	m := New()
 	m.hub = house.NewHub()
 	m.appendLine = func(string, []byte) error { return nil }
@@ -120,15 +126,26 @@ func TestRestartWhileCompletedComesUpFull(t *testing.T) {
 	now := at(10, 22, 0)
 	m.OnLink(true, now)
 	m.OnStateUpdate(modules.StateUpdate{EntityID: m.priceEnt, Time: now, Attrs: rawPrices(at(10, 0, 0), at(12, 0, 0), spikePrice)})
-	m.OnStateUpdate(modules.StateUpdate{EntityID: "loaver_status", Time: now, State: "completed", Available: true, Replay: true})
-	assertFull(t, m, now)
+	m.OnStateUpdate(modules.StateUpdate{EntityID: "loaver_status", Time: now.Add(-3 * time.Hour), State: "completed", Available: true, Replay: true})
+	if m.full {
+		t.Fatal("a replayed completed latched full at once")
+	}
+	m.OnTick(now)
+	m.OnTick(now.Add(5 * time.Minute))
+	if m.full {
+		t.Fatal("full before the window")
+	}
+	if _, _, r := m.decide(now.Add(5 * time.Minute)); !strings.Contains(r, "confirming full (5/10 min)") {
+		t.Fatalf("reason %q", r)
+	}
+	m.OnTick(now.Add(11 * time.Minute))
+	assertFull(t, m, now.Add(11*time.Minute))
 	if u, _ := lastOut(m.InitialStates(), ObjState); u.StateString != "car_full" {
 		t.Fatalf("initial state %+v", u)
 	}
 
-	// With persisted state (flag saved), a status that has not arrived yet
-	// still starts full.
-	b, _ := e.m.Persist()
+	// A persisted full flag is kept across restarts even before any status.
+	b, _ := m.Persist()
 	m2 := New()
 	m2.hub = house.NewHub()
 	if err := m2.Init(b); err != nil || !m2.full {
@@ -136,9 +153,40 @@ func TestRestartWhileCompletedComesUpFull(t *testing.T) {
 	}
 }
 
+func TestRestartDuringPendingConfirmationRestartsTheClock(t *testing.T) {
+	e := newEnv(t, cnOpts, true)
+	e.press(ButtonChargeNow)
+	e.setStatus("completed")
+	e.advance(8*time.Minute, 1000)
+	if e.m.full || !e.m.cn.On {
+		t.Fatal("pending expected")
+	}
+	b, _ := e.m.Persist()
+	m2 := New()
+	m2.hub = house.NewHub()
+	m2.appendLine = func(string, []byte) error { return nil }
+	if err := m2.Configure([]byte(cnOpts)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Init(b); err != nil {
+		t.Fatal(err)
+	}
+	m2.OnLink(true, e.now)
+	m2.OnStateUpdate(modules.StateUpdate{EntityID: "loaver_status", Time: e.now, State: "completed", Available: true, Replay: true})
+	m2.OnTick(e.now)
+	m2.OnTick(e.now.Add(5 * time.Minute)) // 13 min of completed overall, 5 observed
+	if m2.full || !m2.cn.On {
+		t.Fatalf("restart must not count unobserved time: full=%v on=%v", m2.full, m2.cn.On)
+	}
+	m2.OnTick(e.now.Add(11 * time.Minute))
+	if !m2.full || m2.cn.On {
+		t.Fatalf("full=%v on=%v", m2.full, m2.cn.On)
+	}
+}
+
 func TestReplanButtonWhileFullKeepsNoPlan(t *testing.T) {
 	e := newEnv(t, `{"ev_need_kwh":40,"ev_mode":"live"}`, true)
-	e.setStatus("completed")
+	e.makeFull()
 	e.reset()
 	outs := e.m.OnButton(ButtonReplan, e.now.Add(time.Minute))
 	e.drain()
@@ -209,7 +257,8 @@ func TestHostRoutesLoaverStatusCompletedToFull(t *testing.T) {
 	send("sensor.loaver_power", "5.5", nil)
 	send("sensor.grid_meter_power", "1000", nil)
 	send("sensor.loaver_status", "completed", nil)
-	for i := 0; i < 20; i++ {
+	send("sensor.loaver_power", "0", nil)
+	for i := 0; i < 24; i++ {
 		clk.t = clk.t.Add(30 * time.Second)
 		send("sensor.grid_meter_power", "1000", nil)
 		h.Tick()

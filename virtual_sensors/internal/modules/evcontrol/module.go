@@ -32,6 +32,14 @@ const (
 	// DefaultChargeNowHours is the override's timeout when
 	// ev_charge_now_hours is absent.
 	DefaultChargeNowHours = 12.0
+	// DefaultFullConfirm: "completed" must hold this long (0.6.16) before the
+	// car counts as full. DefaultFullClear: awaiting_start / ready_to_charge
+	// must hold this long to clear a full flag.
+	DefaultFullConfirm = 10 * time.Minute
+	DefaultFullClear   = 5 * time.Minute
+	// drawKW / drawA: charger draw above either means the car is not done.
+	drawKW = 0.1
+	drawA  = 1.0
 )
 
 // Output object ids (sensor.<id>).
@@ -78,6 +86,8 @@ type options struct {
 	EqOnline   *string  `json:"ev_equalizer_online_entity"`
 	EqFreshMin *int     `json:"ev_equalizer_fresh_min"`
 	ChargeNowH *float64 `json:"ev_charge_now_hours"`
+	FullConfM  *int     `json:"ev_full_confirm_min"`
+	FullClrM   *int     `json:"ev_full_clear_min"`
 }
 
 // persisted is the module's restart state.
@@ -92,14 +102,13 @@ type persisted struct {
 
 // cnPersist is the charge-now override's restart state.
 type cnPersist struct {
-	On            bool      `json:"on"`
-	Since         time.Time `json:"since"`
-	Until         time.Time `json:"until"`
-	FromCompleted bool      `json:"from_completed,omitempty"`
-	Kicked        bool      `json:"kicked,omitempty"`
-	EndedReason   string    `json:"ended_reason,omitempty"`
-	EndedAt       time.Time `json:"ended_at,omitempty"`
-	Note          string    `json:"note,omitempty"`
+	On          bool      `json:"on"`
+	Since       time.Time `json:"since"`
+	Until       time.Time `json:"until"`
+	Kicked      bool      `json:"kicked,omitempty"`
+	EndedReason string    `json:"ended_reason,omitempty"`
+	EndedAt     time.Time `json:"ended_at,omitempty"`
+	Note        string    `json:"note,omitempty"`
 }
 
 type savingTotals struct {
@@ -147,12 +156,24 @@ type Module struct {
 	prices      map[int64]float64
 	now         time.Time
 
-	// full: the charger reported "completed" this plug-in. The planner does
-	// not know the car's state of charge, so Easee's "completed" is taken at
-	// its word: need 0, no slots, no start/resume commands. Cleared only by
-	// "disconnected" (a car that starts charging again by itself does not
-	// clear it: we neither pause nor re-plan, only keep guarding currents).
+	// full: the car is confirmed full. The planner does not know the car's
+	// state of charge, so Easee's "completed" is taken at its word, but only
+	// once it has stayed "completed" for fullConfirm with no charger draw
+	// (0.6.16: the Zoe flashes "completed" for seconds mid-session). Then:
+	// need 0, no slots, no start/resume commands. Cleared by "disconnected"
+	// or when the car asks to charge (awaiting_start / ready_to_charge for
+	// fullClear). A car that starts charging by itself (preheat) is neither
+	// paused nor throttled; we only keep guarding currents.
 	full bool
+	// doneSince: when the current uninterrupted "completed" (with no draw)
+	// began; zero = no confirmation pending. askSince: while full, when the
+	// current awaiting_start / ready_to_charge run began. Neither is
+	// persisted: a restart restarts both clocks (never latches full wrongly;
+	// at worst it delays confirming by one fullConfirm).
+	doneSince, askSince time.Time
+	fullConfirm         time.Duration
+	fullClear           time.Duration
+	lastReason          string
 
 	// charge-now override (0.6.15). While on, the plan's slots are ignored
 	// and the charger is driven at the highest current the phase guard
@@ -239,6 +260,7 @@ type period struct{ start, end time.Time }
 func New() *Module {
 	m := &Module{p: DefaultParams(), prefix: "loaver", depHHMM: 6*60 + 30,
 		priceEnt: "nordpool_kwh_se3_sek_3_06_0", cnHours: DefaultChargeNowHours, prices: map[int64]float64{},
+		fullConfirm: DefaultFullConfirm, fullClear: DefaultFullClear,
 		sessionsPath: filepath.Join(SessionsDir, "sessions.jsonl"), appendLine: appendFile,
 		x: newExec(), hub: house.Default, eqEnt: "equalizer_current", eqOnE: "binary_sensor.equalizer_online", eqFresh: DefaultEqFresh}
 	return m
@@ -389,6 +411,21 @@ func (m *Module) Configure(raw []byte) error {
 			msgs = append(msgs, "option ev_charge_now_hours out of range 0.1..48; default applied")
 		}
 	}
+	m.fullConfirm, m.fullClear = DefaultFullConfirm, DefaultFullClear
+	if o.FullConfM != nil {
+		if *o.FullConfM >= 1 && *o.FullConfM <= 120 {
+			m.fullConfirm = time.Duration(*o.FullConfM) * time.Minute
+		} else {
+			msgs = append(msgs, "option ev_full_confirm_min out of range 1..120; default applied")
+		}
+	}
+	if o.FullClrM != nil {
+		if *o.FullClrM >= 1 && *o.FullClrM <= 120 {
+			m.fullClear = time.Duration(*o.FullClrM) * time.Minute
+		} else {
+			msgs = append(msgs, "option ev_full_clear_min out of range 1..120; default applied")
+		}
+	}
 	m.x = x
 	if p.MaxA < p.MinA {
 		msgs = append(msgs, "ev_max_a < ev_min_a; defaults applied")
@@ -502,30 +539,13 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 				m.x.chargerID = id
 			}
 		}
-		prevStatus := m.status
 		m.status, m.statusOK = u.State, u.Available || u.State != ""
 		if u.State == "unavailable" || u.State == "unknown" {
 			m.statusOK = false
 			m.status = ""
 		}
 		now := m.plugged()
-		if m.status != "" && m.status != "completed" {
-			m.cn.FromCompleted = false
-		}
-		switch m.status {
-		case "completed":
-			// A press while the car already read completed must not be undone
-			// by a repeat completed update (attribute-only change).
-			if m.cn.On && !(m.cn.FromCompleted && prevStatus == "completed") {
-				outs = append(outs, m.endChargeNow(u.Time, "completed", "car reports charging complete")...)
-				replan = true
-			}
-			if !m.full {
-				log.Printf("%s: charger reports completed: car treated as full until unplugged", Name)
-				replan = true
-			}
-			m.full = true
-		case "disconnected":
+		if m.status == "disconnected" {
 			if m.full {
 				log.Printf("%s: charger disconnected: full flag cleared", Name)
 			}
@@ -535,6 +555,9 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 				replan = true
 			}
 		}
+		m.trackStatus(u.Time, u.Replay)
+		o2, r2 := m.checkFull(u.Time)
+		outs, replan = append(outs, o2...), replan || r2
 		switch {
 		case now && !was:
 			m.startSession(u.Time)
@@ -550,6 +573,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 			m.evKW = 0
 		}
 		m.evKWAt = u.Time
+		m.noteDraw(u.Time)
 		outs = append(outs, m.runGuard(u.Time)...)
 	case m.ent("session_energy"):
 		if u.Available {
@@ -562,6 +586,7 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		m.x.armedKey = u.State == "on"
 	case m.ent("current"):
 		m.chargerA, m.chargerAOK = u.Value, u.Available
+		m.noteDraw(u.Time)
 	case m.eqEnt:
 		ok := u.Available
 		var a [3]float64
@@ -613,6 +638,74 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		m.replan(u.Time)
 	}
 	return append(outs, m.publishAll(u.Time, replan)...)
+}
+
+// drawing: the charger is delivering current (power or current reading).
+func (m *Module) drawing() bool {
+	return m.evKW > drawKW || (m.chargerAOK && m.chargerA >= drawA)
+}
+
+// noteDraw restarts a pending full confirmation when the charger draws.
+func (m *Module) noteDraw(t time.Time) {
+	if !m.doneSince.IsZero() && m.drawing() {
+		m.doneSince = t
+	}
+}
+
+func askingToCharge(s string) bool { return s == "awaiting_start" || s == "ready_to_charge" }
+
+// trackStatus maintains the two debounce clocks from the latest status.
+// A replayed (history) status does not start a clock; the next tick does,
+// so a restart never counts time it did not observe.
+func (m *Module) trackStatus(t time.Time, replay bool) {
+	if m.status != "completed" || m.full {
+		m.doneSince = time.Time{}
+	} else if m.doneSince.IsZero() && !replay {
+		m.doneSince = t
+	}
+	if !m.full || !askingToCharge(m.status) {
+		m.askSince = time.Time{}
+	} else if m.askSince.IsZero() && !replay {
+		m.askSince = t
+	}
+}
+
+// checkFull confirms full (completed held for fullConfirm without draw) or
+// clears it (asking to charge held for fullClear). Returns whether to replan.
+func (m *Module) checkFull(t time.Time) (outs []modules.OutputUpdate, replan bool) {
+	if m.status == "completed" && !m.full && !m.doneSince.IsZero() && m.plugged() {
+		if m.drawing() {
+			m.doneSince = t
+		} else if t.Sub(m.doneSince) >= m.fullConfirm {
+			m.full, m.doneSince = true, time.Time{}
+			log.Printf("%s: charger completed for %s with no draw: car confirmed full until unplugged or it asks to charge", Name, m.fullConfirm)
+			m.logbookOnly("full", "EV car full", fmt.Sprintf("The charger has read completed for %d min with no current: the car is treated as full.", int(m.fullConfirm.Minutes())))
+			outs = append(outs, m.endChargeNow(t, "completed", "car confirmed full")...)
+			replan = true
+		}
+	}
+	if m.full && !m.askSince.IsZero() && askingToCharge(m.status) && t.Sub(m.askSince) >= m.fullClear {
+		m.full, m.askSince = false, time.Time{}
+		m.x.pauseAt = time.Time{}
+		log.Printf("%s: charger reads %s for %s while marked full: full cleared, replanning", Name, m.status, m.fullClear)
+		m.logbookOnly("full_cleared", "EV car no longer full", fmt.Sprintf("The charger has read %s for %d min: the car is asking to charge, so the full flag is cleared and charging is planned again.", m.status, int(m.fullClear.Minutes())))
+		replan = true
+	}
+	return outs, replan
+}
+
+// pendingNote is the state-reason text for a running debounce, or "".
+func (m *Module) pendingNote(now time.Time) string {
+	min := func(since time.Time, of time.Duration) string {
+		return fmt.Sprintf("%d/%d min", int(now.Sub(since).Minutes()), int(of.Minutes()))
+	}
+	switch {
+	case !m.full && m.status == "completed" && !m.doneSince.IsZero():
+		return "completed — confirming full (" + min(m.doneSince, m.fullConfirm) + ")"
+	case m.full && askingToCharge(m.status) && !m.askSince.IsZero():
+		return "car full but " + m.status + " — confirming it wants to charge (" + min(m.askSince, m.fullClear) + ")"
+	}
+	return ""
 }
 
 func (m *Module) prunePrices(now time.Time) {
@@ -808,13 +901,24 @@ func (m *Module) OnButton(objectID string, now time.Time) []modules.OutputUpdate
 		outs := m.startChargeNow(now)
 		return append(outs, m.publishAll(now, true)...)
 	case ButtonChargeNowStop:
+		// Stop means "stop forcing": it always hands back to normal
+		// operation, whether or not the override was still on (it may have
+		// ended on its own). It does NOT clear full (that clears by rule:
+		// the car asking to charge for ev_full_clear_min). Replan and one
+		// control pass run at once, with the pause hold-back lifted.
 		var outs []modules.OutputUpdate
 		if m.cn.On {
 			outs = m.endChargeNow(now, "stopped", "Stop pressed")
-			m.replan(now)
 		} else {
-			log.Printf("%s: charge now stop pressed but the override is not on; ignored", Name)
+			log.Printf("%s: charge now stop pressed with the override already off; replanning", Name)
+			m.cn.Note = "stop pressed; override was already off, planning re-run"
+			if m.full {
+				m.cn.Note += "; car still marked full (clears when it asks to charge)"
+			}
 		}
+		m.x.pauseAt = time.Time{}
+		m.replan(now)
+		m.control(now)
 		return append(outs, m.publishAll(now, true)...)
 	}
 	return nil
@@ -852,12 +956,17 @@ func (m *Module) startChargeNow(now time.Time) []modules.OutputUpdate {
 	m.cn.Note = "charge now active"
 	if !was {
 		m.cn.Since = now
-		m.cn.Kicked = false
+		// Start/resume is kicked once, and only when pressed while the car
+		// reads completed; a later completed blip must not send commands.
+		m.cn.Kicked = m.status != "completed"
 		m.cn.EndedReason, m.cn.EndedAt = "", time.Time{}
-		m.cn.FromCompleted = m.status == "completed"
+		if m.status == "completed" {
+			m.doneSince = now // the car gets a full confirm window to start
+		}
 		if m.full {
-			log.Printf("%s: charge now pressed while full: full flag cleared for this session", Name)
+			log.Printf("%s: charge now pressed while full: full flag cleared", Name)
 			m.full = false
+			m.askSince = time.Time{}
 		}
 		m.x.pauseAt = time.Time{} // do not hold the first command back
 		log.Printf("%s: charge now ON until %s", Name, m.cn.Until.In(m.p.Loc).Format(time.RFC3339))
@@ -877,7 +986,7 @@ func (m *Module) endChargeNow(now time.Time, code, text string) []modules.Output
 	}
 	m.cn.On = false
 	m.cn.EndedReason, m.cn.EndedAt, m.cn.Note = code, now, "ended: "+text
-	m.cn.FromCompleted, m.cn.Kicked = false, false
+	m.cn.Kicked = false
 	log.Printf("%s: charge now ended (%s)", Name, code)
 	m.logbookOnly("charge_now", "EV charge now ended", fmt.Sprintf("Charge now ended: %s. Normal planning resumes.", text))
 	m.replan(now)
@@ -917,7 +1026,10 @@ func (m *Module) OnTick(now time.Time) []modules.OutputUpdate {
 	if m.cn.On && !now.Before(m.cn.Until) {
 		outs = append(outs, m.endChargeNow(now, "timeout", fmt.Sprintf("timeout after %.4g h", m.chargeNowHours().Hours()))...)
 	}
-	re := m.lastPlanAt.IsZero() || now.Sub(m.lastPlanAt) >= 15*time.Minute
+	m.trackStatus(now, false)
+	o2, rp := m.checkFull(now)
+	outs = append(outs, o2...)
+	re := rp || m.lastPlanAt.IsZero() || now.Sub(m.lastPlanAt) >= 15*time.Minute
 	if re {
 		m.replan(now)
 	}
@@ -946,6 +1058,14 @@ func (m *Module) slotAt(t time.Time) (Slot, bool) {
 
 // decide returns the controller state, the would-be command and the reason.
 func (m *Module) decide(now time.Time) (state, cmd, reason string) {
+	state, cmd, reason = m.decide0(now)
+	if n := m.pendingNote(now); n != "" {
+		reason = n + "; " + reason
+	}
+	return
+}
+
+func (m *Module) decide0(now time.Time) (state, cmd, reason string) {
 	if !m.plugged() || m.sess == nil {
 		return "idle", "none", "car not plugged in"
 	}
@@ -1045,10 +1165,10 @@ func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 			AttributesJSON: jsonStr(map[string]any{"mode": m.modeString(), "armed_live": m.armedLive(), "paused_by_us": m.x.st.Paused})})
 	}
 	state, cmd, reason := m.decide(now)
-	if force || state != m.lastState {
-		m.lastState = state
+	if force || state != m.lastState || reason != m.lastReason {
+		m.lastState, m.lastReason = state, reason
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjState, Time: now, StateString: state,
-			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": !m.armedLive(), "unplanned_kwh": round(m.plan.UnplannedKWh, 1)})})
+			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": !m.armedLive(), "unplanned_kwh": round(m.plan.UnplannedKWh, 1), "full": m.full, "confirming": m.pendingNote(now) != ""})})
 	}
 	if force || cmd != m.lastWould {
 		m.lastWould = cmd
