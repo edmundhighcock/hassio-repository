@@ -69,6 +69,19 @@ install): `hard_lockup` = `hard LOCKUP` and `kernel_panic` = `Kernel panic`
 regex, edit it in the options; to add a rule, append one; `[]` means no
 rules. A rule with a bad regex is skipped and logged as an error.
 
+Benign SATA softreset (any rule): disks spinning up after resume from suspend
+log `ataN: softreset failed (device not ready)` and recover seconds later. A
+match whose only matching line is such a softreset failure is ignored within
+60 s after a `PM: suspend exit` line; otherwise it is held back 30 s and
+dropped if `ataN: SATA link up` for the same port arrives, else it alerts as
+usual (30 s late). All other matching lines alert immediately.
+
+Automations: the add-on never re-publishes an event on start (the event topic
+is not retained). HA restores the event entity's last state when the add-on
+comes back online, which is a state change from `unavailable`; an automation
+should require `trigger.from_state` to be a real state and the event
+timestamp (the entity state) to be recent.
+
 How a rule behaves, per source:
 
 - The **first** match fires the `alert` event and updates `Last alert` and

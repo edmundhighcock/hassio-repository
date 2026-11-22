@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.2
+
+- Benign SATA softreset at resume no longer raises `ata_error`. A match whose
+  only matching line is `ataN: softreset failed` is dropped when it comes
+  within 60 s after a `PM: suspend exit` line, and is otherwise held back for
+  30 s: a `SATA link up` for the same port inside that time drops it, if none
+  comes it alerts as before (30 s late). Every other matching line (exception
+  Emask, failed command, hard resetting link, timeouts, ...) alerts at once.
+  No new options.
+- Documented (and tested) that the add-on never re-emits an event at startup:
+  the event topic is not retained and nothing is published to it on connect.
+  The "replay" seen on 2026-11-22 was Home Assistant restoring the event
+  entity's last state when the add-on's availability flipped back to online;
+  guard the automation with `trigger.from_state` and the event timestamp.
+
 ## 0.1.1
 
 - Removed the `listen_port` option: the receiver always listens on 26666/udp

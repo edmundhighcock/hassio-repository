@@ -1,6 +1,6 @@
 name: "Netconsole Receiver"
 description: "Receives Linux netconsole kernel logs over UDP, keeps rotated per-host log files, and publishes per-host status and alerts to Home Assistant via MQTT"
-version: "0.1.1"
+version: "0.1.2"
 slug: "netconsole_receiver"
 init: false
 startup: application

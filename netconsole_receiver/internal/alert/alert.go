@@ -38,6 +38,34 @@ type Alert struct {
 	Time  time.Time
 }
 
+// Benign SATA softreset handling. Spinning HDDs on resume from suspend log
+// "ataN: softreset failed (device not ready)" and recover ~6 s later with
+// "ataN: SATA link up 6.0 Gbps". A match whose only matching line is such
+// a softreset failure is NOT alerted when it comes within ResumeQuiet of a
+// resume marker, and is held back for LinkUpHold otherwise: a "SATA link
+// up" for the same port inside that time drops it, otherwise it fires as
+// a normal match (late by LinkUpHold, nothing is lost). Every other
+// matching line is alerted at once, exactly as before.
+const (
+	ResumeQuiet = 60 * time.Second
+	LinkUpHold  = 30 * time.Second
+)
+
+var (
+	softresetRe = regexp.MustCompile(`\b(ata[0-9]+)(?:\.[0-9]+)?: softreset failed`)
+	linkUpRe    = regexp.MustCompile(`\b(ata[0-9]+): SATA link up\b`)
+	resumeRe    = regexp.MustCompile(`PM: suspend exit`)
+)
+
+// held is a softreset-only match waiting for a link-up on its port.
+type held struct {
+	rule     int
+	port     string
+	line     string
+	at       time.Time
+	deadline time.Time
+}
+
 type window struct {
 	end   time.Time
 	count int
@@ -49,15 +77,18 @@ type window struct {
 // Tracker holds the cooldown state of every rule for one source. Not safe
 // for concurrent use; the caller serialises.
 type Tracker struct {
-	rules []Rule
-	win   []*window
+	rules    []Rule
+	win      []*window
+	resumeAt time.Time // last resume marker seen; zero = none
+	pending  []held
 }
 
 func NewTracker(rules []Rule) *Tracker {
 	return &Tracker{rules: rules, win: make([]*window, len(rules))}
 }
 
-// Open reports whether any rule's cooldown window is open.
+// Open reports whether any rule's cooldown window is open. A held-back
+// softreset is not "open": it may yet turn out benign.
 func (t *Tracker) Open() bool {
 	for _, w := range t.win {
 		if w != nil {
@@ -80,6 +111,7 @@ func matchedLine(text string, loc []int) string {
 // Observe tests text against every rule and returns the alerts that fire
 // now (only first matches; later ones are counted silently).
 func (t *Tracker) Observe(text string, now time.Time) []Alert {
+	t.noteMarkers(text, now)
 	var out []Alert
 	for i, r := range t.rules {
 		loc := r.Re.FindStringIndex(text)
@@ -87,22 +119,80 @@ func (t *Tracker) Observe(text string, now time.Time) []Alert {
 			continue
 		}
 		line := matchedLine(text, loc)
-		w := t.win[i]
-		if w != nil {
-			w.count++
-			w.last, w.lastT = line, now
+		if sm := softresetRe.FindStringSubmatch(line); sm != nil && !t.otherMatch(r, text) {
+			if !t.resumeAt.IsZero() && !now.Before(t.resumeAt) && now.Sub(t.resumeAt) <= ResumeQuiet {
+				continue // benign: HDDs spinning up after resume
+			}
+			t.pending = append(t.pending, held{rule: i, port: sm[1], line: line, at: now, deadline: now.Add(LinkUpHold)})
 			continue
 		}
-		t.win[i] = &window{end: now.Add(r.Cooldown), count: 1, first: line, last: line, lastT: now}
-		out = append(out, Alert{Rule: r.Name, Kind: KindFirst, Count: 1, First: line, Last: line, Time: now})
+		if a, ok := t.fire(i, line, now); ok {
+			out = append(out, a)
+		}
 	}
 	return out
+}
+
+// noteMarkers records resume markers and drops held softresets whose port
+// came back up.
+func (t *Tracker) noteMarkers(text string, now time.Time) {
+	if resumeRe.MatchString(text) {
+		t.resumeAt = now
+	}
+	if len(t.pending) == 0 {
+		return
+	}
+	for _, m := range linkUpRe.FindAllStringSubmatch(text, -1) {
+		keep := t.pending[:0]
+		for _, h := range t.pending {
+			if h.port != m[1] {
+				keep = append(keep, h)
+			}
+		}
+		t.pending = keep
+	}
+}
+
+// otherMatch reports whether rule r also matches text on a line that is
+// not a softreset failure.
+func (t *Tracker) otherMatch(r Rule, text string) bool {
+	for _, l := range strings.Split(text, "\n") {
+		if r.Re.MatchString(l) && !softresetRe.MatchString(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// fire counts a match in rule i's window, opening it (and returning the
+// first-match alert) when it was closed.
+func (t *Tracker) fire(i int, line string, now time.Time) (Alert, bool) {
+	r := t.rules[i]
+	if w := t.win[i]; w != nil {
+		w.count++
+		w.last, w.lastT = line, now
+		return Alert{}, false
+	}
+	t.win[i] = &window{end: now.Add(r.Cooldown), count: 1, first: line, last: line, lastT: now}
+	return Alert{Rule: r.Name, Kind: KindFirst, Count: 1, First: line, Last: line, Time: now}, true
 }
 
 // Tick closes windows that have expired and returns one summary for each
 // whose count rose above 1.
 func (t *Tracker) Tick(now time.Time) []Alert {
 	var out []Alert
+	// Held softresets whose link-up never came are real: alert as usual.
+	keep := t.pending[:0]
+	for _, h := range t.pending {
+		if now.Before(h.deadline) {
+			keep = append(keep, h)
+			continue
+		}
+		if a, ok := t.fire(h.rule, h.line, h.at); ok {
+			out = append(out, a)
+		}
+	}
+	t.pending = keep
 	for i, w := range t.win {
 		if w == nil || now.Before(w.end) {
 			continue

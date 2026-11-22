@@ -239,7 +239,11 @@ func (e *Engine) Tick(now time.Time) {
 	e.flushExpired(now)
 	for _, s := range e.srcs {
 		for _, a := range s.tracker.Tick(now) {
-			e.logf("ALERT SUMMARY source=%s rule=%s count=%d", s.cfg.Name, a.Rule, a.Count)
+			if a.Kind == alert.KindFirst { // a held-back softreset that was not benign
+				e.logf("ALERT source=%s rule=%s: %s", s.cfg.Name, a.Rule, alert.AttrText(a.Last))
+			} else {
+				e.logf("ALERT SUMMARY source=%s rule=%s count=%d", s.cfg.Name, a.Rule, a.Count)
+			}
 			e.notify.Alert(s.cfg.Name, a)
 		}
 		e.syncProblem(s)

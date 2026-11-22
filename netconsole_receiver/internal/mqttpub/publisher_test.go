@@ -200,3 +200,35 @@ func TestNothingPublishedWhileDisconnected(t *testing.T) {
 		t.Fatal("last alert not replayed")
 	}
 }
+
+// A restart (or a reconnect, or HA coming online) must not re-emit the
+// last event: the event topic is never retained and OnConnect never
+// publishes to it, even when a previous alert is known. HA restores the
+// event entity's state itself.
+func TestOnConnectDoesNotReemitPreviousEvent(t *testing.T) {
+	f := &fakeClient{up: true}
+	p := newPub(f)
+	p.Alert("box", alert.Alert{Rule: "hard_lockup", Kind: alert.KindFirst, Count: 1, First: "x", Last: "x", Time: t0})
+	if n := len(f.topic("netconsole_receiver/box/alert_event")); n != 1 {
+		t.Fatalf("setup: %d events", n)
+	}
+	f2 := &fakeClient{up: true}
+	p.SetClient(f2) // reconnect with the same publisher (previous alert known)
+	p.OnConnect()
+	p.OnConnect() // homeassistant/status online
+	if m := f2.topic("netconsole_receiver/box/alert_event"); len(m) != 0 {
+		t.Fatalf("event re-emitted on connect: %+v", m)
+	}
+	for _, m := range f2.msgs {
+		if strings.HasSuffix(m.Topic, "/alert_event") {
+			t.Fatalf("%+v", m)
+		}
+	}
+	// A fresh process (restart) has no previous alert at all.
+	f3 := &fakeClient{up: true}
+	p3 := newPub(f3)
+	p3.OnConnect()
+	if m := f3.topic("netconsole_receiver/box/alert_event"); len(m) != 0 {
+		t.Fatalf("%+v", m)
+	}
+}
