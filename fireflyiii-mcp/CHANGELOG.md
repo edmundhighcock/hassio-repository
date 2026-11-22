@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13-pTags-dev] - 2026-11-22
+
+### Added
+- `update_transaction` accepts `tags` (LamPyrid 5bb6813). The list REPLACES the
+  transaction's tag set; `[]` clears it; omitting leaves tags unchanged.
+  Transactions returned by the tools now include their tags.
+
 ## [0.1.12-pCurrency-dev] - 2026-09-27
 
 ### Fixed
