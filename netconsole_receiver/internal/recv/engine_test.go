@@ -230,3 +230,22 @@ func TestCountersAndLastMessage(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 }
+
+// A sequence GAP reaches the tracker as a resume marker: a softreset-only
+// ata line right after it is dropped without waiting for a link-up.
+func TestGapIsResumeMarkerForSoftreset(t *testing.T) {
+	sinks := map[string]*memSink{}
+	n := &note{}
+	c := config.Resolved{Srcs: one()}
+	c.Rules = []alert.Rule{{Name: "ata_error", Re: regexp.MustCompile(`ata[0-9.]+: .*(timeout|reset|failed command)`), Cooldown: time.Minute}}
+	e := New(c, func(name string) Sink { s := &memSink{}; sinks[name] = s; return s }, n, func(string, ...any) {})
+	h := func(seq string, msg string, d time.Duration) {
+		e.Handle(ap("10.0.0.2:1"), []byte("6,"+seq+",1,-;"+msg), t0.Add(d))
+	}
+	h("10", "ata5: link is slow to respond", 0)
+	h("20", "ata5: softreset failed (device not ready)", time.Second) // GAP 11..19
+	e.Tick(t0.Add(40 * time.Second))
+	if len(n.alerts) != 0 || e.srcs[0].tracker.Stats().SuppressedResume != 1 {
+		t.Fatalf("%+v %+v", n.alerts, e.srcs[0].tracker.Stats())
+	}
+}

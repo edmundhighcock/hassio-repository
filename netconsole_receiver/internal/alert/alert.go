@@ -55,7 +55,37 @@ var (
 	softresetRe = regexp.MustCompile(`\b(ata[0-9]+)(?:\.[0-9]+)?: softreset failed`)
 	linkUpRe    = regexp.MustCompile(`\b(ata[0-9]+): SATA link up\b`)
 	resumeRe    = regexp.MustCompile(`PM: suspend exit`)
+	suspendRe   = regexp.MustCompile(`sys-netconsole: suspending`)
+	// A stall is never benign: these strings must never be swallowed by
+	// the softreset suppression, whatever else the text says.
+	hardRe = regexp.MustCompile(`exception Emask|DID_TIME_OUT`)
 )
+
+// Resume markers, besides "PM: suspend exit" (which usually falls inside
+// the sequence GAP of a real resume and so never arrives):
+//   - a GAP in the sequence numbers (the engine calls NoteGap);
+//   - a "sys-netconsole: suspending" message followed by SuspendSilence of
+//     nothing at all: the first message after that silence is a resume.
+//
+// A suspend that is aborted leaves the flag set; the next message that
+// comes after a long silence (e.g. a 10-min heartbeat) then opens one
+// harmless 60-s window.
+const SuspendSilence = 5 * time.Minute
+
+// Marker names, as reported by Stats.
+const (
+	MarkerSuspendExit = "suspend_exit"
+	MarkerGap         = "gap"
+	MarkerSilence     = "suspend_silence"
+)
+
+// Stats counts how softreset-only matches were dropped, and which marker
+// opened the most recent resume window.
+type Stats struct {
+	SuppressedResume int
+	SuppressedLinkUp int
+	LastMarker       string
+}
 
 // held is a softreset-only match waiting for a link-up on its port.
 type held struct {
@@ -81,6 +111,26 @@ type Tracker struct {
 	win      []*window
 	resumeAt time.Time // last resume marker seen; zero = none
 	pending  []held
+	marker   string    // kind of the marker that set resumeAt
+	lastMsg  time.Time // time of the previous Observe
+	suspend  bool      // "sys-netconsole: suspending" seen, no resume yet
+	stats    Stats
+}
+
+// Stats returns the suppression counters.
+func (t *Tracker) Stats() Stats {
+	st := t.stats
+	st.LastMarker = t.marker
+	return st
+}
+
+// NoteGap tells the tracker that the sender's sequence numbers jumped
+// forward (messages were lost), which on a real resume is how the resume
+// shows. Call it before Observe of the message that revealed the gap.
+func (t *Tracker) NoteGap(now time.Time) { t.setResume(MarkerGap, now) }
+
+func (t *Tracker) setResume(kind string, now time.Time) {
+	t.resumeAt, t.marker, t.suspend = now, kind, false
 }
 
 func NewTracker(rules []Rule) *Tracker {
@@ -119,8 +169,9 @@ func (t *Tracker) Observe(text string, now time.Time) []Alert {
 			continue
 		}
 		line := matchedLine(text, loc)
-		if sm := softresetRe.FindStringSubmatch(line); sm != nil && !t.otherMatch(r, text) {
+		if sm := softresetRe.FindStringSubmatch(line); sm != nil && !hardRe.MatchString(text) && !t.otherMatch(r, text) {
 			if !t.resumeAt.IsZero() && !now.Before(t.resumeAt) && now.Sub(t.resumeAt) <= ResumeQuiet {
+				t.stats.SuppressedResume++
 				continue // benign: HDDs spinning up after resume
 			}
 			t.pending = append(t.pending, held{rule: i, port: sm[1], line: line, at: now, deadline: now.Add(LinkUpHold)})
@@ -136,8 +187,15 @@ func (t *Tracker) Observe(text string, now time.Time) []Alert {
 // noteMarkers records resume markers and drops held softresets whose port
 // came back up.
 func (t *Tracker) noteMarkers(text string, now time.Time) {
+	if t.suspend && !t.lastMsg.IsZero() && now.Sub(t.lastMsg) >= SuspendSilence {
+		t.setResume(MarkerSilence, now)
+	}
+	t.lastMsg = now
 	if resumeRe.MatchString(text) {
-		t.resumeAt = now
+		t.setResume(MarkerSuspendExit, now)
+	}
+	if suspendRe.MatchString(text) {
+		t.suspend = true
 	}
 	if len(t.pending) == 0 {
 		return
@@ -147,6 +205,8 @@ func (t *Tracker) noteMarkers(text string, now time.Time) {
 		for _, h := range t.pending {
 			if h.port != m[1] {
 				keep = append(keep, h)
+			} else {
+				t.stats.SuppressedLinkUp++
 			}
 		}
 		t.pending = keep

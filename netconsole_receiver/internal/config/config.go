@@ -82,7 +82,7 @@ func DefaultRules() []RuleOpt {
 	return []RuleOpt{
 		{Name: "hard_lockup", Regex: `hard LOCKUP`, CooldownMin: 1},
 		{Name: "kernel_panic", Regex: `Kernel panic`, CooldownMin: 1},
-		{Name: "ata_error", Regex: `ata[0-9.]+: .*(timeout|reset|failed command)`, CooldownMin: 15},
+		{Name: "ata_error", Regex: `ata[0-9.]+: .*(timeout|reset|failed command)|exception Emask|DID_TIME_OUT`, CooldownMin: 15},
 		{Name: "btrfs_error", Regex: `BTRFS (error|warning|critical)`, CooldownMin: 15},
 	}
 }

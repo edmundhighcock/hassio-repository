@@ -64,7 +64,7 @@ alert_rules:
 
 Defaults, used when `alert_rules` is absent (and written into the options on
 install): `hard_lockup` = `hard LOCKUP` and `kernel_panic` = `Kernel panic`
-(1 minute), `ata_error` = `ata[0-9.]+: .*(timeout|reset|failed command)` and
+(1 minute), `ata_error` = `ata[0-9.]+: .*(timeout|reset|failed command)|exception Emask|DID_TIME_OUT` and
 `btrfs_error` = `BTRFS (error|warning|critical)` (15 minutes). To change a
 regex, edit it in the options; to add a rule, append one; `[]` means no
 rules. A rule with a bad regex is skipped and logged as an error.
@@ -72,9 +72,19 @@ rules. A rule with a bad regex is skipped and logged as an error.
 Benign SATA softreset (any rule): disks spinning up after resume from suspend
 log `ataN: softreset failed (device not ready)` and recover seconds later. A
 match whose only matching line is such a softreset failure is ignored within
-60 s after a `PM: suspend exit` line; otherwise it is held back 30 s and
-dropped if `ataN: SATA link up` for the same port arrives, else it alerts as
-usual (30 s late). All other matching lines alert immediately.
+60 s after a resume marker; otherwise it is held back 30 s and dropped if
+`ataN: SATA link up` for the same port arrives, else it alerts as usual (30 s
+late). All other matching lines alert immediately, and a message containing
+`exception Emask` or `DID_TIME_OUT` is never treated as benign.
+
+Resume markers: a `PM: suspend exit` line; a sequence (or msgid) GAP, because
+the resume messages are usually lost in the suspend (the exit line then never
+arrives); and the first message after at least 5 minutes of silence that
+follows a `sys-netconsole: suspending` line. A suspend that is aborted can make
+the next message after a long silence, such as a 10-minute heartbeat, open one
+harmless 60 s window. The default `ata_error` regex includes
+`exception Emask|DID_TIME_OUT` since 0.1.3; options saved by an earlier version
+keep their old regex until edited.
 
 Automations: the add-on never re-publishes an event on start (the event topic
 is not retained). HA restores the event entity's last state when the add-on

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.3
+
+- Default `ata_error` regex now also matches `exception Emask` and
+  `DID_TIME_OUT` (anywhere in the message, not only after `ataN:`), so a disk
+  stall pages on its first line. Installed options keep their old regex:
+  edit `ata_error` in the add-on options to pick it up. These two strings are
+  never swallowed by the softreset suppression.
+- Resume detection for the benign-softreset rule no longer depends on the
+  `PM: suspend exit` line, which on a real resume falls inside the sequence
+  GAP. Resume markers are now: that line, a sequence/msgid GAP, and the first
+  message after >= 5 min of silence that follows `sys-netconsole: suspending`.
+  Each opens the 60 s window. The 30 s link-up fallback is unchanged. Tested
+  against the real 2026-11-16 resume log. No new options.
+
 ## 0.1.2
 
 - Benign SATA softreset at resume no longer raises `ata_error`. A match whose

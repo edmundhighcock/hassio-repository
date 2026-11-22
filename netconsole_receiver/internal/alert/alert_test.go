@@ -13,7 +13,7 @@ var t0 = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 func rules() []Rule {
 	return []Rule{
 		{Name: "hard_lockup", Re: regexp.MustCompile(`hard LOCKUP`), Cooldown: time.Minute},
-		{Name: "ata_error", Re: regexp.MustCompile(`ata[0-9.]+: .*(timeout|reset|failed command)`), Cooldown: 15 * time.Minute},
+		{Name: "ata_error", Re: regexp.MustCompile(`ata[0-9.]+: .*(timeout|reset|failed command)|exception Emask|DID_TIME_OUT`), Cooldown: 15 * time.Minute},
 	}
 }
 

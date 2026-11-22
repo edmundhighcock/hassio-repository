@@ -1,0 +1,37 @@
+# netconsole lines from hass /addon_configs/9547a9e0_netconsole_receiver/resilience.log.1, lines 1255-1290 (2026-11-16, real resume from suspend; the exit line fell inside GAP 1484..1547)
+2026-11-16T06:20:00.218Z 192.168.0.106:6665 14,1468,70912224840,-,caller=T2099198;sys-netconsole: heartbeat\n
+2026-11-16T06:30:00.908Z 192.168.0.106:6665 14,1469,71512910485,-,caller=T2114848;sys-netconsole: heartbeat\n
+2026-11-16T06:40:00.114Z 192.168.0.106:6665 14,1470,72112110975,-,caller=T2130211;sys-netconsole: heartbeat\n
+2026-11-16T06:50:00.241Z 192.168.0.106:6665 14,1471,72712233429,-,caller=T2145926;sys-netconsole: heartbeat\n
+2026-11-16T07:00:00.963Z 192.168.0.106:6665 14,1472,73312950822,-,caller=T2161535;sys-netconsole: heartbeat\n
+2026-11-16T07:10:00.344Z 192.168.0.106:6665 14,1473,73912325938,-,caller=T2176952;sys-netconsole: heartbeat\n
+2026-11-16T07:20:00.507Z 192.168.0.106:6665 14,1474,74512483952,-,caller=T2192691;sys-netconsole: heartbeat\n
+2026-11-16T07:23:21.385Z 192.168.0.106:6665 14,1475,74713360806,-,caller=T2197883;sys-netconsole: suspending (suspend)\n
+2026-11-16T07:23:21.391Z 192.168.0.106:6665 6,1476,74713366875,-,caller=T2197879;PM: suspend entry (deep)\n
+2026-11-16T07:23:21.541Z 192.168.0.106:6665 6,1477,74713516482,-,caller=T2171892;Filesystems sync: 0.149 seconds\n
+2026-11-16T07:23:21.630Z 192.168.0.106:6665 6,1478,74713605744,-,caller=T2197879;Freezing user space processes\n
+2026-11-16T07:23:21.632Z 192.168.0.106:6665 6,1479,74713607692,-,caller=T2197879;Freezing user space processes completed (elapsed 0.001 seconds)\n
+2026-11-16T07:23:21.632Z 192.168.0.106:6665 6,1480,74713607726,-,caller=T2197879;OOM killer disabled.\n
+2026-11-16T07:23:21.632Z 192.168.0.106:6665 6,1481,74713607741,-,caller=T2197879;Freezing remaining freezable tasks\n
+2026-11-16T07:23:21.633Z 192.168.0.106:6665 6,1482,74713608972,-,caller=T2197879;Freezing remaining freezable tasks completed (elapsed 0.001 seconds)\n
+2026-11-16T07:23:21.633Z 192.168.0.106:6665 6,1483,74713609028,-,caller=T2197879;printk: Suspending console(s) (use no_console_suspend to debug)\n
+2026-11-16T12:12:45.248Z 192.168.0.106:6665 4,1548,74721260478,-,caller=T470;ata5: link is slow to respond, please be patient (ready=0)\n
+2026-11-16T12:12:45.248Z 192.168.0.106:6665 GAP 1484..1547
+2026-11-16T12:12:45.248Z 192.168.0.106:6665 4,1549,74721261475,-,caller=T472;ata6: link is slow to respond, please be patient (ready=0)\n
+2026-11-16T12:12:49.941Z 192.168.0.106:6665 6,1550,74725954278,-,caller=T470;ata5: found unknown device (class 0)\n
+2026-11-16T12:12:49.943Z 192.168.0.106:6665 6,1551,74725956167,-,caller=T472;ata6: found unknown device (class 0)\n
+2026-11-16T12:12:50.083Z 192.168.0.106:6665 3,1552,74726096427,-,caller=T472;ata6: softreset failed (device not ready)\n
+2026-11-16T12:12:50.093Z 192.168.0.106:6665 3,1553,74726096463,-,caller=T470;ata5: softreset failed (device not ready)\n
+2026-11-16T12:12:51.324Z 192.168.0.106:6665 6,1554,74727337083,-,caller=T470;ata5: SATA link up 6.0 Gbps (SStatus 133 SControl 300)\n
+2026-11-16T12:12:51.399Z 192.168.0.106:6665 5,1555,74727412730,-,caller=T2194114;sd 4:0:0:0: [sdb] Starting disk\n SUBSYSTEM=scsi\n DEVICE=+scsi:4:0:0:0\n
+2026-11-16T12:12:51.400Z 192.168.0.106:6665 6,1556,74727413795,-,caller=T470;ata5.00: configured for UDMA/100\n
+2026-11-16T12:12:51.937Z 192.168.0.106:6665 6,1557,74727949991,-,caller=T472;ata6: SATA link up 6.0 Gbps (SStatus 133 SControl 300)\n
+2026-11-16T12:12:51.997Z 192.168.0.106:6665 5,1558,74728010613,-,caller=T2188881;sd 5:0:0:0: [sdc] Starting disk\n SUBSYSTEM=scsi\n DEVICE=+scsi:5:0:0:0\n
+2026-11-16T12:12:51.998Z 192.168.0.106:6665 6,1559,74728011504,-,caller=T472;ata6.00: configured for UDMA/100\n
+2026-11-16T12:20:00.168Z 192.168.0.106:6665 14,1560,75156177757,-,caller=T2213022;sys-netconsole: heartbeat\n
+2026-11-16T12:26:10.032Z 192.168.0.106:6665 6,1561,75526040308,-,caller=T1715;docker0: port 3(veth1d9c9cf) entered blocking state\n
+2026-11-16T12:26:10.033Z 192.168.0.106:6665 6,1562,75526040337,-,caller=T1715;docker0: port 3(veth1d9c9cf) entered disabled state\n
+2026-11-16T12:26:10.033Z 192.168.0.106:6665 6,1563,75526041075,-,caller=T1715;veth1d9c9cf: entered allmulticast mode\n
+2026-11-16T12:26:10.033Z 192.168.0.106:6665 6,1564,75526041275,-,caller=T1715;veth1d9c9cf: entered promiscuous mode\n
+2026-11-16T12:26:10.072Z 192.168.0.106:6665 6,1565,75526080696,-,caller=T1656;eth0: renamed from veth5221f37\n
+2026-11-16T12:26:10.073Z 192.168.0.106:6665 6,1566,75526081364,-,caller=T2197924;docker0: port 3(veth1d9c9cf) entered blocking state\n

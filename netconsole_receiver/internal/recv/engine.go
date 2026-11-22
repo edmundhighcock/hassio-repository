@@ -200,6 +200,7 @@ func (e *Engine) trackSeq(s *source, from netip.AddrPort, now time.Time, label s
 	switch {
 	case v > t.last+1:
 		s.stats.Gaps++
+		s.tracker.NoteGap(now)
 		e.write(s, from, now, fmt.Sprintf("GAP %s%d..%d", label, t.last+1, v-1))
 	case v < t.last:
 		e.write(s, from, now, fmt.Sprintf("SEQ_RESET %s%d->%d", label, t.last, v))
