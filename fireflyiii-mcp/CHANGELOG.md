@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14-pTagsAdd-dev] - 2026-11-23
+
+### Added
+- `update_transaction` accepts `add_tags` and `remove_tags` (LamPyrid 0465ed0):
+  read-modify-write that keeps existing tags. `tags` still replaces the whole
+  set; combining it with `add_tags`/`remove_tags` is rejected before any call.
+
 ## [0.1.13-pTags-dev] - 2026-11-22
 
 ### Added
