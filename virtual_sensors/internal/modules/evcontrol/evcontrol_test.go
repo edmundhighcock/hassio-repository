@@ -22,26 +22,68 @@ func prices(from, to time.Time, f func(h int) float64) []planner.Price {
 	return out
 }
 
+// wouldStateOf is the would-do state of the published controller state: the
+// shadow modules read "disarmed", with the plan's state in would_state.
+func wouldStateOf(outs []modules.OutputUpdate) string {
+	for _, o := range outs {
+		if o.ObjectID == ObjState {
+			var a map[string]any
+			if json.Unmarshal([]byte(o.AttributesJSON), &a) == nil {
+				if w, ok := a["would_state"].(string); ok {
+					return w
+				}
+			}
+			return o.StateString
+		}
+	}
+	return ""
+}
+
 func noHeater(time.Time) bool { return false }
 
-func TestCeilingArithmetic(t *testing.T) {
+func near(a, b float64) bool { return a-b < 1e-6 && b-a < 1e-6 }
+
+func TestDeliverableArithmetic(t *testing.T) {
 	p := DefaultParams()
-	if got := p.Ceiling(at(10, 23, 30), true); got != 8 { // 19-3-7.4 = 8.6 -> 8
-		t.Fatalf("outside heater window: %v", got)
+	p.Derate = 1
+	// Quiet house, 3 A each: three phases 16 A -> 11.04 kW beats single 16 A.
+	if a, kw := p.Deliverable([3]float64{3, 3, 3}); a != 16 || !near(kw, 11.04) {
+		t.Fatalf("quiet: %v %v", a, kw)
 	}
-	if got := p.Ceiling(at(10, 20, 0), false); got != 8 {
-		t.Fatalf("hot water off, heat pump still on C: %v", got)
+	// Heat pump 10.4 A on L2: three phases 9 A (6.21 kW) still beats single L3 16 A (3.68 kW).
+	if a, kw := p.Deliverable([3]float64{3, 10.4, 3}); a != 9 || !near(kw, 6.21) {
+		t.Fatalf("heat pump on L2: %v %v", a, kw)
 	}
-	p.HPA = 0
-	if got := p.Ceiling(at(10, 20, 0), true); got != 8 { // heater 7.5+3 on A: 8.5 -> 8
-		t.Fatalf("heater slot: %v", got)
+	// Heater too (L1+L2 at 17.9 A): three phases has 2 A, unusable; single phase L3 16 A.
+	if a, kw := p.Deliverable([3]float64{10.5, 17.9, 3}); a != 16 || !near(kw, 3.68) {
+		t.Fatalf("heater window: %v %v", a, kw)
 	}
-	if got := p.Ceiling(at(10, 23, 30), true); got != 16 {
-		t.Fatalf("clamp to max: %v", got)
+	// L3 busy too: single phase 20-15 = 5 A < 6 -> nothing.
+	if a, kw := p.Deliverable([3]float64{10.5, 17.9, 15}); a != 0 || kw != 0 {
+		t.Fatalf("no phase usable: %v %v", a, kw)
 	}
-	p.HPA = 12
-	if got := p.Ceiling(at(10, 23, 30), true); got != 0 {
-		t.Fatalf("below min must be 0: %v", got)
+	// The derate scales kW, not amps.
+	p.Derate = 0.9
+	if a, kw := p.Deliverable([3]float64{10.5, 17.9, 3}); a != 16 || !near(kw, 3.68*0.9) {
+		t.Fatalf("derate: %v %v", a, kw)
+	}
+	// A smaller fuse changes the answer.
+	p.FuseA = 16
+	if a, _ := p.Deliverable([3]float64{3, 3, 3}); a != 13 {
+		t.Fatalf("fuse 16: %v", a)
+	}
+}
+
+func TestStaticLoad(t *testing.T) {
+	p := DefaultParams()
+	if l := p.StaticLoad(at(10, 23, 30), true); l != [3]float64{3, 10.4, 3} {
+		t.Fatalf("outside the heater window: %v", l)
+	}
+	if l := p.StaticLoad(at(10, 20, 0), false); l != [3]float64{3, 10.4, 3} {
+		t.Fatalf("hot water off: %v", l)
+	}
+	if l := p.StaticLoad(at(10, 20, 0), true); l != [3]float64{10.5, 17.9, 3} {
+		t.Fatalf("heater window: %v", l)
 	}
 }
 
@@ -157,15 +199,17 @@ func TestNeedAfterPartialDelivery(t *testing.T) {
 	}
 }
 
-func TestHeaterSlotsLowerCeiling(t *testing.T) {
+func TestHeaterSlotsLowerDeliverable(t *testing.T) {
 	p := DefaultParams()
+	p.Derate = 1
 	p.HPA = 0 // isolate the heater
 	on := func(time.Time) bool { return true }
-	if c := p.Ceiling(at(10, 20, 0), on(at(10, 20, 0))); c != 8 {
-		t.Fatalf("%v", c)
+	// Heater on L1+L2 (10.5 A): three phases 9 A... min(9.5,9.5,17)=9.
+	if a, _ := p.Deliverable(p.StaticLoad(at(10, 20, 0), on(at(10, 20, 0)))); a != 9 {
+		t.Fatalf("%v", a)
 	}
-	if c := p.Ceiling(at(10, 12, 0), on(at(10, 12, 0))); c != 16 {
-		t.Fatalf("outside 16-23 the heater is not assumed: %v", c)
+	if a, _ := p.Deliverable(p.StaticLoad(at(10, 12, 0), on(at(10, 12, 0)))); a != 16 {
+		t.Fatalf("outside 16-23 the heater is not assumed: %v", a)
 	}
 }
 
@@ -243,12 +287,7 @@ func TestSyntheticNightReplay(t *testing.T) {
 	feed := func(u modules.StateUpdate) []modules.OutputUpdate { return m.OnStateUpdate(u) }
 	feed(modules.StateUpdate{EntityID: m.priceEnt, Time: t0, Available: true, Attrs: rawPrices(at(10, 0, 0), at(12, 0, 0), spike)})
 	outs := feed(modules.StateUpdate{EntityID: "loaver_status", Time: t0, State: "awaiting_start", Available: false})
-	state := ""
-	for _, o := range outs {
-		if o.ObjectID == ObjState {
-			state = o.StateString
-		}
-	}
+	state := wouldStateOf(outs)
 	if state != "planned" {
 		t.Fatalf("state after plug-in: %q (%+v)", state, outs)
 	}
@@ -284,9 +323,11 @@ func TestSyntheticNightReplay(t *testing.T) {
 	if rec["delivered_kwh"].(float64) < 40 || rec["plan_finishes_by_departure"] != true {
 		t.Fatalf("%v", rec)
 	}
-	// Followed the plan, so the saving against the plan's own cost is ~0
-	// (greater than -1 kr and below +1 kr: the plan buys the same kWh).
-	if s := rec["saving_kr"].(float64); s < -1 || s > 1 {
+	// Followed the plan, so the saving against the plan's own cost is about 0.
+	// Slots now differ in kW (deliverable energy follows the forecast load), so
+	// the plan's overshoot of the need (it fills whole slots and gaps) makes the
+	// hindsight comparison looser than with a uniform ceiling: within 5 kr.
+	if s := rec["saving_kr"].(float64); s < -5 || s > 5 {
 		t.Fatalf("plan-following session should score ~0, got %v (%v)", s, rec)
 	}
 	t.Logf("synthetic night: %.1f kWh, actual %.2f kr, plan %.2f kr", rec["delivered_kwh"], rec["actual_cost_kr"], rec["plan_cost_kr"])
@@ -335,14 +376,7 @@ func TestAwaitingPricesThenNormalPlan(t *testing.T) {
 		}
 		return 1.0
 	}
-	stateOf := func(outs []modules.OutputUpdate) string {
-		for _, o := range outs {
-			if o.ObjectID == ObjState {
-				return o.StateString
-			}
-		}
-		return ""
-	}
+	stateOf := wouldStateOf
 	m.OnStateUpdate(modules.StateUpdate{EntityID: m.priceEnt, Time: t0, Available: true, Attrs: rawPrices(at(10, 0, 0), at(11, 0, 0), f)})
 	outs := m.OnStateUpdate(modules.StateUpdate{EntityID: "loaver_status", Time: t0, State: "awaiting_start"})
 	if s := stateOf(outs); s != "awaiting_prices" {

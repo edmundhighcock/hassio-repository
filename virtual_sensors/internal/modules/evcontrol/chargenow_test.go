@@ -68,7 +68,7 @@ func TestButtonsDeclared(t *testing.T) {
 	}
 }
 
-func TestChargeNowStartsOutsideSlotAndGuardStaysInForce(t *testing.T) {
+func TestChargeNowStartsOutsideSlotAndWritesNoLimit(t *testing.T) {
 	e := newEnv(t, cnOpts, true)
 	e.advance(time.Minute, 1000) // 22:01, outside the 02:00-04:00 slots
 	e.reset()
@@ -86,9 +86,8 @@ func TestChargeNowStartsOutsideSlotAndGuardStaysInForce(t *testing.T) {
 	if got := e.actions(); !eqStr(got, []string{"start", "resume"}) {
 		t.Fatalf("want start+resume, got %v", got)
 	}
-	cl := e.svc("set_charger_dynamic_limit")
-	if len(cl) == 0 || cl[0].Data["current"] != 16 {
-		t.Fatalf("quiet house: want 16 A, got %+v", cl)
+	if n := len(e.svc("set_charger_dynamic_limit")) + len(e.svc("set_circuit_dynamic_limit")); n != 0 {
+		t.Fatalf("limit commands during charge now: %d", n)
 	}
 	if got := logbookEntries(e); len(got) != 1 || got[0] != "EV charge now started" {
 		t.Fatalf("logbook %v", got)
@@ -100,25 +99,16 @@ func TestChargeNowStartsOutsideSlotAndGuardStaysInForce(t *testing.T) {
 	if len(e.svc("action_command")) != 0 {
 		t.Fatalf("commands while charging: %v", e.actions())
 	}
-	// Heavy house: guard caps the current (12 A/phase house -> 7 A).
+	// Heavy house: the controller does not interfere (the charger and the
+	// Equalizer decide how much), not even with no headroom at all.
 	e.reset()
 	e.advance(3*time.Minute, 230*3*12)
-	cl = e.svc("set_charger_dynamic_limit")
-	if len(cl) == 0 || cl[len(cl)-1].Data["current"] != 7 {
-		t.Fatalf("guard not capping: %+v", cl)
-	}
-	cc := e.svc("set_circuit_dynamic_limit")
-	if last := cc[len(cc)-1].Data; last["current_p1"] != 7 || last["current_p3"] != 7 {
-		t.Fatalf("circuit %+v", last)
+	e.advance(2*time.Minute, 230*3*15)
+	if len(e.calls) != 0 {
+		t.Fatalf("commands under a heavy house: %+v", e.calls)
 	}
 	if st, _, _ := e.m.decide(e.now); st != "charge_now" {
 		t.Fatalf("state %s", st)
-	}
-	// No headroom: pause even in override.
-	e.reset()
-	e.advance(2*time.Minute, 230*3*15)
-	if !eqStr(e.actions(), []string{"pause"}) {
-		t.Fatalf("want pause with no headroom, got %v", e.actions())
 	}
 }
 
@@ -289,7 +279,7 @@ func TestChargeNowWhileDisconnectedDoesNothing(t *testing.T) {
 		t.Fatalf("%+v", u)
 	}
 	e.advance(5*time.Minute, 1000)
-	if len(e.calls) != 0 {
+	if len(e.actions()) != 0 {
 		t.Fatalf("calls %v", e.calls)
 	}
 }

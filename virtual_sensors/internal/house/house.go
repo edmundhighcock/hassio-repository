@@ -222,6 +222,25 @@ func (f Forecast) MinHeadroom(t time.Time, set PhaseSet) (float64, bool) {
 // minimum headroom over its phases.
 func (f Forecast) EVHeadroom(t time.Time) (float64, bool) { return f.MinHeadroom(t, f.EVPhases) }
 
+// NonEVLoadA is the forecast non-EV load per phase at slot t, in amps: the
+// budget less the headroom (so base, heater and heat pump on the phases each
+// is wired to). ok=false when the forecast does not cover t. The EV is not
+// in it, so it is what the EV planner needs to size what the charger can
+// deliver (0.6.17).
+func (f Forecast) NonEVLoadA(t time.Time) ([3]float64, bool) {
+	q := t.Truncate(Quarter)
+	for _, s := range f.Slots {
+		if s.Start.Equal(q) {
+			var l [3]float64
+			for i := range l {
+				l[i] = f.BudgetA - s.HeadA[i]
+			}
+			return l, true
+		}
+	}
+	return [3]float64{}, false
+}
+
 // ForecastIn is everything ComputeForecast needs.
 type ForecastIn struct {
 	Now     time.Time
@@ -538,6 +557,19 @@ func (h *Hub) EVCeilingA(now, t time.Time, maxAge time.Duration) (float64, bool)
 		return 0, false
 	}
 	return math.Floor(v), true
+}
+
+// NonEVLoadA is the forecast non-EV load per phase (amps) at slot t:
+// ok=false when there is no forecast, it is older than maxAge at now, or it
+// does not cover t.
+func (h *Hub) NonEVLoadA(now, t time.Time, maxAge time.Duration) ([3]float64, bool) {
+	h.mu.RLock()
+	f, have := h.fc, h.haveFc
+	h.mu.RUnlock()
+	if !have || now.Sub(f.At) > maxAge {
+		return [3]float64{}, false
+	}
+	return f.NonEVLoadA(t)
 }
 
 // SetCaps is called by the house planner on every step (refreshing them).

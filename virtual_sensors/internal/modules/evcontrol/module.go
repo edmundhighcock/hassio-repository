@@ -80,8 +80,8 @@ type options struct {
 	Mode       *string  `json:"ev_mode"`
 	Notify     *string  `json:"ev_notify_service"`
 	ChargerID  *string  `json:"ev_charger_id"`
-	TTLMin     *int     `json:"ev_limit_ttl_min"`
-	StaleMin   *int     `json:"ev_stale_after_min"`
+	FuseA      *float64 `json:"ev_fuse_a"`
+	Derate     *float64 `json:"ev_derate"`
 	EqEntity   *string  `json:"ev_equalizer_entity"`
 	EqOnline   *string  `json:"ev_equalizer_online_entity"`
 	EqFreshMin *int     `json:"ev_equalizer_fresh_min"`
@@ -194,6 +194,7 @@ type Module struct {
 	lastGuardPub         time.Time
 	lastLimit            int
 	lastWould, lastState string
+	lastWouldState       string
 
 	sessionsPath string
 	appendLine   func(path string, b []byte) error
@@ -236,22 +237,10 @@ func EqualizerFresh(ok, online bool, at, now time.Time, window time.Duration) bo
 // one this old is not used and the static assumptions apply.
 const forecastMaxAge = 30 * time.Minute
 
-// houseCeiling is the house planner's headroom forecast for slot t as an
-// EV ceiling (ClampCeiling applied); ok=false when there is none.
-func (m *Module) houseCeiling(t time.Time) (float64, bool) {
-	v, ok := m.hub.EVCeilingA(m.now, t, forecastMaxAge)
-	if !ok {
-		return 0, false
-	}
-	return m.p.ClampCeiling(v), true
-}
-
-// ceilingNow is the ceiling for t: the house forecast, else the static one.
-func (m *Module) ceilingNow(t time.Time) float64 {
-	if v, ok := m.houseCeiling(t); ok {
-		return v
-	}
-	return m.p.Ceiling(t, m.hwOn(t))
+// houseLoad is the house planner's forecast of the non-EV load per phase
+// (amps) for slot t; ok=false when there is none.
+func (m *Module) houseLoad(t time.Time) ([3]float64, bool) {
+	return m.hub.NonEVLoadA(m.now, t, forecastMaxAge)
 }
 
 type period struct{ start, end time.Time }
@@ -380,18 +369,20 @@ func (m *Module) Configure(raw []byte) error {
 	if o.ChargerID != nil {
 		x.chargerOpt = strings.TrimSpace(*o.ChargerID)
 	}
-	if o.TTLMin != nil {
-		if *o.TTLMin >= 3 && *o.TTLMin <= 120 {
-			x.ttl = time.Duration(*o.TTLMin) * time.Minute
+	// ev_limit_ttl_min and ev_stale_after_min (removed in 0.6.17) are
+	// tolerated if still present in the saved options: they are ignored.
+	if o.FuseA != nil {
+		if *o.FuseA >= 6 && *o.FuseA <= 63 {
+			p.FuseA = *o.FuseA
 		} else {
-			msgs = append(msgs, "option ev_limit_ttl_min out of range 3..120; default applied")
+			msgs = append(msgs, "option ev_fuse_a out of range 6..63; default applied")
 		}
 	}
-	if o.StaleMin != nil {
-		if *o.StaleMin >= 2 && *o.StaleMin <= 120 {
-			x.stale = time.Duration(*o.StaleMin) * time.Minute
+	if o.Derate != nil {
+		if *o.Derate > 0 && *o.Derate <= 1 {
+			p.Derate = *o.Derate
 		} else {
-			msgs = append(msgs, "option ev_stale_after_min out of range 2..120; default applied")
+			msgs = append(msgs, "option ev_derate out of range (0,1]; default applied")
 		}
 	}
 	if o.EqEntity != nil && *o.EqEntity != "" {
@@ -605,9 +596,6 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		outs = append(outs, m.runGuard(u.Time)...)
 	case gridEntity:
 		m.gridW, m.gridOK = u.Value, u.Available
-		if u.Available {
-			m.x.gridAt = u.Time
-		}
 		outs = append(outs, m.runGuard(u.Time)...)
 	case hpEntity:
 		if u.Available {
@@ -841,13 +829,13 @@ func (m *Module) replan(now time.Time) {
 		return
 	}
 	m.plan = Plan(Input{Now: now, Departure: m.sess.Departure, DeliveredKWh: m.sessionKWh,
-		Prices: m.priceList(), HotWaterOn: m.hwOn, CeilingA: m.houseCeiling}, m.p)
+		Prices: m.priceList(), HotWaterOn: m.hwOn, LoadA: m.houseLoad}, m.p)
 	m.havePlan = true
 	if m.sess.FirstPlan == nil || !m.plan.AwaitingPrices {
 		// The plan for the "would it have finished" record is made for the
 		// FULL need from plug-in, and is the final one made once prices
 		// are complete (overwritten on each replan except while awaiting).
-		full := Plan(Input{Now: m.sess.PlugIn, Departure: m.sess.Departure, Prices: m.priceList(), HotWaterOn: m.hwOn, CeilingA: m.houseCeiling}, m.p)
+		full := Plan(Input{Now: m.sess.PlugIn, Departure: m.sess.Departure, Prices: m.priceList(), HotWaterOn: m.hwOn, LoadA: m.houseLoad}, m.p)
 		if full.AwaitingPrices && m.sess.FirstPlan != nil {
 			return
 		}
@@ -868,9 +856,6 @@ func (m *Module) runGuard(t time.Time) []modules.OutputUpdate {
 	m.hub.PublishMeasure(house.Measure{At: t, PhaseA: g.PhaseA, EVA: g.EVA, Measured: g.Measured})
 	if g.Breach && !m.inBreach && m.sess != nil {
 		m.sess.Breaches++
-	}
-	if g.Breach && !m.inBreach {
-		m.x.breachEdge = true
 	}
 	m.inBreach = g.Breach
 	return nil
@@ -948,6 +933,14 @@ func (m *Module) startChargeNow(now time.Time) []modules.OutputUpdate {
 	if !m.plugged() {
 		log.Printf("%s: charge now pressed but the car is not connected (status %q); nothing done", Name, m.status)
 		m.cn.Note = "not started: car not connected"
+		return nil
+	}
+	if m.disarmed() {
+		// Stage B: do not pretend. Nothing is started while the controller
+		// is disarmed (or not live): no override, and the user is told.
+		log.Printf("%s: charge now pressed while disarmed: nothing started", Name)
+		m.cn.Note = "not started: controller disarmed"
+		m.notifyNow("charge_now_disarmed", "EV charge now not started", "The EV controller is disarmed, so Charge now did nothing: no charging was started. Arm it (input_boolean.ev_controller_armed) or start the charger yourself.")
 		return nil
 	}
 	was := m.cn.On
@@ -1056,7 +1049,14 @@ func (m *Module) slotAt(t time.Time) (Slot, bool) {
 	return Slot{}, false
 }
 
+// disarmedReason is the reason shown while the controller is not live and
+// armed.
+const disarmedReason = "disarmed: will not start or pause the charger"
+
 // decide returns the controller state, the would-be command and the reason.
+// While the controller is not live and armed (ev_mode shadow, or
+// input_boolean.ev_controller_armed off) the state is "disarmed" whatever
+// the plan says; decide0's answer is then only the would-do information.
 func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	state, cmd, reason = m.decide0(now)
 	if n := m.pendingNote(now); n != "" {
@@ -1064,6 +1064,10 @@ func (m *Module) decide(now time.Time) (state, cmd, reason string) {
 	}
 	return
 }
+
+// disarmed reports the honest state: ok=true when the controller is not
+// live and armed.
+func (m *Module) disarmed() bool { return !m.armedLive() }
 
 func (m *Module) decide0(now time.Time) (state, cmd, reason string) {
 	if !m.plugged() || m.sess == nil {
@@ -1086,23 +1090,8 @@ func (m *Module) decide0(now time.Time) (state, cmd, reason string) {
 	}
 	slot, in := m.slotAt(now)
 	charging := m.status == "charging"
-	cur := m.evKW * 1000 / (3 * Volts)
 	if in {
-		eff := slot.Amps
-		why := fmt.Sprintf("planned slot at %.0f A", slot.Amps)
-		if m.haveGuard && m.gridOK {
-			if float64(m.guard.LimitA) < eff {
-				eff = float64(m.guard.LimitA)
-				why = fmt.Sprintf("guard limits to %d A", m.guard.LimitA)
-			}
-		}
-		if c, ok := m.hub.EVCap(now); ok && float64(c) < eff {
-			eff = float64(c)
-			why = fmt.Sprintf("house budget overload: capped at %d A", c)
-		}
-		if eff < m.p.MinA {
-			return "would_pause", "pause", "guard: no headroom (" + why + ")"
-		}
+		why := fmt.Sprintf("planned slot (~%.0f A, %.1f kW deliverable)", slot.Amps, slot.KW)
 		st := "would_charge"
 		if m.plan.AwaitingPrices {
 			st = "awaiting_prices"
@@ -1110,10 +1099,7 @@ func (m *Module) decide0(now time.Time) (state, cmd, reason string) {
 			st = "deadline_mode"
 		}
 		if !charging {
-			return st, fmt.Sprintf("resume at %.0f A", eff), why
-		}
-		if math.Abs(cur-eff) >= 1 {
-			return st, fmt.Sprintf("limit %.0f A", eff), why
+			return st, "resume", why
 		}
 		return st, "none", why
 	}
@@ -1126,30 +1112,11 @@ func (m *Module) decide0(now time.Time) (state, cmd, reason string) {
 	return "planned", "none", "waiting for a planned slot"
 }
 
-// decideChargeNow: the override ignores the plan; the guard and the house
-// budget cap still apply.
+// decideChargeNow: the override ignores the plan.
 func (m *Module) decideChargeNow(now time.Time) (state, cmd, reason string) {
-	eff := m.p.MaxA
-	why := fmt.Sprintf("charge now at up to %.0f A until %s", eff, m.cn.Until.In(m.p.Loc).Format("15:04"))
-	if m.haveGuard && m.gridOK {
-		if float64(m.guard.LimitA) < eff {
-			eff = float64(m.guard.LimitA)
-			why = fmt.Sprintf("charge now, guard limits to %d A", m.guard.LimitA)
-		}
-	}
-	if c, ok := m.hub.EVCap(now); ok && float64(c) < eff {
-		eff = float64(c)
-		why = fmt.Sprintf("charge now, house budget overload: capped at %d A", c)
-	}
-	if eff < m.p.MinA {
-		return "charge_now", "pause", "charge now: no headroom under the guard (" + why + ")"
-	}
+	why := fmt.Sprintf("charge now until %s; the charger and Equalizer set the current", m.cn.Until.In(m.p.Loc).Format("15:04"))
 	if m.status != "charging" {
-		return "charge_now", fmt.Sprintf("resume at %.0f A", eff), why
-	}
-	cur := m.evKW * 1000 / (3 * Volts)
-	if math.Abs(cur-eff) >= 1 {
-		return "charge_now", fmt.Sprintf("limit %.0f A", eff), why
+		return "charge_now", "resume", why
 	}
 	return "charge_now", "none", why
 }
@@ -1165,15 +1132,27 @@ func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 			AttributesJSON: jsonStr(map[string]any{"mode": m.modeString(), "armed_live": m.armedLive(), "paused_by_us": m.x.st.Paused})})
 	}
 	state, cmd, reason := m.decide(now)
-	if force || state != m.lastState || reason != m.lastReason {
-		m.lastState, m.lastReason = state, reason
-		outs = append(outs, modules.OutputUpdate{ObjectID: ObjState, Time: now, StateString: state,
-			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": !m.armedLive(), "unplanned_kwh": round(m.plan.UnplannedKWh, 1), "full": m.full, "confirming": m.pendingNote(now) != ""})})
+	wouldState, wouldReason := state, reason
+	if m.disarmed() {
+		// Stage B: honest while disarmed. The would-do information stays in
+		// the attributes (would_state, would_reason) and in ev_would_command.
+		state, reason = "disarmed", disarmedReason
+		if n := m.pendingNote(now); n != "" {
+			reason = n + "; " + reason
+		}
+	}
+	if force || state != m.lastState || reason != m.lastReason || wouldState != m.lastWouldState {
+		m.lastState, m.lastReason, m.lastWouldState = state, reason, wouldState
+		attrs := map[string]any{"reason": reason, "shadow": !m.armedLive(), "unplanned_kwh": round(m.plan.UnplannedKWh, 1), "full": m.full, "confirming": m.pendingNote(now) != ""}
+		if m.disarmed() {
+			attrs["would_state"], attrs["would_reason"] = wouldState, wouldReason
+		}
+		outs = append(outs, modules.OutputUpdate{ObjectID: ObjState, Time: now, StateString: state, AttributesJSON: jsonStr(attrs)})
 	}
 	if force || cmd != m.lastWould {
 		m.lastWould = cmd
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjWould, Time: now, StateString: cmd,
-			AttributesJSON: jsonStr(map[string]any{"reason": reason, "shadow": !m.armedLive()})})
+			AttributesJSON: jsonStr(map[string]any{"reason": wouldReason, "shadow": !m.armedLive()})})
 	}
 	if o, key := m.chargeNowOutput(now); force || key != m.cnPub {
 		m.cnPub = key

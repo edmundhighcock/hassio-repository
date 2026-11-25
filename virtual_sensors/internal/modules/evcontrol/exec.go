@@ -14,62 +14,61 @@ import (
 // mirrors hwcontrol: modules do no I/O, they return Effects the host
 // executes, and the host feeds each outcome back as a CommandResult.
 //
-// Easee integration v2026.11.0 services used (services.yaml / services.py
-// read on hass): easee.action_command {charger_id|device_id,
-// action_command}, easee.set_charger_dynamic_limit {charger_id|device_id,
-// current, time_to_live (min)}, easee.set_circuit_dynamic_limit
-// {charger_id|device_id|circuit_id, current_p1..p3, time_to_live (min)}.
-// charger_id is the `id` attribute of sensor.loaver_status ("EH5YL3HF"):
-// services.py accepts it in place of the UI's device_id, and resolves the
-// circuit from the charger.
+// 0.6.17: the controller decides only WHEN to charge. The charger and the
+// Easee Equalizer decide HOW MUCH (the Equalizer backs the charger off, and
+// with phase mode auto switches to a single phase, on any phase the car
+// uses). So while armed and live the only commands are
+// easee.action_command start / resume / pause at planned slot boundaries
+// (plus Charge now and the fallbacks), and, when the module starts or is
+// armed, ONE release of the charger and circuit dynamic limits so no stale
+// limit from an older version or a manual action lingers. It never writes
+// a dynamic limit, a phase mode, or a breach alert. While armed, live and
+// healthy it also postpones the Home Assistant dead-man timer.
+//
+// Easee integration v2026.11.0 services used: easee.action_command
+// {charger_id, action_command}; easee.set_charger_dynamic_limit
+// {charger_id, current, time_to_live (min)}; easee.set_circuit_dynamic_limit
+// {charger_id, current_p1..p3, time_to_live (min)} (the two limit calls only
+// in the one-shot release). charger_id is the `id` attribute of
+// sensor.loaver_status ("EH5YL3HF").
 
 // ArmedEntity is the second key.
 const ArmedEntity = "input_boolean.ev_controller_armed"
+
+// DeadmanEntity is the Home Assistant timer an automation uses to start a
+// waiting car when this controller is dead or disabled (0.6.17).
+const DeadmanEntity = "timer.ev_deadman"
 
 // Output object ids added by the executor.
 const (
 	ObjMode       = "ev_controller_mode"
 	ObjArmed      = "ev_controller_armed"
 	ObjLastCmd    = "ev_last_command"
-	ObjLimitForce = "ev_limit_in_force"
+	ObjLimitForce = "ev_limit_in_force" // 0.6.17: always 0 A (the controller writes no limit); attributes keep the executor's status
 )
 
 const (
-	defaultNotify   = "notify.mobile_app_edmund15max"
-	defaultTTL      = 15 * time.Minute
-	defaultStale    = 10 * time.Minute
-	minGap          = 30 * time.Second // between changed limit writes (decreases are immediate)
-	pauseGap        = 90 * time.Second // between pause/resume attempts
-	notifyGap       = 15 * time.Minute // per notification kind
-	linkGrace       = 2 * time.Minute
-	releaseA        = 32 // handed back with a 1 min TTL; Easee clamps to its own maxima
-	priceLateHour   = 14 // tomorrow's prices should have arrived by this local hour
-	limitFailResume = 3  // failed limit writes after which a fallback resume goes anyway
-	corrNotify      = uint64(1) << 40
+	defaultNotify = "notify.mobile_app_edmund15max"
+	pauseGap      = 90 * time.Second // between pause/resume attempts
+	notifyGap     = 15 * time.Minute // per notification kind
+	linkGrace     = 2 * time.Minute
+	releaseA      = 16 // the one-shot release: charger and circuit limit, 1 min TTL
+	maxRelTries   = 3
+	priceLateHour = 14 // tomorrow's prices should have arrived by this local hour
+	deadmanEvery  = 30 * time.Minute
+	deadmanFor    = "00:31:00" // the timer runs 30 min; each call restarts it with 31
+	corrNotify    = uint64(1) << 40
 )
 
-type vec [3]int
-
-// sent is what we last wrote for one dynamic limit.
-type sent struct {
-	v        vec
-	known    bool
-	at       time.Time // when the last successful write was issued
-	attempt  time.Time
-	inflight bool
-	fails    int
-}
-
 type pending struct {
-	kind string // pause, resume, start, charger, circuit, release_*
+	kind string // pause, resume, start, release_resume, rel_charger, rel_circuit, deadman
 	cmd  string
-	v    vec
 }
 
 // execPersist is the executor's restart state: what we may be holding.
 type execPersist struct {
-	Paused  bool `json:"paused"`  // we commanded pause and it is in force
-	Holding bool `json:"holding"` // we have written dynamic limits that need releasing
+	Paused  bool `json:"paused"`            // we commanded pause and it is in force
+	Holding bool `json:"holding,omitempty"` // legacy (pre-0.6.17 dynamic limits); ignored
 }
 
 type exec struct {
@@ -77,29 +76,32 @@ type exec struct {
 	notify     string
 	chargerOpt string
 	chargerID  string
-	ttl        time.Duration
-	stale      time.Duration
 
-	armedKey    bool
-	ready       bool // link up at least once (states loaded)
-	linkUp      bool
-	linkDownAt  time.Time
-	gridAt      time.Time
-	wasArmedLv  bool
-	breachEdge  bool
-	fbNotified  string
-	lastNotify  map[string]time.Time
-	corr        uint64
-	notifyC     uint64
-	pend        map[uint64]pending
-	effects     []modules.Effect
-	st          execPersist
-	charger     sent
-	circuit     sent
-	pauseAt     time.Time
-	pauseFly    bool
-	releaseAt   time.Time
-	releaseFly  bool
+	armedKey   bool
+	ready      bool // link up at least once (states loaded)
+	linkUp     bool
+	linkDownAt time.Time
+	wasArmedLv bool
+	fbNotified string
+	lastNotify map[string]time.Time
+	corr       uint64
+	notifyC    uint64
+	pend       map[uint64]pending
+	effects    []modules.Effect
+	st         execPersist
+	pauseAt    time.Time
+	pauseFly   bool
+	releaseAt  time.Time
+	releaseFly bool
+	// The one-shot limit release (module start / arm).
+	relDone  bool
+	relFail  bool
+	relFly   int
+	relTries int
+	relAt    time.Time
+	// Dead-man postponement: last timer.start sent (zero: due at once).
+	deadmanAt   time.Time
+	deadmanOK   time.Time // last successful postponement
 	last        lastCmd
 	lastDesired desired
 	outDirty    bool
@@ -112,20 +114,15 @@ type lastCmd struct {
 
 type desired struct {
 	Mode     string // idle, pause, charge, full
-	Amps     int
-	Circuit  vec
 	Reason   string
 	Fallback string // "", "deadline", "stale"
 }
 
 func newExec() exec {
-	return exec{notify: defaultNotify, ttl: defaultTTL, stale: defaultStale,
-		lastNotify: map[string]time.Time{}, pend: map[uint64]pending{}}
+	return exec{notify: defaultNotify, lastNotify: map[string]time.Time{}, pend: map[uint64]pending{}}
 }
 
 func (m *Module) armedLive() bool { return m.x.live && m.x.armedKey }
-
-func (x *exec) refresh() time.Duration { return x.ttl / 3 }
 
 func (x *exec) target() map[string]any {
 	if x.chargerOpt != "" {
@@ -138,11 +135,17 @@ func (x *exec) target() map[string]any {
 }
 
 func (m *Module) call(domain, service string, data map[string]any, p pending) {
+	m.callQuiet(domain, service, data, p)
+	m.x.last = lastCmd{Cmd: p.cmd, Result: "sent", At: m.now}
+	m.x.outDirty = true
+}
+
+// callQuiet is call without touching ev_last_command (the dead-man timer
+// would otherwise overwrite the last charger command every 30 minutes).
+func (m *Module) callQuiet(domain, service string, data map[string]any, p pending) {
 	m.x.corr++
 	m.x.pend[m.x.corr] = p
 	m.x.effects = append(m.x.effects, modules.Effect{Kind: modules.EffectCallService, Domain: domain, Service: service, Data: data, CorrID: m.x.corr})
-	m.x.last = lastCmd{Cmd: p.cmd, Result: "sent", At: m.now}
-	m.x.outDirty = true
 }
 
 func (m *Module) cmd(action string, p pending) {
@@ -150,48 +153,6 @@ func (m *Module) cmd(action string, p pending) {
 	d["action_command"] = action
 	p.cmd = action
 	m.call("easee", "action_command", d, p)
-}
-
-func (m *Module) sendCharger(a int, now time.Time) {
-	d := m.x.target()
-	d["current"] = a
-	d["time_to_live"] = int(m.x.ttl / time.Minute)
-	m.x.charger.inflight, m.x.charger.attempt = true, now
-	m.x.st.Holding = true
-	m.call("easee", "set_charger_dynamic_limit", d, pending{kind: "charger", cmd: fmt.Sprintf("charger limit %d A", a), v: vec{a, a, a}})
-}
-
-func (m *Module) sendCircuit(v vec, now time.Time, ttl time.Duration, kind string) {
-	d := m.x.target()
-	d["current_p1"], d["current_p2"], d["current_p3"] = v[0], v[1], v[2]
-	d["time_to_live"] = int(ttl / time.Minute)
-	m.x.circuit.inflight, m.x.circuit.attempt = true, now
-	m.x.st.Holding = true
-	m.call("easee", "set_circuit_dynamic_limit", d, pending{kind: kind, cmd: fmt.Sprintf("circuit limit %d/%d/%d A", v[0], v[1], v[2]), v: v})
-}
-
-// needSend: re-send only on change, plus a refresh well inside the TTL.
-func (m *Module) needSend(s sent, want vec, now time.Time) bool {
-	if s.inflight {
-		return false
-	}
-	if !s.known {
-		return now.Sub(s.attempt) >= minGap
-	}
-	if want != s.v {
-		dec := false
-		for i := range want {
-			if want[i] < s.v[i] {
-				dec = true
-			}
-		}
-		return dec || now.Sub(s.attempt) >= minGap
-	}
-	return now.Sub(s.at) >= m.x.refresh()
-}
-
-func (m *Module) limitOK(s sent, want vec, now time.Time) bool {
-	return s.known && s.v == want && now.Sub(s.at) < m.x.ttl
 }
 
 // Notify sends to the phone and as a persistent notification, at most once
@@ -216,80 +177,18 @@ func (m *Module) notifyNow(kind, title, text string) {
 		Data: map[string]any{"name": title, "message": text, "entity_id": "sensor.ev_last_command"}, CorrID: corrNotify + m.x.notifyC, Tag: "ev_controller_" + kind})
 }
 
-// phaseLimits are the guard's per-phase ceilings for the circuit: the
-// budget less the estimated non-EV amps on that phase, floored, [0, MaxA].
-func phaseLimits(g GuardOut, p Params) vec {
-	var v vec
-	for i := range v {
-		l := int(floorF(p.BudgetA - g.HouseA[i]))
-		if l > int(p.MaxA) {
-			l = int(p.MaxA)
-		}
-		if l < 0 {
-			l = 0
-		}
-		v[i] = l
-	}
-	return v
-}
-
-func floorF(f float64) float64 {
-	i := float64(int64(f))
-	if f < i {
-		return i - 1
-	}
-	return i
-}
-
-// desire is the live decision: what the charger should be doing now.
+// desire is the live decision: what the charger should be doing now. It
+// says WHEN only; how much current is the charger's and Equalizer's business.
 func (m *Module) desire(now time.Time) desired {
-	guardFresh := m.guardFresh(now)
-	var limit int
-	var circ vec
-	if guardFresh {
-		limit, circ = m.guard.LimitA, phaseLimits(m.guard, m.p)
-	} else {
-		limit = int(m.ceilingNow(now))
-		circ = vec{limit, limit, limit}
-	}
-	if limit > int(m.p.MaxA) {
-		limit = int(m.p.MaxA)
-	}
-	// House budget overload (internal/house): the house planner lowers the
-	// EV first, down to pause. This outranks every path below, the stale
-	// and deadline fallbacks included: the fuse is the hard limit.
-	capNote := ""
-	if c, ok := m.hub.EVCap(now); ok {
-		if c < limit {
-			limit = c
-			capNote = fmt.Sprintf("; house budget overload caps at %d A", c)
-		}
-		for i := range circ {
-			if circ[i] > c {
-				circ[i] = c
-			}
-		}
-	}
 	if !m.plugged() {
 		return desired{Mode: "idle", Reason: "car not plugged in"}
 	}
 	if m.cn.On {
-		// Charge-now override: the plan, need and departure are ignored; the
-		// guard limit (and the house cap) computed above stay in force.
-		if limit < int(m.p.MinA) {
-			return desired{Mode: "pause", Circuit: circ, Reason: "charge now: no headroom under the budget" + capNote}
-		}
-		why := fmt.Sprintf("charge now at %d A", limit)
-		if guardFresh && limit < int(m.p.MaxA) {
-			why = fmt.Sprintf("charge now, guard limits to %d A", limit)
-		} else if !guardFresh {
-			why = fmt.Sprintf("charge now at the forecast ceiling %d A (grid reading stale)", limit)
-		}
-		return desired{Mode: "charge", Amps: limit, Circuit: circ, Reason: why + capNote}
+		// Charge-now override: the plan, need and departure are ignored.
+		return desired{Mode: "charge", Reason: "charge now"}
 	}
 	if m.full {
-		// No charger commands at all; the circuit limit stays in force.
-		return desired{Mode: "full", Circuit: circ, Reason: "car reports charging complete" + capNote}
+		return desired{Mode: "full", Reason: "car reports charging complete"}
 	}
 	dep := m.nextDeparture(now)
 	if m.sess != nil {
@@ -304,21 +203,13 @@ func (m *Module) desire(now time.Time) desired {
 	if m.sess != nil && m.havePlan && m.plan.NeedKWh <= 0 {
 		return desired{Mode: "idle", Reason: "need met"}
 	}
-	charge := func(fb, why string) desired {
-		why += capNote
-		if limit < int(m.p.MinA) {
-			return desired{Mode: "pause", Circuit: circ, Reason: "no headroom under the budget (" + why + ")", Fallback: fb}
-		}
-		return desired{Mode: "charge", Amps: limit, Circuit: circ, Reason: why, Fallback: fb}
-	}
+	charge := func(fb, why string) desired { return desired{Mode: "charge", Reason: why, Fallback: fb} }
 	// Staleness: losing control or data must leave the car charging.
 	_, priced := m.prices[now.Truncate(quarter).Unix()]
 	linkLost := !m.x.linkUp && now.Sub(m.x.linkDownAt) >= linkGrace
 	switch {
 	case linkLost:
 		return charge("stale", "Home Assistant link lost: charge now")
-	case !guardFresh:
-		return charge("stale", "grid reading stale: charge now at the forecast ceiling")
 	case !priced || len(m.prices) == 0:
 		return charge("stale", "no price for this quarter: charge now")
 	case !m.sessKnown() || !m.havePlan:
@@ -327,34 +218,13 @@ func (m *Module) desire(now time.Time) desired {
 		return charge("stale", "tomorrow's prices are late: charge now")
 	}
 	if m.plan.DeadlineMode || (!m.plan.Feasible && !m.plan.AwaitingPrices) {
-		return charge("deadline", "deadline backstop: plan cannot finish by departure, charge at the maximum allowed")
+		return charge("deadline", "deadline backstop: plan cannot finish by departure, charge in every usable slot")
 	}
 	slot, in := m.slotAt(now)
 	if !in {
-		return desired{Mode: "pause", Circuit: circ, Reason: "outside the planned slots"}
+		return desired{Mode: "pause", Reason: "outside the planned slots"}
 	}
-	a := int(slot.Amps)
-	why := fmt.Sprintf("planned slot at %d A", a)
-	if limit < a {
-		a, why = limit, fmt.Sprintf("guard limits to %d A", limit)
-	}
-	why += capNote
-	if a < int(m.p.MinA) {
-		return desired{Mode: "pause", Circuit: circ, Reason: "no headroom (" + why + ")"}
-	}
-	return desired{Mode: "charge", Amps: a, Circuit: circ, Reason: why}
-}
-
-// guardFresh: the guard's inputs are current. The Equalizer path needs a
-// fresh online reading; otherwise the grid meter must be fresh.
-func (m *Module) guardFresh(now time.Time) bool {
-	if !m.haveGuard {
-		return false
-	}
-	if m.guard.Measured {
-		return m.eqIsFresh(now)
-	}
-	return m.gridOK && now.Sub(m.x.gridAt) < m.x.stale
+	return desired{Mode: "charge", Reason: fmt.Sprintf("planned slot (~%.0f A, %.1f kW deliverable)", slot.Amps, slot.KW)}
 }
 
 func (m *Module) sessKnown() bool { return m.sess != nil }
@@ -364,32 +234,38 @@ func (m *Module) sessKnown() bool { return m.sess != nil }
 func (m *Module) control(now time.Time) {
 	x := &m.x
 	al := m.armedLive()
-	if al != x.wasArmedLv && x.ready {
-		if al {
-			m.notifyNow("armed", "EV controller armed", "ev_control is LIVE and armed: it now drives the charger. The Car Start Charging automation must be disabled.")
-		} else if x.wasArmedLv {
-			m.notifyNow("disarmed", "EV controller disarmed", "ev_control is disarmed: the charger is resumed and the dynamic limits are released to Easee's defaults.")
-		}
-		x.charger, x.circuit = sent{}, sent{}
+	armEdge := al && !x.wasArmedLv && x.ready
+	disarmEdge := !al && x.wasArmedLv && x.ready
+	if armEdge {
+		m.notifyNow("armed", "EV controller armed", "ev_control is LIVE and armed: it now starts and pauses the charger at the planned times. The Car Start Charging automation must be disabled.")
+		// Module start or arming: one limit release, and a dead-man
+		// postponement at once.
+		x.relDone, x.relFail, x.relTries, x.relFly, x.relAt = false, false, 0, 0, time.Time{}
+		x.deadmanAt = time.Time{}
+		x.fbNotified = ""
+	}
+	if disarmEdge {
+		x.deadmanAt = time.Time{}
 		x.fbNotified = ""
 	}
 	if x.ready {
 		x.wasArmedLv = al
 	}
 	if !x.ready || !x.linkUp {
+		if disarmEdge {
+			m.notifyDisarm(false, x.st.Paused, "Home Assistant link is down, so no command could be sent")
+		}
 		return
 	}
 	if !al {
-		m.release(now)
+		sent := m.releasePause(now)
+		if disarmEdge {
+			m.notifyDisarm(sent, x.st.Paused, "")
+		}
 		return
 	}
 	d := m.desire(now)
 	x.lastDesired = d
-	if m.haveGuard && m.inBreach && x.breachEdge {
-		x.breachEdge = false
-		m.notifyKind("breach", "EV guard breach", fmt.Sprintf("Estimated phase current exceeds the %.0f A budget (A/B/C %.1f/%.1f/%.1f A). The limit is being lowered.",
-			m.p.BudgetA, m.guard.PhaseA[0], m.guard.PhaseA[1], m.guard.PhaseA[2]), now)
-	}
 	if d.Fallback != "" && m.sess != nil {
 		if key := fmt.Sprintf("%s@%d", d.Fallback, m.sess.Departure.Unix()); key != x.fbNotified {
 			x.fbNotified = key
@@ -404,23 +280,21 @@ func (m *Module) control(now time.Time) {
 		m.notifyKind("noid", "EV controller cannot command", "The charger id is unknown (sensor.loaver_status has no id attribute and ev_charger_id is not set).", now)
 		return
 	}
+	// Healthy (link up, charger known) and armed and live: postpone the
+	// dead-man timer and, once, release any dynamic limit.
+	m.deadman(now)
+	m.limitRelease(now)
 	switch d.Mode {
 	case "idle":
-		m.release(now)
+		m.releasePause(now)
 	case "full":
-		m.ensureCircuit(d, now)
+		// No charger commands at all.
 	case "pause":
-		m.ensureCircuit(d, now)
 		if m.status == "charging" && !x.pauseFly && now.Sub(x.pauseAt) >= pauseGap {
 			x.pauseFly, x.pauseAt = true, now
 			m.cmd("pause", pending{kind: "pause"})
 		}
 	case "charge":
-		m.ensureCircuit(d, now)
-		want := vec{d.Amps, d.Amps, d.Amps}
-		if m.needSend(x.charger, want, now) {
-			m.sendCharger(d.Amps, now)
-		}
 		if m.status == "completed" && m.cn.On {
 			// Pressed while the car reads completed: try start/resume once,
 			// not every 90 s for the rest of the timeout.
@@ -431,13 +305,6 @@ func (m *Module) control(now time.Time) {
 			return
 		}
 		if m.status == "charging" || x.pauseFly || now.Sub(x.pauseAt) < pauseGap {
-			return
-		}
-		ok := m.limitOK(x.charger, want, now) && m.limitOK(x.circuit, d.Circuit, now)
-		if !ok && d.Fallback != "" && (x.charger.fails >= limitFailResume || x.circuit.fails >= limitFailResume) {
-			ok = true // control of the limits is lost: charging at Easee's defaults beats an empty car at 06:30
-		}
-		if !ok {
 			return
 		}
 		x.pauseFly, x.pauseAt = true, now
@@ -452,35 +319,73 @@ func (m *Module) control(now time.Time) {
 	}
 }
 
-func (m *Module) ensureCircuit(d desired, now time.Time) {
-	if m.needSend(m.x.circuit, d.Circuit, now) {
-		m.sendCircuit(d.Circuit, now, m.x.ttl, "circuit")
+// notifyDisarm pushes the disarm edge. It claims a resume only when one was
+// actually sent.
+func (m *Module) notifyDisarm(sent, paused bool, why string) {
+	text := "ev_control is disarmed: it will not start or pause the charger."
+	switch {
+	case sent:
+		text += " It had paused the charger, so a resume command was sent."
+	case paused:
+		text += " It had paused the charger and has NOT resumed it yet"
+		if why != "" {
+			text += " (" + why + ")"
+		}
+		text += "; it sends the resume as soon as it can."
+	default:
+		text += " No resume was needed: it had not paused the charger."
 	}
+	m.notifyNow("disarmed", "EV controller disarmed", text)
 }
 
-// release hands control back to Easee: resume if we paused, then replace
-// the dynamic limits with a high one that lapses after a minute.
-func (m *Module) release(now time.Time) {
+// deadman postpones the Home Assistant dead-man timer: timer.start with a
+// 31 min duration every 30 min, and at once on start/arm. Only called while
+// armed, live and healthy.
+func (m *Module) deadman(now time.Time) {
 	x := &m.x
-	if !x.st.Paused && !x.st.Holding {
+	if !x.deadmanAt.IsZero() && now.Sub(x.deadmanAt) < deadmanEvery {
 		return
+	}
+	x.deadmanAt = now
+	m.callQuiet("timer", "start", map[string]any{"entity_id": DeadmanEntity, "duration": deadmanFor}, pending{kind: "deadman", cmd: "postpone " + DeadmanEntity})
+}
+
+// limitRelease sends the ONE release of the charger and circuit dynamic
+// limits (16 A, 1 min) after the module starts or is armed. A failed attempt
+// is retried a few times; a success is never repeated.
+func (m *Module) limitRelease(now time.Time) {
+	x := &m.x
+	if x.relDone || x.relFly > 0 || x.relTries >= maxRelTries || (!x.relAt.IsZero() && now.Sub(x.relAt) < pauseGap) {
+		return
+	}
+	x.relAt, x.relFail = now, false
+	x.relTries++
+	x.relFly = 2
+	d := x.target()
+	d["current"], d["time_to_live"] = releaseA, 1
+	m.call("easee", "set_charger_dynamic_limit", d, pending{kind: "rel_charger", cmd: fmt.Sprintf("release charger limit (%d A, 1 min)", releaseA)})
+	c := x.target()
+	c["current_p1"], c["current_p2"], c["current_p3"] = releaseA, releaseA, releaseA
+	c["time_to_live"] = 1
+	m.call("easee", "set_circuit_dynamic_limit", c, pending{kind: "rel_circuit", cmd: fmt.Sprintf("release circuit limit (%d A, 1 min)", releaseA)})
+}
+
+// releasePause resumes the charger if we paused it (idle, or disarmed). It
+// reports whether a resume command was issued on this call.
+func (m *Module) releasePause(now time.Time) bool {
+	x := &m.x
+	if !x.st.Paused {
+		return false
 	}
 	if x.releaseFly || now.Sub(x.releaseAt) < pauseGap && !x.releaseAt.IsZero() {
-		return
+		return false
 	}
 	if x.target() == nil {
-		return
+		return false
 	}
 	x.releaseAt, x.releaseFly = now, true
-	if x.st.Paused {
-		m.cmd("resume", pending{kind: "release_resume"})
-	}
-	if x.st.Holding {
-		d := m.x.target()
-		d["current"], d["time_to_live"] = releaseA, 1
-		m.call("easee", "set_charger_dynamic_limit", d, pending{kind: "release_charger", cmd: fmt.Sprintf("release charger limit (%d A, 1 min)", releaseA)})
-		m.sendCircuit(vec{releaseA, releaseA, releaseA}, now, time.Minute, "release_circuit")
-	}
+	m.cmd("resume", pending{kind: "release_resume"})
+	return true
 }
 
 // Effects implements modules.Actor.
@@ -508,6 +413,16 @@ func (m *Module) OnCommandResult(r modules.CommandResult) []modules.OutputUpdate
 	if at.IsZero() {
 		at = m.now
 	}
+	if p.kind == "deadman" {
+		if r.OK {
+			x.deadmanOK = at
+		} else {
+			// Retry soon rather than in 30 min: the timer is 30 min long.
+			x.deadmanAt = at.Add(pauseGap - deadmanEvery)
+			m.notifyKind("fail_deadman", "EV controller command failed", fmt.Sprintf("%s failed: %s", p.cmd, r.Err), at)
+		}
+		return nil
+	}
 	res := "ok"
 	if !r.OK {
 		res = "failed"
@@ -520,51 +435,30 @@ func (m *Module) OnCommandResult(r modules.CommandResult) []modules.OutputUpdate
 		if r.OK {
 			x.st.Paused = true
 		}
-	case "resume", "start":
-		if p.kind == "resume" {
-			x.pauseFly = false
-			if r.OK {
-				x.st.Paused = false
-			}
-		}
-	case "charger":
-		x.charger.inflight = false
+	case "resume":
+		x.pauseFly = false
 		if r.OK {
-			x.charger.v, x.charger.known, x.charger.at, x.charger.fails = p.v, true, at, 0
-		} else {
-			x.charger.known = false
-			x.charger.fails++
-		}
-	case "circuit":
-		x.circuit.inflight = false
-		if r.OK {
-			x.circuit.v, x.circuit.known, x.circuit.at, x.circuit.fails = p.v, true, at, 0
-		} else {
-			x.circuit.known = false
-			x.circuit.fails++
+			x.st.Paused = false
 		}
 	case "release_resume":
 		if r.OK {
 			x.st.Paused = false
 		}
 		x.releaseFly = false
-	case "release_charger":
-		if r.OK {
-			x.charger = sent{}
+		x.pauseFly = false
+	case "rel_charger", "rel_circuit":
+		if x.relFly > 0 {
+			x.relFly--
 		}
-	case "release_circuit":
-		x.circuit.inflight = false
-		if r.OK {
-			x.circuit = sent{}
-			x.st.Holding = false
+		if !r.OK {
+			x.relFail = true
 		}
-		x.releaseFly = false
+		if x.relFly == 0 && !x.relFail {
+			x.relDone = true
+		}
 	}
 	if !r.OK {
 		m.notifyKind("fail_"+p.kind, "EV controller command failed", fmt.Sprintf("%s failed: %s", p.cmd, r.Err), at)
-		if strings.HasPrefix(p.kind, "release") {
-			x.releaseFly = false
-		}
 	}
 	return m.execOutputs(at, false)
 }
@@ -578,8 +472,7 @@ func (m *Module) OnLink(up bool, now time.Time) []modules.OutputUpdate {
 	if up {
 		x.ready = true
 		x.linkUp = true
-		x.pauseFly, x.releaseFly = false, false
-		x.charger.inflight, x.circuit.inflight = false, false
+		x.pauseFly, x.releaseFly, x.relFly = false, false, 0
 	} else {
 		if x.linkUp || x.linkDownAt.IsZero() {
 			x.linkDownAt = now
@@ -588,6 +481,13 @@ func (m *Module) OnLink(up bool, now time.Time) []modules.OutputUpdate {
 		x.pend = map[uint64]pending{}
 	}
 	return nil
+}
+
+func (x *exec) deadmanAtStr(loc *time.Location) string {
+	if x.deadmanOK.IsZero() {
+		return ""
+	}
+	return x.deadmanOK.In(loc).Format(time.RFC3339)
 }
 
 func (m *Module) modeString() string {
@@ -628,15 +528,13 @@ func (m *Module) execOutputs(now time.Time, force bool) []modules.OutputUpdate {
 		}
 		outs = append(outs, modules.OutputUpdate{ObjectID: ObjLastCmd, Time: now, StateString: cmd,
 			AttributesJSON: jsonStr(map[string]any{"result": l.Result, "error": l.Err, "at": at})})
-		v := 0.0
-		if x.charger.known {
-			v = float64(x.charger.v[0])
-		}
-		outs = append(outs, modules.OutputUpdate{ObjectID: ObjLimitForce, Time: now, Value: v,
-			AttributesJSON: jsonStr(map[string]any{"paused": x.st.Paused, "holding": x.st.Holding,
-				"circuit_a": []int{x.circuit.v[0], x.circuit.v[1], x.circuit.v[2]}, "circuit_known": x.circuit.known,
-				"ttl_min": int(x.ttl / time.Minute), "desired": x.lastDesired.Mode, "reason": x.lastDesired.Reason,
-				"fallback": x.lastDesired.Fallback, "charger_id_known": x.target() != nil})})
+		// 0.6.17: the controller writes no dynamic limit, so this is always
+		// 0 A; the attributes keep the executor's status for the dashboard.
+		outs = append(outs, modules.OutputUpdate{ObjectID: ObjLimitForce, Time: now, Value: 0,
+			AttributesJSON: jsonStr(map[string]any{"paused": x.st.Paused, "limits_written": false,
+				"release_sent": x.relDone, "desired": x.lastDesired.Mode, "reason": x.lastDesired.Reason,
+				"fallback": x.lastDesired.Fallback, "charger_id_known": x.target() != nil,
+				"deadman_postponed_at": x.deadmanAtStr(m.p.Loc)})})
 	}
 	return outs
 }

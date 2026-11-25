@@ -24,10 +24,12 @@ type Params struct {
 	NeedKWh    float64       // 44: 40 kWh plus ~10 % losses
 	MinA       float64       // 6: below this a slot is unusable
 	MaxA       float64       // 16: the charger circuit
-	BudgetA    float64       // 19 per phase
+	BudgetA    float64       // 19 per phase (the guard's budget; informational only since 0.6.17)
+	FuseA      float64       // 20 per phase: the supply the deliverable estimate is made against
+	Derate     float64       // 0.9: the charger and Equalizer rarely deliver all of the theoretical
 	HouseBaseA float64       // 3 on every phase
-	HeaterA    float64       // 7.5 on A and B while the immersion draws
-	HPA        float64       // 7.4 on C (heat pump max)
+	HeaterA    float64       // 7.5 on L1 and L2 while the immersion draws
+	HPA        float64       // 7.4 on L2 (heat pump max)
 	MinBlock   time.Duration // 30 min: shorter gaps are merged
 	// HeaterFrom/HeaterTo (local hours) bound where a hot-water ON slot is
 	// assumed to be drawing (16:00 to 23:00).
@@ -42,7 +44,7 @@ func DefaultParams() Params {
 	if err != nil {
 		loc = time.UTC
 	}
-	return Params{NeedKWh: 44, MinA: 6, MaxA: 16, BudgetA: 19, HouseBaseA: 3, HeaterA: 7.5, HPA: 7.4,
+	return Params{NeedKWh: 44, MinA: 6, MaxA: 16, BudgetA: 19, FuseA: 20, Derate: 0.9, HouseBaseA: 3, HeaterA: 7.5, HPA: 7.4,
 		MinBlock: 30 * time.Minute, HeaterFromH: 16, HeaterToH: 23, Price: planner.DefaultConfig(), Loc: loc}
 }
 
@@ -55,15 +57,16 @@ type Input struct {
 	// HotWaterOn reports whether hot water's own plan has the switch ON at
 	// the slot start. nil means "unknown": treated as ON (conservative).
 	HotWaterOn func(time.Time) bool
-	// CeilingA (optional) is the house planner's per-slot headroom for the
-	// EV, the minimum over its phases, in amps. ok=false (no forecast, or it
-	// does not cover the slot) falls back to Params.Ceiling's static
-	// assumptions. The result is floored, capped at MaxA and zeroed below
-	// MinA like the static ceiling. The deadline backstop is unchanged.
-	CeilingA func(time.Time) (float64, bool)
+	// LoadA (optional) is the house planner's forecast non-EV load per phase
+	// (L1, L2, L3) in amps for a slot. ok=false (no forecast, or it does not
+	// cover the slot) falls back to Params.StaticLoad.
+	LoadA func(time.Time) ([3]float64, bool)
 }
 
-// Slot is one planned 15-minute charging slot.
+// Slot is one planned 15-minute charging slot. Amps is the current the
+// charger is expected to carry (per phase on three phases, or the single
+// phase), KW the deliverable power: the expected energy rate after the
+// derate, the number the plan's energy is summed from.
 type Slot struct {
 	Start    time.Time `json:"start"`
 	Amps     float64   `json:"amps"`
@@ -91,36 +94,52 @@ type Result struct {
 // AmpsKW converts per-phase amps to 3-phase kW.
 func AmpsKW(a float64) float64 { return 3 * Volts * a / 1000 }
 
-// Ceiling is the per-slot EV ceiling in amps (whole amps, floored), from
-// the non-EV forecast per phase; 0 when below MinA.
-func (p Params) Ceiling(t time.Time, hwOn bool) float64 {
-	a, b, c := p.HouseBaseA, p.HouseBaseA, p.HouseBaseA+p.HPA
+// StaticLoad is the non-EV load per phase (L1, L2, L3) assumed when there is
+// no house forecast: the base on each, the heat pump on L2, and the immersion
+// heater on L1+L2 only while hot water's plan has it ON inside its usual
+// window.
+func (p Params) StaticLoad(t time.Time, hwOn bool) [3]float64 {
+	l := [3]float64{p.HouseBaseA, p.HouseBaseA + p.HPA, p.HouseBaseA}
 	if hwOn && p.heaterWindow(t) {
-		a += p.HeaterA
-		b += p.HeaterA
+		l[0] += p.HeaterA
+		l[1] += p.HeaterA
 	}
-	head := math.Min(p.BudgetA-a, math.Min(p.BudgetA-b, p.BudgetA-c))
-	head = math.Floor(head)
-	if head > p.MaxA {
-		head = p.MaxA
-	}
-	if head < p.MinA {
-		return 0
-	}
-	return head
+	return l
 }
 
-// ClampCeiling turns a headroom in amps into a usable per-slot ceiling:
-// floored, at most MaxA, and 0 when below MinA.
-func (p Params) ClampCeiling(a float64) float64 {
-	a = math.Floor(a)
-	if a > p.MaxA {
-		a = p.MaxA
+// Deliverable is what the charger can deliver in a slot given the non-EV
+// load per phase. The controller decides only WHEN to charge; the charger and
+// the Equalizer decide how much, and the Equalizer backs the charger off, or
+// switches it to a single phase, when a phase it uses is short. So the
+// estimate is the better of the two ways the car can charge:
+//
+//	three phases: a3 = min over phases of (FuseA - load), capped MaxA, 0 below MinA
+//	single phase on L3: a1 = FuseA - load(L3), capped MaxA, 0 below MinA
+//
+// amps is the expected current of the better one (whole amps), kw the power
+// after the Derate. 0, 0 when neither is usable.
+func (p Params) Deliverable(load [3]float64) (amps, kw float64) {
+	fit := func(a float64) float64 {
+		a = math.Floor(a)
+		if a > p.MaxA {
+			a = p.MaxA
+		}
+		if a < p.MinA {
+			return 0
+		}
+		return a
 	}
-	if a < p.MinA {
-		return 0
+	a3 := fit(math.Min(p.FuseA-load[0], math.Min(p.FuseA-load[1], p.FuseA-load[2])))
+	a1 := fit(p.FuseA - load[2])
+	k3, k1 := AmpsKW(a3), Volts*a1/1000
+	d := p.Derate
+	if d <= 0 || d > 1 {
+		d = 1
 	}
-	return a
+	if k3 >= k1 {
+		return a3, k3 * d
+	}
+	return a1, k1 * d
 }
 
 func (p Params) heaterWindow(t time.Time) bool {
@@ -145,6 +164,7 @@ func Plan(in Input, p Params) Result {
 		i      int
 		start  time.Time
 		amps   float64
+		kw     float64
 		price  float64
 		priced bool
 	}
@@ -154,12 +174,14 @@ func Plan(in Input, p Params) Result {
 		if in.HotWaterOn != nil {
 			on = in.HotWaterOn(t)
 		}
-		c := cand{i: len(all), start: t, amps: p.Ceiling(t, on)}
-		if in.CeilingA != nil {
-			if v, ok := in.CeilingA(t); ok {
-				c.amps = p.ClampCeiling(v)
+		load := p.StaticLoad(t, on)
+		if in.LoadA != nil {
+			if l, ok := in.LoadA(t); ok {
+				load = l
 			}
 		}
+		c := cand{i: len(all), start: t}
+		c.amps, c.kw = p.Deliverable(load)
 		if sek, ok := known[t.Unix()]; ok {
 			c.priced, c.price = true, p.Price.AllInOre(sek)
 		} else {
@@ -172,26 +194,26 @@ func Plan(in Input, p Params) Result {
 		return res
 	}
 	slotOf := func(c cand) Slot {
-		return Slot{Start: c.start, Amps: c.amps, KW: AmpsKW(c.amps), PriceOre: c.price, Priced: c.priced}
+		return Slot{Start: c.start, Amps: c.amps, KW: c.kw, PriceOre: c.price, Priced: c.priced}
 	}
 	var usable []cand
 	pricedKWh, usableKWh := 0.0, 0.0
 	for _, c := range all {
-		if c.amps > 0 {
+		if c.kw > 0 {
 			usable = append(usable, c)
-			usableKWh += AmpsKW(c.amps) * 0.25
+			usableKWh += c.kw * 0.25
 			if c.priced {
-				pricedKWh += AmpsKW(c.amps) * 0.25
+				pricedKWh += c.kw * 0.25
 			}
 		}
 	}
 	chosen := map[int]bool{}
 	// Tomorrow's prices are not in yet and the time left still covers the
-	// need at the ceiling: choose from the priced slots only, leave the
+	// need at the deliverable rate: choose from the priced slots only, leave the
 	// remainder unplanned and wait for the prices (not deadline mode).
 	res.AwaitingPrices = res.PricesPartial && usableKWh > need
 	if pricedKWh < need && !res.AwaitingPrices {
-		// Backstop: every remaining usable slot at its ceiling.
+		// Backstop: every remaining usable slot.
 		res.DeadlineMode = true
 		for _, c := range usable {
 			chosen[c.i] = true
@@ -215,7 +237,7 @@ func Plan(in Input, p Params) Result {
 				break
 			}
 			chosen[c.i] = true
-			got += AmpsKW(c.amps) * 0.25
+			got += c.kw * 0.25
 		}
 		// Merge gaps shorter than MinBlock between chosen runs.
 		minQ := int(p.MinBlock / quarter)
@@ -231,7 +253,7 @@ func Plan(in Input, p Params) Result {
 			if i > 0 && j < len(all) && j-i < minQ {
 				ok := true
 				for k := i; k < j; k++ {
-					if all[k].amps <= 0 {
+					if all[k].kw <= 0 {
 						ok = false
 					}
 				}
@@ -264,7 +286,7 @@ func Plan(in Input, p Params) Result {
 
 // CostOfKWh prices kWh of charging as the plan would have bought it: the
 // cheapest priced usable slots between from and departure, at their
-// ceilings. Used to score a finished session (hindsight, full prices).
+// deliverable power. Used to score a finished session (hindsight, full prices).
 func CostOfKWh(kwh float64, from, departure time.Time, prices []planner.Price, hwOn func(time.Time) bool, p Params) (kr float64, finished bool) {
 	q := p
 	q.NeedKWh = kwh

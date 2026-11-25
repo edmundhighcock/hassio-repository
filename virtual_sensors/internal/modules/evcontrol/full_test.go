@@ -110,9 +110,8 @@ func TestCarChargesAgainWhileFullIsNotFought(t *testing.T) {
 		t.Fatalf("charger limit written while full (preheat must not be throttled): %d", n)
 	}
 	assertFull(t, e.m, e.now) // stays full until disconnected
-	// The circuit guard is still maintained.
-	if len(e.svc("set_circuit_dynamic_limit")) == 0 && e.m.x.circuit.known == false {
-		t.Fatal("circuit limit not guarded while full")
+	if n := len(e.svc("set_circuit_dynamic_limit")); n != 0 {
+		t.Fatalf("circuit limit written while full: %d", n)
 	}
 }
 
@@ -140,7 +139,7 @@ func TestRestartWhileCompletedConfirmsFromTheRestart(t *testing.T) {
 	}
 	m.OnTick(now.Add(11 * time.Minute))
 	assertFull(t, m, now.Add(11*time.Minute))
-	if u, _ := lastOut(m.InitialStates(), ObjState); u.StateString != "car_full" {
+	if u, _ := lastOut(m.InitialStates(), ObjState); u.StateString != "disarmed" || planAttrs(t, u)["would_state"] != "car_full" {
 		t.Fatalf("initial state %+v", u)
 	}
 

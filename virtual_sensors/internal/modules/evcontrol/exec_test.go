@@ -2,6 +2,7 @@ package evcontrol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,8 +183,8 @@ func TestPauseAndResumeFollowThePlan(t *testing.T) {
 	if !eqStr(e.actions(), []string{"pause"}) {
 		t.Fatalf("want one pause, got %v", e.actions())
 	}
-	if e.calls[0].Data["charger_id"] != "EH5YL3HF" {
-		t.Fatalf("target: %v", e.calls[0].Data)
+	if c := e.svc("action_command")[0]; c.Data["charger_id"] != "EH5YL3HF" {
+		t.Fatalf("target: %v", c.Data)
 	}
 	e.setStatus("ready_to_charge")
 	e.reset()
@@ -191,22 +192,8 @@ func TestPauseAndResumeFollowThePlan(t *testing.T) {
 	if got := e.actions(); !eqStr(got, []string{"resume"}) {
 		t.Fatalf("want one resume in the slot, got %v", got)
 	}
-	cl := e.svc("set_charger_dynamic_limit")
-	if len(cl) == 0 || cl[0].Data["current"] != 8 || cl[0].Data["time_to_live"] != 15 {
-		t.Fatalf("charger limit: %+v", cl)
-	}
-	// Resume only after the limits were written.
-	firstLimit, resumeAt := -1, -1
-	for i, c := range e.calls {
-		if c.Service == "set_charger_dynamic_limit" && firstLimit < 0 {
-			firstLimit = i
-		}
-		if c.Service == "action_command" && resumeAt < 0 {
-			resumeAt = i
-		}
-	}
-	if firstLimit < 0 || resumeAt < firstLimit {
-		t.Fatalf("resume must come after the limits: %d %d", firstLimit, resumeAt)
+	if n := len(e.svc("set_charger_dynamic_limit")) + len(e.svc("set_circuit_dynamic_limit")); n != 0 {
+		t.Fatalf("limit commands in the slot: %+v", e.calls)
 	}
 	e.setStatus("charging")
 	e.reset()
@@ -216,62 +203,31 @@ func TestPauseAndResumeFollowThePlan(t *testing.T) {
 	}
 }
 
-func TestResendOnChangeAndRefreshInsideTTL(t *testing.T) {
+// While armed and live and charging, the controller writes no limit at all,
+// whatever the house does; the only limit commands are the one-shot release.
+func TestNoLimitCommandsWhileCharging(t *testing.T) {
 	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
 	e.advance(4*time.Hour+10*time.Minute, 1000)
 	e.setStatus("charging")
 	e.reset()
-	e.reset()
-	e.advance(14*time.Minute, 1000) // 28 ticks; unchanged limits go out only on the ~5 min refresh
-	nc, nk := len(e.svc("set_charger_dynamic_limit")), len(e.svc("set_circuit_dynamic_limit"))
-	if nc < 2 || nc > 3 || nk < 2 || nk > 3 {
-		t.Fatalf("want a refresh about every 5 min (TTL 15), got charger %d circuit %d", nc, nk)
+	for _, w := range []float64{1000, 230 * 3 * 12, 230 * 3 * 15, 230 * 3 * 20} { // quiet, loaded, overloaded
+		e.advance(20*time.Minute, w)
 	}
-	if e.svc("set_circuit_dynamic_limit")[0].Data["time_to_live"] != 15 {
-		t.Fatal("circuit TTL missing")
-	}
-}
-
-func TestLimitClampedByGuard(t *testing.T) {
-	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
-	e.advance(4*time.Hour+10*time.Minute-time.Minute, 6210) // house 27 A, 9 A/phase: guard limit 10 > plan 8
-	e.reset()
-	e.advance(time.Minute, 6210)
-	e.setStatus("charging")
-	// Heavier house: 12 A/phase -> headroom 7 A: below the plan's 8.
-	e.reset()
-	e.advance(2*time.Minute, 230*3*12)
-	cl := e.svc("set_charger_dynamic_limit")
-	if len(cl) == 0 || cl[len(cl)-1].Data["current"] != 7 {
-		t.Fatalf("limit not clamped to the guard: %+v", cl)
-	}
-	cc := e.svc("set_circuit_dynamic_limit")
-	last := cc[len(cc)-1].Data
-	if last["current_p1"] != 7 || last["current_p2"] != 7 || last["current_p3"] != 7 {
-		t.Fatalf("circuit limits: %+v", last)
-	}
-	// Overloaded: no headroom for 6 A, so pause.
-	e.reset()
-	e.advance(2*time.Minute, 230*3*15)
-	if !eqStr(e.actions(), []string{"pause"}) {
-		t.Fatalf("want pause with no headroom, got %v", e.actions())
+	for _, c := range e.calls {
+		if c.Domain != "timer" { // the dead-man postponement is the only traffic
+			t.Fatalf("no commands expected while charging in the slot, got %+v", e.calls)
+		}
 	}
 }
 
-func TestStaleDataFallsBackToCharging(t *testing.T) {
+// The controller reacts to a stale grid meter no more: it uses no meter.
+func TestStaleGridMeterDoesNothing(t *testing.T) {
 	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
 	e.advance(time.Minute, 1000) // 22:00, outside the cheap slots
 	e.reset()
-	e.advance(12*time.Minute, -1) // grid meter goes quiet beyond ev_stale_after_min (10)
-	if got := e.actions(); !eqStr(got, []string{"start", "resume"}) {
-		t.Fatalf("stale grid must charge now, got %v", got)
-	}
-	cl := e.svc("set_charger_dynamic_limit")
-	if len(cl) == 0 || cl[0].Data["current"] != 8 { // forecast ceiling 19-3-7.4
-		t.Fatalf("stale limit: %+v", cl)
-	}
-	if len(e.notes) == 0 {
-		t.Fatal("fallback not notified")
+	e.advance(12*time.Minute, -1) // grid meter goes quiet
+	if got := e.actions(); len(got) != 0 {
+		t.Fatalf("a stale grid meter must not start the charger, got %v", got)
 	}
 }
 
@@ -293,9 +249,8 @@ func TestDeadlineBackstopChargesAtMax(t *testing.T) {
 	if got := e.actions(); !eqStr(got, []string{"start", "resume"}) {
 		t.Fatalf("deadline mode must charge at once, got %v", got)
 	}
-	cl := e.svc("set_charger_dynamic_limit")
-	if len(cl) == 0 || cl[0].Data["current"] != 16 { // guard limit at a quiet house is the max, 16
-		t.Fatalf("deadline limit: %+v", cl)
+	if n := len(e.svc("set_charger_dynamic_limit")) - 1; n != 0 { // the arming release only
+		t.Fatalf("deadline mode wrote limits: %+v", e.calls)
 	}
 	found := false
 	for _, n := range e.notes {
@@ -308,7 +263,19 @@ func TestDeadlineBackstopChargesAtMax(t *testing.T) {
 	}
 }
 
-func TestDisarmRestoresDefaults(t *testing.T) {
+func notesTitled(e *env, title string) []modules.Effect {
+	var out []modules.Effect
+	for _, n := range e.notes {
+		if n.Data["title"] == title && n.Domain == "notify" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// Disarming resumes a charger the controller had paused, writes no limit,
+// and the push says a resume was sent only because one was.
+func TestDisarmResumesWhatItPaused(t *testing.T) {
 	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
 	e.setStatus("charging")
 	e.advance(time.Minute, 1000) // outside the slots: paused
@@ -322,27 +289,155 @@ func TestDisarmRestoresDefaults(t *testing.T) {
 	if got := e.actions(); !eqStr(got, []string{"resume"}) {
 		t.Fatalf("disarm must resume, got %v", got)
 	}
-	cl, cc := e.svc("set_charger_dynamic_limit"), e.svc("set_circuit_dynamic_limit")
-	if len(cl) != 1 || cl[0].Data["time_to_live"] != 1 || cl[0].Data["current"] != 32 ||
-		len(cc) != 1 || cc[0].Data["time_to_live"] != 1 || cc[0].Data["current_p1"] != 32 {
-		t.Fatalf("limits not released: %+v %+v", cl, cc)
+	if n := len(e.svc("set_charger_dynamic_limit")) + len(e.svc("set_circuit_dynamic_limit")); n != 0 {
+		t.Fatalf("disarm wrote limits: %+v", e.calls)
 	}
-	sawDisarm := false
-	for _, n := range e.notes {
-		if n.Data["title"] == "EV controller disarmed" {
-			sawDisarm = true
-		}
-	}
-	if !sawDisarm {
-		t.Fatal("disarm not notified")
+	ns := notesTitled(e, "EV controller disarmed")
+	if len(ns) != 1 || !strings.Contains(ns[0].Data["message"].(string), "a resume command was sent") {
+		t.Fatalf("disarm push: %+v", ns)
 	}
 	e.reset()
 	e.advance(10*time.Minute, 1000)
 	if len(e.calls) != 0 {
-		t.Fatalf("calls after release: %+v", e.calls)
+		t.Fatalf("calls after disarm: %+v", e.calls)
 	}
-	if e.m.x.st.Paused || e.m.x.st.Holding {
-		t.Fatal("hold flags not cleared")
+	if e.m.x.st.Paused {
+		t.Fatal("hold flag not cleared")
+	}
+}
+
+// Nothing was paused: the disarm push must not claim a resume.
+func TestDisarmPushDoesNotClaimAResumeNotSent(t *testing.T) {
+	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
+	e.advance(time.Minute, 1000) // armed, charger never paused by us
+	e.reset()
+	e.feed(ArmedEntity, "off", 0, nil)
+	e.advance(time.Minute, 1000)
+	if len(e.actions()) != 0 {
+		t.Fatalf("resume sent without a pause: %v", e.actions())
+	}
+	ns := notesTitled(e, "EV controller disarmed")
+	if len(ns) != 1 {
+		t.Fatalf("disarm push: %+v", e.notes)
+	}
+	msg := ns[0].Data["message"].(string)
+	if strings.Contains(msg, "is resumed") || strings.Contains(msg, "resume command was sent") || !strings.Contains(msg, "No resume was needed") {
+		t.Fatalf("push claims a resume: %q", msg)
+	}
+}
+
+// Stage A: the one limit release (charger and circuit, 16 A) on start/arm
+// and never otherwise.
+func TestOneShotLimitRelease(t *testing.T) {
+	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
+	e.advance(4*time.Hour+30*time.Minute, 1000)
+	cl, cc := e.svc("set_charger_dynamic_limit"), e.svc("set_circuit_dynamic_limit")
+	if len(cl) != 1 || cl[0].Data["current"] != 16 || cl[0].Data["charger_id"] != "EH5YL3HF" ||
+		len(cc) != 1 || cc[0].Data["current_p1"] != 16 || cc[0].Data["current_p2"] != 16 || cc[0].Data["current_p3"] != 16 {
+		t.Fatalf("want exactly one 16 A release of each, got %+v / %+v", cl, cc)
+	}
+	// Disarm then arm again: one more release, once.
+	e.feed(ArmedEntity, "off", 0, nil)
+	e.advance(5*time.Minute, 1000)
+	e.reset()
+	e.feed(ArmedEntity, "on", 0, nil)
+	e.advance(30*time.Minute, 1000)
+	if len(e.svc("set_charger_dynamic_limit")) != 1 || len(e.svc("set_circuit_dynamic_limit")) != 1 {
+		t.Fatalf("re-arm: want one release, got %+v", e.calls)
+	}
+}
+
+func TestLimitReleaseRetriesAFailureThenStops(t *testing.T) {
+	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
+	fails := 0
+	e.fail = func(f modules.Effect) bool {
+		if f.Service == "set_circuit_dynamic_limit" && fails < 1 {
+			fails++
+			return true
+		}
+		return false
+	}
+	e.advance(10*time.Minute, 1000)
+	if n := len(e.svc("set_circuit_dynamic_limit")); n != 2 {
+		t.Fatalf("one failure, one retry, then done: %d", n)
+	}
+}
+
+// Stage C: the dead-man timer is postponed every 30 min, at once on arm, only
+// while armed and live.
+func TestDeadmanPostponement(t *testing.T) {
+	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
+	e.advance(30*time.Second, 1000)
+	dm := func() []modules.Effect { return e.svc("start") }
+	if len(dm()) != 1 {
+		t.Fatalf("not postponed at once on arm: %+v", e.calls)
+	}
+	c := dm()[0]
+	if c.Domain != "timer" || c.Data["entity_id"] != "timer.ev_deadman" || c.Data["duration"] != "00:31:00" {
+		t.Fatalf("call: %+v", c)
+	}
+	e.advance(29*time.Minute, 1000)
+	if len(dm()) != 1 {
+		t.Fatalf("postponed again before 30 min: %d", len(dm()))
+	}
+	e.advance(2*time.Minute, 1000)
+	if len(dm()) != 2 {
+		t.Fatalf("not postponed at 30 min: %d", len(dm()))
+	}
+	e.advance(2*time.Hour, 1000)
+	if n := len(dm()); n != 6 {
+		t.Fatalf("want one per 30 min (6 in 2.55 h), got %d", n)
+	}
+	// Disarmed: never.
+	e.feed(ArmedEntity, "off", 0, nil)
+	e.reset()
+	e.advance(3*time.Hour, 1000)
+	if len(dm()) != 0 {
+		t.Fatalf("postponed while disarmed: %+v", e.calls)
+	}
+	// Armed again: immediately.
+	e.feed(ArmedEntity, "on", 0, nil)
+	e.advance(time.Minute, 1000)
+	if len(dm()) != 1 {
+		t.Fatalf("not postponed at once on re-arm: %d", len(dm()))
+	}
+}
+
+func TestDeadmanNeverInShadowOrLiveWithoutArmingKey(t *testing.T) {
+	for _, opts := range []string{`{"ev_need_kwh":10}`, `{"ev_need_kwh":10,"ev_mode":"live"}`} {
+		e := newEnv(t, opts, opts == `{"ev_need_kwh":10}`) // shadow with the key on; live with it off
+		e.advance(3*time.Hour, 1000)
+		if len(e.calls) != 0 {
+			t.Fatalf("%s: calls %+v", opts, e.calls)
+		}
+	}
+}
+
+// Not healthy (no charger id known): the timer is left to run out.
+func TestDeadmanNotPostponedWhenUnhealthy(t *testing.T) {
+	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
+	e.m.x.chargerID = ""
+	e.advance(time.Hour, 1000)
+	if len(e.svc("start")) != 0 {
+		t.Fatalf("postponed with no charger id: %+v", e.calls)
+	}
+	e2 := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
+	e2.advance(time.Minute, 1000)
+	e2.m.OnLink(false, e2.now)
+	e2.reset()
+	e2.advance(time.Hour, 1000)
+	if len(e2.svc("start")) != 0 {
+		t.Fatalf("postponed with the link down: %+v", e2.calls)
+	}
+}
+
+func TestDeadmanFailureRetriesSoon(t *testing.T) {
+	e := newEnv(t, `{"ev_need_kwh":10,"ev_mode":"live"}`, true)
+	n := 0
+	e.fail = func(f modules.Effect) bool { n++; return f.Service == "start" && f.Domain == "timer" && n < 3 }
+	e.advance(10*time.Minute, 1000)
+	if len(e.svc("start")) < 2 {
+		t.Fatalf("a failed postponement must retry long before 30 min: %d", len(e.svc("start")))
 	}
 }
 

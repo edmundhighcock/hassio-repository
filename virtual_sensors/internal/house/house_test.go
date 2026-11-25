@@ -102,6 +102,36 @@ func TestEVCeilingFromHub(t *testing.T) {
 	}
 }
 
+func TestNonEVLoadFromHub(t *testing.T) {
+	h := NewHub()
+	if _, ok := h.NonEVLoadA(t0, t0, time.Hour); ok {
+		t.Fatal("no forecast yet")
+	}
+	f := ComputeForecast(fcIn())
+	h.SetForecast(f)
+	l, ok := h.NonEVLoadA(t0, t0.Add(5*Quarter), time.Hour)
+	hd, _ := f.MinHeadroom(t0.Add(5*Quarter), PhaseSet{true, true, true})
+	if !ok || !near(f.BudgetA-maxOf(l), hd) {
+		t.Fatalf("%v %v vs head %v", l, ok, hd)
+	}
+	if _, ok := h.NonEVLoadA(t0.Add(2*time.Hour), t0, time.Hour); ok {
+		t.Fatal("stale forecast must not be used")
+	}
+	if _, ok := h.NonEVLoadA(t0, t0.Add(48*time.Hour), time.Hour); ok {
+		t.Fatal("beyond the horizon")
+	}
+}
+
+func maxOf(l [3]float64) float64 {
+	m := l[0]
+	for _, v := range l {
+		if v > m {
+			m = v // the largest load leaves the least headroom
+		}
+	}
+	return m
+}
+
 func meas(at time.Time, a, b, c, ev float64) Measure {
 	return Measure{At: at, PhaseA: [3]float64{a, b, c}, EVA: ev, Measured: true}
 }
