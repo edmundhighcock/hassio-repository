@@ -147,8 +147,14 @@ configuration:
   ev_heater_phase_a:
     name: "EV: immersion heater current per phase (A)"
     description: "On phases A and B while it draws. Default 7.5."
+  ev_fuse_a:
+    name: "EV: supply fuse per phase (A)"
+    description: "Default 20. The planner estimates what the charger can deliver against this."
+  ev_derate:
+    name: "EV: deliverable-energy derate"
+    description: "Default 0.9. Share of the theoretical deliverable energy the plan counts on."
   ev_hp_phase_a:
-    name: "EV: heat pump maximum current on phase C (A)"
+    name: "EV: heat pump maximum current on phase L2 (A)"
     description: "Default 7.4."
   ev_charge_now_hours:
     name: "EV: charge-now timeout (hours)"

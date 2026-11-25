@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.6.17
+
+Why: on 2026-11-23 the Zoe charged 1-phase at 16 A on L3 while L2 carried the
+heat pump, and the controller's own per-phase limits and ceiling got in the way
+(11-24/25 the car stayed uncharged). Rule from the owner: **the controller
+decides only WHEN to charge; the charger and the Easee Equalizer decide HOW
+MUCH.** The Equalizer already protects every phase the car uses.
+
+Stage A, when only:
+- ev_control while armed and live sends only `easee.action_command`
+  start/resume/pause (at planned slot boundaries, plus Charge now and the
+  fallbacks). No `set_charger_dynamic_limit` / `set_circuit_dynamic_limit`
+  while charging, no phase-mode commands, no `ev_controller_breach` alert, no
+  limit lowering, no reaction to the house planner's EV cap or to a stale grid
+  meter. ONE release of the charger and circuit dynamic limits (16 A, 1 min
+  TTL) goes out when the module starts or is armed, never otherwise (a failed
+  one is retried up to 3 times). `ev_limit_in_force` stays published (so
+  dashboards keep working) but is always 0 A; its attributes now carry
+  `limits_written: false`, `release_sent`, `deadman_postponed_at`.
+- Planner: the per-slot current ceiling is replaced by a realistic estimate of
+  the energy the charger can DELIVER per 15-min slot, from the forecast non-EV
+  load per phase against a fuse of `ev_fuse_a` (new, default 20) per phase:
+  three phases `min(F - load)` capped at `ev_max_a`, zero below `ev_min_a`;
+  single phase on L3 `F - load(L3)` likewise; the larger of the two kW, times
+  `ev_derate` (new, default 0.9). Without a forecast: base 3 A per phase, heat
+  pump on L2 (it was on L3), heater on L1+L2 only in hot-water-ON slots 16-23.
+  `sensor.ev_plan` slots keep the order `[start, amps, kw, price_kr_per_kwh]`;
+  `kw` is now the deliverable power and `amps` the expected current.
+- House planner (`internal/house`): new `Forecast.NonEVLoadA` and
+  `Hub.NonEVLoadA` publish the per-phase non-EV amps (budget minus headroom).
+  The existing outputs (headroom, `EVCeilingA`, caps, sensors) are unchanged.
+  NOTE: the house planner's default `house_phase_map` still puts the heat pump
+  on L3; set `house_phase_map: heater=L1+L2;hp=L2;ev=L1+L2+L3` for this house.
+- `ev_limit_ttl_min` and `ev_stale_after_min` are obsolete: accepted in saved
+  options, ignored.
+
+Stage B, honest when disarmed:
+- While `input_boolean.ev_controller_armed` is off or `ev_mode` is not live,
+  `sensor.ev_controller_state` reads `disarmed` (reason "disarmed: will not
+  start or pause the charger"); the would-do state is in the attributes
+  `would_state` and `would_reason`, and `ev_would_command` is unchanged.
+- Charge now pressed while disarmed does not activate the override: a Logbook
+  entry and a phone push say the controller is disarmed and nothing was started.
+- The disarm push no longer claims "the charger is resumed": it says a resume
+  was sent only when one was, otherwise that none was needed or is pending.
+  Disarming no longer writes a 32 A limit release.
+
+Stage C, dead-man postponement:
+- While armed AND live AND healthy (link up, charger id known) the controller
+  calls `timer.start` on `timer.ev_deadman` with duration `00:31:00` at once on
+  start/arm and every 30 minutes (retry after 90 s on failure). Never while
+  disarmed or not live. It does not touch `ev_last_command`.
+
+Tests: new `stage_test.go` (the 11-23 night: feasible plan of at least 20 kWh
+via single-phase L3 in the heater window, no limit commands while charging,
+host-routed run through `HandleState`/`Tick`, disarmed state, Charge now while
+disarmed, removed options tolerated), exec tests for the one-shot release, the
+dead-man cadence and disarmed/unhealthy cases, and `house` tests for the
+per-phase load.
+
 ## 0.6.16
 
 - Fix ev_control: a brief `completed` no longer means the car is full. On

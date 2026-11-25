@@ -1,9 +1,10 @@
-// Package evcontrol is the "ev_control" module: a SHADOW-ONLY planner and
-// guard for the Zoe's Easee charger (ham services/ev-planner/PLAN.md). It
+// Package evcontrol is the "ev_control" module: the planner and live
+// executor for the Zoe's Easee charger (ham services/ev-planner/PLAN.md). It
 // reads Home Assistant entities, plans the night's charging against the
-// quarter-hour spot prices, publishes what it WOULD command, and scores
-// the plan against what actually happened. It never calls a Home
-// Assistant or Easee service: there is deliberately no live mode here.
+// quarter-hour spot prices from the energy the charger can deliver, publishes
+// what it would command, and scores the plan against what happened. Armed
+// and live it decides only WHEN to charge (start/resume/pause); the charger
+// and the Easee Equalizer decide how much. See exec.go.
 package evcontrol
 
 import (

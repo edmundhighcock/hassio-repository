@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.6.16"
+version: "0.6.17"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -125,8 +125,10 @@ schema:
   ev_mode: "list(shadow|live)?" # default shadow; live also needs input_boolean.ev_controller_armed on
   ev_notify_service: "str?" # default notify.mobile_app_edmund15max
   ev_charger_id: "str?" # default: the id attribute of sensor.<prefix>_status
-  ev_limit_ttl_min: "int(3,120)?" # default 15: dynamic-limit time-to-live; refreshed every third of it
-  ev_stale_after_min: "int(2,120)?" # default 10: grid reading older than this = stale, charge now
+  ev_limit_ttl_min: "int(3,120)?" # OBSOLETE since 0.6.17 (the controller writes no limit): accepted, ignored
+  ev_stale_after_min: "int(2,120)?" # OBSOLETE since 0.6.17 (no meter decides): accepted, ignored
+  ev_fuse_a: "float(6,63)?" # default 20: supply fuse per phase, for the deliverable-energy estimate
+  ev_derate: "float(0.1,1)?" # default 0.9: share of the theoretical deliverable energy the plan counts on
   ev_charge_now_hours: "float?" # default 12: the Charge now override ends after this many hours (0.1..48)
   ev_full_confirm_min: "int(1,120)?" # default 10: "completed" must hold this long (no charger current) before the car counts as full
   ev_full_clear_min: "int(1,120)?" # default 5: awaiting_start/ready_to_charge this long clears a full flag

@@ -489,31 +489,55 @@ hwcontrol is unchanged) and the nordpool price sensor
 all-in price uses `hwc_price_adder_ore` and `hwc_vat_factor`).
 
 Planner (`internal/modules/evcontrol/plan.go`, pure): assumes the car is
-empty at plug-in; need = `ev_need_kwh` minus the session energy. Per
-quarter-hour the EV ceiling is the smallest of (`ev_phase_budget_a` minus
-the forecast non-EV amps) over phases A, B, C, floored to whole amps,
-clamped to `ev_max_a`, unusable below `ev_min_a`. The forecast is a base
-`ev_house_base_a` on every phase, `ev_heater_phase_a` on A and B in
-hot-water-ON slots between 16:00 and 23:00, and `ev_hp_phase_a` on C
-always. The cheapest usable priced slots are chosen until the need is met;
-gaps shorter than `ev_min_block_min` between chosen runs are filled. If
-the priced slots cannot meet the need, every usable slot to departure is
-planned at its ceiling (`deadline_mode`). Without tomorrow's prices the
-plan is flagged `prices_partial`. It re-plans on plug-in, a price update,
-a hot-water plan change and every 15 minutes.
+empty at plug-in; need = `ev_need_kwh` minus the session energy. **The
+controller decides only WHEN to charge; the charger and the Easee Equalizer
+decide HOW MUCH** (0.6.17). So the planner no longer sets a current ceiling:
+per quarter-hour it estimates the energy the charger can DELIVER from the
+forecast non-EV load per phase (L1, L2, L3), against the supply fuse
+`ev_fuse_a` (default 20 A per phase):
+
+- three phases: a3 = the smallest of (fuse minus load) over L1..L3, capped at
+  `ev_max_a`, 0 below `ev_min_a`; kW = 3 x 230 x a3 / 1000;
+- single phase on L3 (the Equalizer switches there by itself with phase mode
+  auto): a1 = fuse minus the L3 load, capped, 0 below `ev_min_a`;
+  kW = 230 x a1 / 1000;
+- deliverable = the larger of the two, times `ev_derate` (default 0.9).
+
+The load per phase comes from the house planner's published forecast
+(`house_planner`, per-phase non-EV amps: base, heater and heat pump on the
+phases its `house_phase_map` gives them; **set `house_phase_map` so the heat
+pump is on L2 if that is where it is wired**, e.g.
+`heater=L1+L2;hp=L2;ev=L1+L2+L3`). Without a forecast (none, older than 30 min,
+or not covering the slot) the static assumptions apply: `ev_house_base_a` on
+each phase, `ev_hp_phase_a` on L2 always, `ev_heater_phase_a` on L1 and L2
+only in hot-water-ON slots between 16:00 and 23:00. The cheapest priced slots
+are chosen until the summed deliverable kWh covers the need; gaps shorter than
+`ev_min_block_min` between chosen runs are filled. If the priced slots cannot
+meet the need, every usable slot to departure is planned (`deadline_mode`).
+Without tomorrow's prices the plan is flagged `prices_partial`. It re-plans on
+plug-in, a price update, a hot-water plan change and every 15 minutes.
+`sensor.ev_plan` slots keep the order `[start, amps, kw, price_kr_per_kwh]`:
+`amps` is the expected charger current (per phase on three phases, or the
+single phase) and `kw` the deliverable power after the derate.
 
 Guard (`guard.go`, pure): per-phase current is estimated from the grid
 power, the EV power, the heat pump and the immersion heater (assumed
 drawing when the hot-water residual is at least 1500 W); the would-be EV
 limit is the floored minimum headroom against the budget. Breaches
 (estimated phase above the budget) are counted per session on the rising
-edge.
+edge. Since 0.6.17 the guard only informs: it publishes `ev_guard_limit_a`,
+counts breaches and feeds the house planner's measurement; it limits nothing
+and raises no alert.
 
-Published (prefix `ev_`): `sensor.ev_controller_state` (idle, planned,
-would_charge, would_pause, deadline_mode, degraded; attribute `reason`),
+Published (prefix `ev_`): `sensor.ev_controller_state` (**`disarmed` whenever
+the controller is not live and armed**, with the reason "disarmed: will not
+start or pause the charger" and the plan's own state in the attributes
+`would_state` / `would_reason`; when armed and live: idle, planned,
+would_charge, would_pause, deadline_mode, degraded, charge_now, car_full;
+attribute `reason`),
 `ev_plan` (planned kWh; attributes slots, cost, need, departure,
-prices_partial, deadline_mode), `ev_would_command` (resume at N A, pause,
-limit N A, none), `ev_guard_limit_a` (per-phase attributes),
+prices_partial, deadline_mode), `ev_would_command` (resume, pause, none),
+`ev_guard_limit_a` (per-phase attributes, informational only since 0.6.17),
 `ev_guard_breaches_tonight`, `ev_shadow_saving` (last session actual cost
 minus the plan's cost for the same kWh, plus cumulative).
 
@@ -522,7 +546,9 @@ Evaluation: at unplug one JSON line per session is appended to
 actual and plan cost, whether the plan finishes by departure, breaches).
 Restart state is `/data/ev_control-state.json`.
 
-All options are optional with defaults in code (see config.yaml `ev_*`).
+All options are optional with defaults in code (see config.yaml `ev_*`). New
+in 0.6.17: `ev_fuse_a` (20) and `ev_derate` (0.9). `ev_limit_ttl_min` and
+`ev_stale_after_min` are obsolete: still accepted in saved options, ignored.
 
 ## Heat-pump and Dyson planner (`hp_control`)
 
@@ -912,8 +938,11 @@ prove this interface isn't secretly hot_water-shaped.
 Two keys, like hot water: option `ev_mode: live` AND
 `input_boolean.ev_controller_armed` on (create the helper; absent or
 unavailable counts as off). In shadow, or live without the key, no
-service is called , except that a pause or
-limit this module still holds from an earlier live period is released.
+service is called (a pause this module still holds from an earlier live period
+is resumed), `sensor.ev_controller_state` reads `disarmed`, and **Charge now
+does nothing**: it does not activate the override, it writes a Logbook entry
+and a phone push ("EV charge now not started") saying the controller is
+disarmed and nothing was started.
 
 **Before arming, disable the `Car Start Charging` automation** (22:00,
 `start` then `resume`): it fights the planner. The module publishes
@@ -922,29 +951,36 @@ limit this module still holds from an earlier live period is released.
 (shadow/live).
 
 Services (Easee integration v2026.11.0), targeted with `charger_id`, the
-`id` attribute of `sensor.loaver_status` (override: `ev_charger_id`):
-`easee.action_command` (`action_command`: `pause`, `resume`, and `start`
-before `resume` when the status is awaiting_start/awaiting_authorization),
-`easee.set_charger_dynamic_limit` (`current`, `time_to_live` in minutes)
-and `easee.set_circuit_dynamic_limit` (`current_p1..p3`, `time_to_live`).
-Limits are written only on change plus a refresh every `ev_limit_ttl_min`/3
-(TTL default 15 min), so a dead add-on lets them lapse. The circuit limit is
-per phase: the budget less the estimated other load on that phase. The
-charger limit is the smaller of the plan's amps and the guard's limit;
-below `ev_min_a` the charger is paused. Resume is sent only after fresh
-limits are written, except in a fallback where limit writes keep failing.
+`id` attribute of `sensor.loaver_status` (override: `ev_charger_id`).
+**While armed and live the only charger commands are `easee.action_command`
+`pause`, `resume`, and `start` before `resume` when the status is
+awaiting_start/awaiting_authorization**, sent at planned slot boundaries (and
+for Charge now and the fallbacks). The controller never writes a dynamic
+limit, a phase mode, or a guard-breach alert: the charger and the Equalizer
+protect every phase the car uses (they back off, and with phase mode auto the
+charger goes single-phase by itself). The one exception: when the module
+starts or is armed it sends ONE release, `easee.set_charger_dynamic_limit` and
+`easee.set_circuit_dynamic_limit` at 16 A with a 1 minute TTL, so a limit left
+by an older version or a manual action does not linger. A failed release is
+retried up to three times; a successful one is never repeated until the next
+start or arming. An overloaded phase the car is NOT using is the hot-water
+module's overload pause, not this module's concern; the house planner's EV cap
+is no longer acted on.
 
 Safety rules: (1) deadline backstop: if the plan cannot finish by
-departure, charge continuously at the guard's maximum allowed. (2) Stale
-data (no grid or Equalizer reading for `ev_stale_after_min`, link down for
-more than 2 min, no price for the current quarter, tomorrow's prices still
-missing at 14:00, no session plan) falls back to charge now at the guard
-limit (the forecast ceiling when the guard is stale). (3) The phase budget
-`ev_phase_budget_a` less other load is never exceeded by the limits sent; if
-there is no headroom for `ev_min_a` the charger pauses. (4) Disarming (or
-leaving live) while paused resumes the charger, then writes a 32 A
-limit with a 1 minute TTL on charger and circuit, handing control back to
-Easee's defaults.
+departure, charge in every usable slot to departure. (2) Stale data (link
+down for more than 2 min, no price for the current quarter, tomorrow's prices
+still missing at 14:00, no session plan) falls back to charge now. A stale grid
+or Equalizer reading no longer matters: the controller uses no meter to decide.
+(3) Disarming (or leaving live) while the controller holds a pause resumes the
+charger; the disarm push says a resume was sent only if one was.
+
+**Dead-man postponement.** Home Assistant has `timer.ev_deadman` (30 min); if it
+runs out, an HA automation starts a waiting car itself, assuming the controller
+is dead or disabled. While armed AND live AND healthy (link up, charger id
+known) the controller calls `timer.start` on `timer.ev_deadman` with duration
+`00:31:00` immediately on start/arm and then every 30 minutes (a failed call is
+retried after 90 s). It never calls it while disarmed or not live.
 
 **Pause has no TTL.** If the add-on dies while the car is paused, nothing
 resumes it. Mitigation: `sensor.ev_controller_heartbeat` (Unix seconds,
@@ -953,14 +989,16 @@ automation should resume the charger if the heartbeat is older than a few
 minutes while the car is connected and paused.
 
 Notifications (`notify.mobile_app_edmund15max`, `ev_notify_service`, plus
-a persistent notification): armed, disarmed, deadline or stale fallback
-(once per session), guard breach, command failure (each rate limited to
-once per 15 min).
+a Logbook entry): armed, disarmed, Charge now refused while disarmed,
+deadline or stale fallback (once per session), command failure (each rate
+limited to once per 15 min).
 
 Published by the executor: `ev_controller_mode`, `ev_controller_armed`,
 `ev_last_command` (state: the command; attributes result, error, at),
-`ev_limit_in_force` (charger A last written; attributes circuit_a, paused,
-ttl_min, desired, reason, fallback), `ev_controller_heartbeat`.
+`ev_limit_in_force` (kept so dashboards do not break: since 0.6.17 always 0 A,
+as the controller writes no limit; attributes paused, limits_written=false,
+release_sent, desired, reason, fallback, deadman_postponed_at),
+`ev_controller_heartbeat`.
 
 ### Guard inputs: Equalizer
 
