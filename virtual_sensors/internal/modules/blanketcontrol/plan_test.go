@@ -44,7 +44,7 @@ func TestColdNightShiftsHeatToCheapHours(t *testing.T) {
 		}
 		return 1.5
 	})
-	in := coldInput(now, 6.5, 3, pr)
+	in := coldInput(now, 5.0, 3, pr)
 	r := Plan(in, p)
 	if r.NoPrices || len(r.Slots) < 96 {
 		t.Fatalf("plan %+v", r.Slots)
@@ -74,8 +74,8 @@ func TestPlanNeverHeatsAboveMaxAndBackstopDoesNotOverrideCap(t *testing.T) {
 	p := testParams()
 	now := at(26, 12, 0)
 	pr := prices(now, 36, func(h int) float64 { return 0.01 }) // free heat
-	for _, t0 := range []float64{8.0, 8.4, 9.5} {
-		r := Plan(coldInput(now, t0, 7, pr), p)
+	for _, t0 := range []float64{6.0, 6.4, 7.5} {
+		r := Plan(coldInput(now, t0, 5, pr), p)
 		for _, s := range r.Slots {
 			if s.On && s.T >= p.MaxC {
 				t.Fatalf("t0 %.1f: planned heat at %.2f >= max", t0, s.T)
@@ -83,7 +83,7 @@ func TestPlanNeverHeatsAboveMaxAndBackstopDoesNotOverrideCap(t *testing.T) {
 		}
 	}
 	// even with a cold, expensive forecast the planned temperature never goes above the cap because of heating
-	r := Plan(coldInput(now, 7.9, -5, pr), p)
+	r := Plan(coldInput(now, 5.9, -5, pr), p)
 	for _, s := range r.Slots {
 		if s.TEnd > p.MaxC+1e-9 && s.On {
 			t.Fatalf("heating pushed %.2f above max", s.TEnd)
@@ -102,7 +102,7 @@ func TestStartCapAndMinOnRespected(t *testing.T) {
 		}
 		return 3
 	})
-	r := Plan(coldInput(now, 6.0, 0, pr), p)
+	r := Plan(coldInput(now, 4.6, 0, pr), p)
 	for d, n := range r.Starts {
 		if n > p.MaxStartsDay {
 			t.Fatalf("day %d: %d starts > cap", d, n)
@@ -121,7 +121,7 @@ func TestStartCapAndMinOnRespected(t *testing.T) {
 		run = 0
 	}
 	// starts already used today shrink today's budget
-	in := coldInput(now, 6.0, 0, pr)
+	in := coldInput(now, 4.6, 0, pr)
 	in.StartsToday = 2
 	r2 := Plan(in, p)
 	if r2.Starts[0] > 1 {
@@ -134,7 +134,7 @@ func TestRefreshCountedInLongBlock(t *testing.T) {
 	p.Model.Boost5 = 0.1 // too weak to hold the floor: plan heats continuously
 	now := at(26, 12, 0)
 	pr := prices(now, 36, func(int) float64 { return 1 })
-	r := Plan(coldInput(now, 5.5, -10, pr), p)
+	r := Plan(coldInput(now, 4.5, -10, pr), p)
 	tot := r.Starts[0] + r.Starts[1] + r.Starts[2]
 	if tot < 36*60/170-1 { // a start plus a refresh every 2 h 45
 		t.Fatalf("refreshes not counted: %d starts over %d slots", tot, len(r.Slots))

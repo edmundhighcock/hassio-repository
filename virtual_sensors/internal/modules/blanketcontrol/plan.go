@@ -48,7 +48,7 @@ func DefaultParams() Params {
 	if err != nil {
 		loc = time.UTC
 	}
-	return Params{Model: DefaultModel(), PowerW: 70, FloorC: 5, TargetC: 6, MaxC: 8, MarginC: 0.5,
+	return Params{Model: DefaultModel(), PowerW: 70, FloorC: 4, TargetC: 4.5, MaxC: 6, MarginC: 0.5,
 		MinOnSlots: 4, MaxStartsDay: 12, StartPenaltyKr: 0.3, TargetLambda: 0.002,
 		Price: planner.DefaultConfig(), Loc: loc}
 }
@@ -188,7 +188,7 @@ func Plan(in Input, p Params) Result {
 	}
 	S := sidx{m: M, w: WindowSlots}
 	ns := S.n()
-	floor := p.FloorC + p.MarginC
+	floor := math.Min(p.FloorC+p.MarginC, p.MaxC-0.5)
 	lo := floor - 2
 	hi := p.MaxC + 1
 	N := int(math.Round((hi-lo)/gridStep)) + 1
