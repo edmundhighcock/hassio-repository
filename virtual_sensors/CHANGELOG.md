@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.7.0
+
+New module `blanket_control`: keeps dahlia tubers in the tool shed between a
+floor and a hard maximum with an electric blanket that only a SwitchBot Bot
+can toggle. See DOCS.md "Dahlia blanket controller". Enable via `modules`;
+shadow by default (live needs `bc_mode: live` AND
+`input_boolean.blanket_controller_armed`); all new `bc_*` options optional.
+Existing saved options start unchanged.
+
+- Executor: every ON is a start (plug off, 10 s, plug on, 5 s, one press,
+  wait for power); a lost press repeats the whole start; FAILED after 3 tries
+  (one push, one Logbook entry, full retry every 10 min, one push on
+  recovery); late-toggle restart within 5 min; plug loss or power cut starts
+  again; 2 h 50 on-window with a refresh start before it ends; minimum
+  on-block and a per-day start cap (the frost backstop may exceed it).
+- Planner: 15-min DP over the price horizon on hp_control's 1R1C model
+  (online ridge fit of U, H, G with prediction error), minimum on-block,
+  refresh and per-day start budget in the DP; frost backstop; sensor-silent
+  fail-safe (one on-window, only below target); hysteresis without prices.
+- Hard cap `bc_max_c` (6.0): never heat at or above it, overriding the
+  planner, backstop, fail-safe and Start now. Defaults for a sensor that
+  reads the coolest air above the tubers: floor 4.0, target 4.5, backstop 3.0,
+  too-warm alarm 8.0. Optional hot-spot sensor (`bc_hot_sensor`, cap 8.0,
+  alarm 10.0).
+- Humidity monitor (dew point, absolute humidity, RH at reference) with
+  condensation, wet and dry alarms (push once per episode plus Logbook,
+  recovery push); temperature alarms (too warm 30 min, too cold while
+  heating 30 min). The condensation check uses
+  `bc_cold_surface_sensor` (default `sensor.outdoor_temperature_best`).
+- Dead-man `timer.blanket_deadman` (00:31:00 every 30 min while armed, live,
+  healthy). Entities `sensor.blanket_*`, `button.blanket_replan`,
+  `button.blanket_start_now`.
+- `hp_control` gains exported `ParseForecast` / `OutdoorAt` (no behaviour
+  change), reused for the SMHI forecast.
+
+Tests: new `internal/modules/blanketcontrol` suite (protocol with a simulated
+plug/blanket/Bot, planner, cap, alarms, humidity maths, shadow/disarmed,
+dead-man, host routing).
+
 ## 0.6.17
 
 Why: on 2026-11-23 the Zoe charged 1-phase at 16 A on L3 while L2 carried the

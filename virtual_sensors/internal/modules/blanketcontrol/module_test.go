@@ -163,7 +163,7 @@ func TestMagnusAndRHAtReference(t *testing.T) {
 
 func (r *rig) humidity(rh, shed float64) {
 	r.sendNum(r.m.humEnt, rh)
-	r.sendNum(r.m.shedEnt, shed)
+	r.sendNum(r.m.coldEnt, shed)
 }
 
 // holdHum keeps humidity/shed readings fresh while the clock runs.
@@ -280,14 +280,14 @@ func TestTemperatureAlarms(t *testing.T) {
 		t.Fatalf("low pushes %d", r2.pushes("Dahlia storage too cold"))
 	}
 	// the hot-spot sensor has its own alarm limit (10 C)
-	r3 := newRig(t, `{"bc_mode":"live","bc_hot_sensor":"blanket_hot_spot"}`, true)
-	r3.sendNum("blanket_hot_spot", 9.0) // over the 8 C cap, below the 10 C alarm
+	r3 := newRig(t, `{"bc_mode":"live","bc_hot_sensor":"tool_shed_temperature"}`, true)
+	r3.sendNum("tool_shed_temperature", 9.0) // over the 8 C cap, below the 10 C alarm
 	r3.run(40 * time.Minute)
 	if r3.pushes("Dahlia storage too warm") != 0 {
 		t.Fatal("hot alarm below its limit")
 	}
 	for i := 0; i < 5; i++ {
-		r3.sendNum("blanket_hot_spot", 10.5)
+		r3.sendNum("tool_shed_temperature", 10.5)
 		r3.run(10 * time.Minute)
 	}
 	if r3.pushes("Dahlia storage too warm") != 1 {
@@ -317,6 +317,14 @@ func TestConfigDefaultsAndRanges(t *testing.T) {
 		m.hotMax != 8 || m.hotAlarm != 10 || m.hotEnt != "" || m.confirm != 150*time.Second || m.onW != 30 ||
 		m.tries != 3 || m.p.MinOnSlots != 4 || m.p.MaxStartsDay != 12 || m.rhRef != 5 || m.rhLow != 60 || m.rhHi != 95 {
 		t.Fatalf("defaults %+v %+v", m.p, m)
+	}
+	if m.coldEnt != "outdoor_temperature_best" || m.hotEnt != "" {
+		t.Fatalf("cold-surface/hot defaults %q %q", m.coldEnt, m.hotEnt)
+	}
+	for _, in := range m.Inputs() {
+		if in.EntityID == "tool_shed_temperature" {
+			t.Fatal("sensor.tool_shed_temperature is an input by default")
+		}
 	}
 	if m.tempEnt != "dahlia_storage_temperature" || m.plugEnt != "switch.tool_shed_heater" || m.botEnt != "switch.dahlia_blanket_bot" || m.fcastEnt != "weather.smhi_home" {
 		t.Fatal("entity defaults")
@@ -453,7 +461,6 @@ func TestHostRoutedStart(t *testing.T) {
 	send("switch.tool_shed_heater", "off")
 	send("sensor.tool_shed_heater_power", "0")
 	send("sensor.dahlia_storage_temperature", "4.6")
-	send("sensor.tool_shed_temperature", "3.0")
 	send("sensor.dahlia_storage_humidity", "85")
 	send("sensor.outdoor_temperature_best", "-1")
 	answered := 0

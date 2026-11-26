@@ -1,6 +1,6 @@
 name: "Virtual Sensors"
 description: "Derived sensors computed from other HA entities, published via MQTT discovery"
-version: "0.6.17"
+version: "0.7.0"
 slug: "virtual_sensors"
 init: false
 startup: application
@@ -32,7 +32,7 @@ options:
   go_memlimit_mib: 24
 schema:
   modules:
-    - "list(hot_water|hot_water_control|ev_control|hp_control|house_planner|price_shed|example_passthrough)"
+    - "list(hot_water|hot_water_control|ev_control|hp_control|house_planner|price_shed|blanket_control|example_passthrough)"
   log_level: "list(debug|info|warning|error)"
   mqtt_host: "str?"
   mqtt_port: "port?"
@@ -192,6 +192,43 @@ schema:
   ps_enabled: "bool?" # default true
   ps_switch: "str?" # default switch.tool_shed_lights
   ps_off_hours: "int(0,12)?" # default 4
+  # --- blanket_control (0.7.0): dahlia tubers in the tool shed kept between a floor
+  # and a HARD maximum by an electric blanket whose button a SwitchBot Bot presses.
+  # SHADOW by default; live needs bc_mode: live AND input_boolean.blanket_controller_armed
+  # on. Every key optional, NO entry under options:; Go applies the default and replaces
+  # an out-of-range value with it (logged). Prices are hwcontrol's (hwc_price_entity,
+  # hwc_price_adder_ore, hwc_vat_factor). Enable via the `modules` list. ---
+  bc_mode: "list(shadow|live)?" # default shadow; live also needs input_boolean.blanket_controller_armed on
+  bc_floor_c: "float(0,12)?" # default 4.0 (storage sensor, which reads the coolest part of the box)
+  bc_backstop_c: "float(-5,12)?" # default 3.0; below the floor
+  bc_target_c: "float(0,12)?" # default 4.5
+  bc_max_c: "float(0,15)?" # default 6.0 HARD CAP
+  bc_alarm_high_c: "float(0,25)?" # default 8.0; alarm after 30 min
+  bc_hot_sensor: "str?" # default empty: no hot-spot sensor
+  bc_hot_max_c: "float(0,30)?" # default 8.0; only with bc_hot_sensor
+  bc_hot_alarm_c: "float(0,40)?" # default 10.0; only with bc_hot_sensor
+  bc_confirm_s: "int(30,600)?" # default 150
+  bc_on_watts: "float(1,500)?" # default 30
+  bc_start_tries: "int(1,10)?" # default 3; then FAILED, a full retry every 10 min
+  bc_min_on_min: "int(0,165)?" # default 60
+  bc_max_starts_day: "int(1,48)?" # default 12
+  bc_notify_service: "str?" # default notify.mobile_app_edmund15max
+  bc_power_w: "float(10,2000)?" # default 70
+  bc_start_penalty_kr: "float(0,100)?" # default 0.3
+  bc_model_u: "float(0.001,2)?" # default 0.30 per hour (starting value, refitted online)
+  bc_model_h: "float(0.01,10)?" # default 1.5 K/h at full draw (starting value)
+  bc_model_g: "float(-0.3,0.3)?" # default 0
+  bc_forecast_entity: "str?" # default weather.smhi_home; "" disables
+  bc_temp_entity: "str?" # default sensor.dahlia_storage_temperature
+  bc_cold_surface_sensor: "str?" # default sensor.outdoor_temperature_best: cold-surface proxy for the condensation alarm (NOT the shed sensor, which may be the hot-spot sensor)
+  bc_humidity_entity: "str?" # default sensor.dahlia_storage_humidity
+  bc_outdoor_entity: "str?" # default sensor.outdoor_temperature_best
+  bc_power_entity: "str?" # default sensor.tool_shed_heater_power
+  bc_plug_entity: "str?" # default switch.tool_shed_heater
+  bc_bot_entity: "str?" # default switch.dahlia_blanket_bot
+  bc_rh_ref_c: "float(-5,20)?" # default 5.0
+  bc_rh_low: "float(1,99)?" # default 60
+  bc_rh_high: "float(1,150)?" # default 95
 # This add-on's own /data (energy totals, open-cycle state - see DOCS.md
 # "Restart semantics") is small; it is included in Home Assistant's
 # normal backups like any other add-on's /data, with no backup_exclude.

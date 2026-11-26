@@ -40,7 +40,7 @@ const (
 	ArmedEntity    = "input_boolean.blanket_controller_armed"
 	DeadmanEntity  = "timer.blanket_deadman"
 	defaultTemp    = "dahlia_storage_temperature"
-	defaultShed    = "tool_shed_temperature"
+	defaultCold    = defaultOutdoor
 	defaultOutdoor = "outdoor_temperature_best"
 	defaultHum     = "dahlia_storage_humidity"
 	defaultPower   = "tool_shed_heater_power"
@@ -78,7 +78,7 @@ type options struct {
 	ModelG    *float64 `json:"bc_model_g"`
 	Forecast  *string  `json:"bc_forecast_entity"`
 	TempEnt   *string  `json:"bc_temp_entity"`
-	ShedEnt   *string  `json:"bc_shed_temp_entity"`
+	ColdEnt   *string  `json:"bc_cold_surface_sensor"`
 	HumEnt    *string  `json:"bc_humidity_entity"`
 	OutEnt    *string  `json:"bc_outdoor_entity"`
 	PowerEnt  *string  `json:"bc_power_entity"`
@@ -137,9 +137,9 @@ type Module struct {
 	backstop           float64
 	rhRef, rhLow, rhHi float64
 
-	tempEnt, shedEnt, outEnt, humEnt, powerEnt, plugEnt, botEnt, priceEnt, fcastEnt string
+	tempEnt, coldEnt, outEnt, humEnt, powerEnt, plugEnt, botEnt, priceEnt, fcastEnt string
 
-	t, shed, out, hum, pw reading
+	t, cold, out, hum, pw reading
 	plugState             string
 	plugAt                time.Time
 	armedKey              bool
@@ -176,7 +176,7 @@ type Module struct {
 func New() *Module {
 	m := &Module{p: DefaultParams(), defModel: DefaultModel(), notify: defaultNotify, onW: 30, confirm: 150 * time.Second, tries: 3,
 		alarmHigh: 8, backstop: 3.0, hotMax: 8, hotAlarm: 10, rhRef: 5, rhLow: 60, rhHi: 95,
-		tempEnt: defaultTemp, shedEnt: defaultShed, outEnt: defaultOutdoor, humEnt: defaultHum, powerEnt: defaultPower,
+		tempEnt: defaultTemp, coldEnt: defaultCold, outEnt: defaultOutdoor, humEnt: defaultHum, powerEnt: defaultPower,
 		plugEnt: defaultPlug, botEnt: defaultBot, priceEnt: defaultPrice, fcastEnt: defaultFcast,
 		prices: map[int64]float64{}, forecast: map[int64]float64{}, days: map[string]*dayRec{},
 		alarms: map[string]*alarm{}, sig: map[string]string{}, x: newExec()}
@@ -339,7 +339,7 @@ func (m *Module) Configure(raw []byte) error {
 		}
 	}
 	set(&m.tempEnt, o.TempEnt, true)
-	set(&m.shedEnt, o.ShedEnt, true)
+	set(&m.coldEnt, o.ColdEnt, true)
 	set(&m.humEnt, o.HumEnt, true)
 	set(&m.outEnt, o.OutEnt, true)
 	set(&m.powerEnt, o.PowerEnt, true)
@@ -358,12 +358,20 @@ func (m *Module) Configure(raw []byte) error {
 // Inputs implements modules.Module.
 func (m *Module) Inputs() []modules.InputSpec {
 	in := []modules.InputSpec{
-		{EntityID: m.tempEnt}, {EntityID: m.shedEnt}, {EntityID: m.outEnt}, {EntityID: m.humEnt},
+		{EntityID: m.tempEnt}, {EntityID: m.outEnt}, {EntityID: m.humEnt},
 		{EntityID: m.powerEnt}, {EntityID: m.plugEnt}, {EntityID: ArmedEntity},
 		{EntityID: m.priceEnt, Attributes: []string{"today", "tomorrow", "raw_today", "raw_tomorrow", "tomorrow_valid"}},
 	}
-	if m.hotEnt != "" {
-		in = append(in, modules.InputSpec{EntityID: m.hotEnt})
+	// The cold-surface proxy defaults to the outdoor sensor: list it once.
+	seen := map[string]bool{}
+	for _, i := range in {
+		seen[i.EntityID] = true
+	}
+	for _, id := range []string{m.coldEnt, m.hotEnt} {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			in = append(in, modules.InputSpec{EntityID: id})
+		}
 	}
 	return in
 }
@@ -514,6 +522,12 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		m.bootAt = u.Time
 	}
 	r := reading{v: u.Value, ok: u.Available, at: u.Time, seen: true}
+	if u.EntityID == m.coldEnt { // not exclusive: by default it is also the outdoor sensor
+		m.cold = r
+		if u.EntityID != m.outEnt && u.EntityID != m.hotEnt {
+			return m.publishAll(u.Time, false)
+		}
+	}
 	switch u.EntityID {
 	case m.tempEnt:
 		m.advance(u.Time)
@@ -523,8 +537,6 @@ func (m *Module) OnStateUpdate(u modules.StateUpdate) []modules.OutputUpdate {
 		} else {
 			m.t.ok, m.t.at, m.t.seen = false, u.Time, true
 		}
-	case m.shedEnt:
-		m.shed = r
 	case m.hotEnt:
 		m.hot = r
 	case m.outEnt:
@@ -776,7 +788,7 @@ func (m *Module) publishAll(now time.Time, force bool) []modules.OutputUpdate {
 	attrs := map[string]any{"reason": reason, "mode": m.modeString(), "armed_key": m.armedKey, "armed_live": m.armedLive(),
 		"would_state": would, "plug": m.plugState, "power_w": round(m.powerW(), 1), "believed_on": m.x.on,
 		"on_window_ends": m.fmtT(m.x.windowEnd), "min_on_until": m.fmtT(m.x.minOnEnd), "try": m.x.tries, "failed": m.x.failed,
-		"temp_c": m.tempAttr(), "shed_temp_c": m.shedAttr(), "silent": !m.tempFresh(now), "desire_kind": m.x.desired.Kind,
+		"temp_c": m.tempAttr(), "cold_surface_c": m.coldAttr(), "silent": !m.tempFresh(now), "desire_kind": m.x.desired.Kind,
 		"last_command": m.x.last.Cmd, "last_command_result": m.x.last.Result, "last_error": m.x.last.Err,
 		"max_c": m.p.MaxC, "target_c": m.p.TargetC, "floor_c": m.p.FloorC, "backstop_c": m.backstop,
 		"deadman_postponed_at": m.fmtT(m.x.deadmanOK), "hot_spot_c": m.hotAttr(now), "alarms": m.activeAlarms()}
@@ -850,11 +862,11 @@ func (m *Module) activeAlarms() []string {
 	return out
 }
 
-func (m *Module) shedAttr() any {
-	if !m.shed.ok {
+func (m *Module) coldAttr() any {
+	if !m.cold.ok {
 		return nil
 	}
-	return round(m.shed.v, 2)
+	return round(m.cold.v, 2)
 }
 
 func (m *Module) modelOutput(now time.Time) modules.OutputUpdate {
@@ -913,7 +925,7 @@ func (m *Module) humidityOutputs(now time.Time) (modules.OutputUpdate, modules.O
 	ref := RHAt(T, rh, m.rhRef)
 	attrs := map[string]any{"rh_raw_percent": round(rh, 1), "rh_at_reference_percent": round(ref, 1), "reference_c": m.rhRef,
 		"dew_point_c": round(dew, 2), "abs_humidity_g_m3": round(AbsHumidity(T, rh), 2), "storage_temp_c": round(T, 2),
-		"shed_temp_c": m.shedAttr(), "alarm_dry": m.alarms["dry"] != nil && m.alarms["dry"].Active,
+		"cold_surface_c": m.coldAttr(), "alarm_dry": m.alarms["dry"] != nil && m.alarms["dry"].Active,
 		"alarm_wet": m.alarms["wet"] != nil && m.alarms["wet"].Active, "alarm_condensation": m.alarms["cond"] != nil && m.alarms["cond"].Active,
 		"low_percent": m.rhLow, "high_percent": m.rhHi,
 		"note": "RH at reference is the RH this air would show at the reference temperature; raw RH is only the display value"}
@@ -959,12 +971,12 @@ func (m *Module) alarmsTick(now time.Time) {
 	f, c = get("wet").step(ready && ref > m.rhHi, now, 6*time.Hour)
 	fire("wet", f, c, "Dahlia storage too humid", fmt.Sprintf("Humidity at %.0f C reference has been above %.0f %% for 6 h (now %.0f %%, raw %.0f %%): ventilate.", m.rhRef, m.rhHi, ref, m.hum.v), fmt.Sprintf("Humidity at reference is back to %.0f %%.", ref))
 	cond, dew := false, 0.0
-	if ready && m.shed.ok && now.Sub(m.shed.at) <= 3*time.Hour {
+	if ready && m.cold.ok && now.Sub(m.cold.at) <= 3*time.Hour {
 		dew = DewPoint(m.t.v, m.hum.v)
-		cond = m.shed.v <= dew+0.5
+		cond = m.cold.v <= dew+0.5
 	}
 	f, c = get("cond").step(cond, now, time.Hour)
-	fire("cond", f, c, "Dahlia storage: condensation risk", fmt.Sprintf("The shed air (%.1f C) has been within 0.5 C of the storage dew point (%.1f C) for 1 h: moisture may condense on cold surfaces. Check the lid and the cold side for droplets.", m.shed.v, dew), "The shed air is clear of the storage dew point again.")
+	fire("cond", f, c, "Dahlia storage: condensation risk", fmt.Sprintf("The cold-surface proxy (%.1f C) has been within 0.5 C of the storage dew point (%.1f C) for 1 h: moisture may condense on cold surfaces. Check the lid and the cold side for droplets.", m.cold.v, dew), "The cold-surface proxy is clear of the storage dew point again.")
 }
 
 // alert pushes and logs, only while armed and live.

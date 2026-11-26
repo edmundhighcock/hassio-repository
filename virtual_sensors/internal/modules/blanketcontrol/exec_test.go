@@ -371,24 +371,24 @@ func TestSensorUnavailableIsFailSafe(t *testing.T) {
 
 func TestHotSpotCap(t *testing.T) {
 	// with a hot-spot sensor: the cap uses max(storage, hot spot) each against its own limit
-	r := newRig(t, `{"bc_mode":"live","bc_hot_sensor":"sensor.blanket_hot_spot"}`, true)
-	if r.m.hotEnt != "blanket_hot_spot" || r.m.hotMax != 8 || r.m.hotAlarm != 10 {
+	r := newRig(t, `{"bc_mode":"live","bc_hot_sensor":"sensor.tool_shed_temperature"}`, true)
+	if r.m.hotEnt != "tool_shed_temperature" || r.m.hotMax != 8 || r.m.hotAlarm != 10 {
 		t.Fatalf("hot config %q %v %v", r.m.hotEnt, r.m.hotMax, r.m.hotAlarm)
 	}
 	found := false
 	for _, in := range r.m.Inputs() {
-		found = found || in.EntityID == "blanket_hot_spot"
+		found = found || in.EntityID == "tool_shed_temperature"
 	}
 	if !found {
 		t.Fatal("hot-spot sensor is not an input")
 	}
-	r.sendNum("blanket_hot_spot", 7.0) // below its 8 C cap: heating proceeds
+	r.sendNum("tool_shed_temperature", 7.0) // below its 8 C cap: heating proceeds
 	r.run(5 * time.Minute)
 	if st, _ := r.state(); st != "on" {
 		t.Fatalf("state %s", st)
 	}
 	mk := r.mark()
-	r.sendNum("blanket_hot_spot", 8.2) // storage is cold (4.6) but the hot spot is over its cap
+	r.sendNum("tool_shed_temperature", 8.2) // storage is cold (4.6) but the hot spot is over its cap
 	r.run(time.Minute)
 	cs := r.protocol(mk)
 	if len(cs) != 1 || cs[0].Service != "turn_off" {
@@ -397,23 +397,23 @@ func TestHotSpotCap(t *testing.T) {
 	if _, a := r.state(); !strings.Contains(a["reason"].(string), "hot spot") {
 		t.Fatalf("reason %v", a["reason"])
 	}
-	r.sendNum("blanket_hot_spot", 6.0)
+	r.sendNum("tool_shed_temperature", 6.0)
 	r.run(10 * time.Minute)
 	if st, _ := r.state(); st != "on" {
 		t.Fatalf("did not resume: %s", st)
 	}
 	// without the sensor configured the same reading is ignored
 	r2 := liveRig(t)
-	r2.sendNum("blanket_hot_spot", 9.0)
+	r2.sendNum("tool_shed_temperature", 9.0)
 	r2.run(5 * time.Minute)
 	if st, _ := r2.state(); st != "on" {
 		t.Fatalf("unconfigured hot spot affected it: %s", st)
 	}
 	// the floor and backstop still use the storage sensor: a hot spot at 7 never blocks the backstop
-	r3 := newRig(t, `{"bc_mode":"live","bc_hot_sensor":"blanket_hot_spot"}`, true)
+	r3 := newRig(t, `{"bc_mode":"live","bc_hot_sensor":"tool_shed_temperature"}`, true)
 	r3.tVal = 2.9
 	r3.sendT()
-	r3.sendNum("blanket_hot_spot", 7.9)
+	r3.sendNum("tool_shed_temperature", 7.9)
 	r3.run(5 * time.Minute)
 	if st, _ := r3.state(); st != "on" && st != "backstop" {
 		t.Fatalf("state %s", st)

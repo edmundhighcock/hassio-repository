@@ -784,6 +784,151 @@ module inert), `ps_switch` (default `switch.tool_shed_lights`), `ps_off_hours`
 turn_off`, `... on period start -> turn_on`, `... manual on during off period
 -> override until HH:MM`, `... override ended`.
 
+## Dahlia blanket controller (`blanket_control`, 0.7.0)
+
+Keeps dahlia tubers in winter storage (an unheated tool shed) between a floor
+and a HARD maximum with a ~70 W electric blanket, at minimum cost. Enable it
+by adding `blanket_control` to `modules`. **SHADOW by default**: it commands
+anything only with `bc_mode: live` AND `input_boolean.blanket_controller_armed`
+on (two keys). With either off it publishes what it would do and sends no
+command (the one service it calls then is the read-only
+`weather.get_forecasts`; Start now pressed while not armed and live does
+nothing and says so in a push and the Logbook). Alarms (below) push only
+while armed and live.
+
+**Temperatures** (guidance is trade practice, not a measurement of this box:
+tubers keep at 4-10 C overall, aim 5-7 C, never warm; warmer is NOT safer,
+above about 10 C they sprout and rot, which is worse than 3 C). The defaults
+are lower here because the sensor, `sensor.dahlia_storage_temperature`,
+sits in the air gap ON TOP of the tubers, the coolest part of the box, and
+the tubers nearest the blanket can be several degrees warmer; it measures
+air, not tubers. `bc_floor_c` 4.0 (planner floor), `bc_target_c` 4.5 (aim for
+4-4.5; lower is cheaper and kinder to humidity), `bc_backstop_c` 3.0 (heat
+regardless of price at or below it, latched until +0.5 C), `bc_max_c` 6.0,
+`bc_alarm_high_c` 8.0. **The hard cap `bc_max_c`: never heat at or above
+it.** It overrides the planner, the backstop (a latched backstop does not
+heat above it), the fail-safe, the minimum on-block (the blanket is switched
+off at once) and Start now.
+
+**Optional hot-spot sensor** `bc_hot_sensor` (default empty): a second sensor
+taped to the plastic where the blanket touches it, e.g.
+`bc_hot_sensor: sensor.tool_shed_temperature` once that sensor sits inside
+the box against the plastic opposite the blanket. When configured and fresh,
+the cap and the high alarm also use it against their own limits
+(`bc_hot_max_c` 8.0, `bc_hot_alarm_c` 10.0); the floor, the backstop and the
+plan still use the storage sensor. Without it nothing changes. The module
+never treats `sensor.tool_shed_temperature` as shed air.
+
+### The plant and the actuation protocol (why)
+
+The blanket has one push button that TOGGLES it; it starts OFF whenever its
+power is restored; it switches itself OFF 3 h after being turned on; and it
+has its own thermostat, so it can draw 0 W while logically on. A SwitchBot
+Bot (`switch.dahlia_blanket_bot`; `switch.turn_on` = one press) presses the
+button over Bluetooth at the edge of range: a press shows on the plug
+(`switch.tool_shed_heater`, power `sensor.tool_shed_heater_power`) 8-125 s
+later (median ~23 s), a press that does not get through is lost (not queued),
+a delayed press can land late and toggle again, and the Bot's
+`last_run_success` is unreliable and never used. Each press costs battery.
+
+So every ON is a **start**: plug off, wait 10 s, plug on, wait 5 s, press
+once, wait up to `bc_confirm_s` (150) for power above `bc_on_watts` (30),
+read after the plug came back on. Starting from a power cycle means a press
+can only turn the blanket ON, never toggle it off. A lost press is retried
+by repeating the WHOLE start (cycle plus press), never by a bare second
+press; at most `bc_start_tries` (3), then **FAILED**: one push plus a
+Logbook entry, a full start (one try) every 10 min while heat is wanted, and
+one push on recovery. OFF is just the plug off. While on, 0 W does NOT mean
+off (thermostat), so it is ignored, with two exceptions: within 5 min of a
+confirmed start a fall below the threshold means a delayed press landed and
+toggled it, so the start is run again; and the plug going `off` or
+`unavailable` (power loss, someone) means the blanket is off, so a start is
+run if heat is wanted. The blanket is assumed on for 2 h 50 after a
+confirmed start; before then (5 min earlier) a refresh start (cycle plus
+press) runs if heat is still wanted, so its 3 h cut-off never bites. A start
+that is a window longer is never counted twice. Commands are idempotent and
+go through the host's normal service-call path with outcome feedback (a
+plug command that fails or times out aborts the attempt and the whole start
+is repeated after 30 s; a press whose call times out is not trusted either
+way, power decides).
+
+Minimising presses: `bc_min_on_min` (60) minimum on-block (a block is
+extended over refreshes), `bc_max_starts_day` (12, refreshes and retries
+included) planned starts per local day; the planner respects both, the frost
+backstop and the sensor fail-safe may exceed the cap. `starts_today` counts
+whole starts begun, `presses_today` the presses sent.
+
+### Planner and model
+
+A 15-minute slot dynamic programme over the price horizon (24-36 h, like
+`hp_control`: its 1R1C `Model` and grid DP, `planner.Config.AllInOre`
+prices, Nordpool parsing, the SMHI forecast fetched with
+`weather.get_forecasts` through `hp_control`'s parser) over the storage
+temperature: `dT/dt = -U (T - Tout) + H u + G`, `u` the draw as a fraction
+of `bc_power_w`. States carry the on-run age, so the DP knows the minimum
+on-block and the 2 h 45 refresh (a start with a cost); the per-day start
+budget is met by raising the start penalty of an over-budget day until the
+plan fits (flag `start_budget_binds` if the floor then suffers). Costs:
+price x energy, `bc_start_penalty_kr` (0.3) per start so blocks are long,
+a small penalty above the target, and 1000 kr per degC below the planning
+floor (floor + margin). Heating is **never planned at or above `bc_max_c`**,
+and its benefit is **capped at `bc_max_c`** (assumption: the blanket's
+thermostat and the cap stop the temperature there; heating never lowers the
+off result). The model is fitted online (windowed ridge least squares on
+1 h differences of the last 5 days, toward the defaults U 0.30/h, H 1.5 K/h,
+G 0; conservative: a leakier shed and weaker blanket than likely); with
+fewer than 24 rows it stays at the defaults. `sensor.blanket_model` publishes
+U, H, G, the 1 h-ahead error (MAE, bias, n) and the margin, which is
+`max(0.5, 2 x MAE)` capped at 2 C, added to the floor.
+
+Fail-safes: temperature at or below the backstop: heat regardless of price.
+Sensor silent for more than 2 h, unavailable, or never heard (after 10 min):
+heat, but only while the last known reading is below `bc_target_c`, and
+never more than one on-window without a fresh reading. Without prices or an
+outdoor temperature: hysteresis, on below floor + 1 C until floor + 1.5 C,
+never off below the floor. A reading below the floor always heats.
+
+### Entities
+
+`sensor.blanket_controller_state`: `disarmed` (the armed switch is off),
+`shadow`, `off`, `starting(try n)`, `on`, `failed`, `backstop`; attribute
+`reason`, plus `would_state`, the temperatures, plug and power, alarms.
+`sensor.blanket_plan` (planned kWh next 24 h; attribute `slots` as
+`[start, on, price_kr_per_kwh, t_pred]`), `sensor.blanket_model`,
+`sensor.blanket_presses_today`, `sensor.blanket_starts_today`,
+`sensor.blanket_cost_today`, `sensor.blanket_cost_month` (measured power at
+the all-in price), `sensor.blanket_last_start`, `sensor.blanket_humidity`,
+`sensor.blanket_dew_point`; buttons `button.blanket_replan` and
+`button.blanket_start_now` (a start through the full protocol, only while
+armed and live, never at the cap; the block then follows the minimum on-block
+and the plan).
+
+Dead-man: while armed, live and healthy (link up, not FAILED) it calls
+`timer.start` on `timer.blanket_deadman` with `00:31:00` at once on arm and
+every 30 min (retry after 90 s on failure); the Home Assistant side owns the
+fallback when it runs out. It stops while FAILED, deliberately.
+
+### Humidity (monitor only)
+
+Inputs `sensor.dahlia_storage_humidity` (RH %) with the storage temperature.
+Published: dew point, absolute humidity (Magnus), and **RH at reference**,
+the RH the same air would show at `bc_rh_ref_c` (5.0 C); raw RH falls about
+5-6 points per degree of heating with no moisture lost, so alarms never use
+it (it stays as an attribute). Each alarm pushes once per episode with a
+Logbook entry and pushes again on recovery: **condensation risk** (the
+cold-surface proxy, `bc_cold_surface_sensor`, default
+`sensor.outdoor_temperature_best`, at or below the storage dew point + 0.5 C
+for 1 h: moisture may condense on cold surfaces, check the lid and the cold
+side for droplets), **wet** (RH at reference above `bc_rh_high` 95 for 6 h:
+ventilate), **dry** (below `bc_rh_low` 60 for 6 h: mist the tubers). Also: a
+push if the storage temperature stays above `bc_alarm_high_c` (or the hot spot
+above `bc_hot_alarm_c`) for 30 min, and if it stays below the backstop for
+30 min while heating (heating is failing to keep up).
+
+**Options**: all optional, see `config.yaml` (`bc_*`; prices share
+`hwc_price_entity`, `hwc_price_adder_ore`, `hwc_vat_factor`). Existing saved
+options start unchanged.
+
 ## MQTT discovery
 
 Discovery configs are published retained to
@@ -814,7 +959,7 @@ Each planner module publishes one `button` entity (discovery topic
 `virtual_sensors/<object_id>/press`, payload `PRESS`, shared availability):
 `button.replan_hot_water` (hot_water_control), `button.replan_ev`
 (ev_control), `button.replan_heat_pump` (hp_control), `button.replan_price_shed`
-(price_shed, 0.6.9). Pressing one calls that
+(price_shed, 0.6.9), `button.blanket_replan` and `button.blanket_start_now` (blanket_control, 0.7.0). Pressing one calls that
 module's replan immediately instead of waiting for the 1/15 min timer and logs
 `hot_water_control: replan requested (button)` (likewise `ev_control`,
 `hp_control`). No helper YAML is needed. A press with no prices, no session or

@@ -248,3 +248,96 @@ configuration:
   hwc_test_off_min:
     name: "Test OFF length (min)"
     description: "How long a test move holds OFF before switching ON. Default 10."
+  bc_mode:
+    name: "Blanket mode"
+    description: "Default shadow. Live also needs input_boolean.blanket_controller_armed on (two keys). Shadow publishes what it would do and sends no command."
+  bc_floor_c:
+    name: "Blanket: floor (C)"
+    description: "The planner keeps the storage temperature at or above this. Default 4.0."
+  bc_backstop_c:
+    name: "Blanket: frost backstop (C)"
+    description: "At or below this the blanket heats regardless of price and start cap. Default 3.0."
+  bc_target_c:
+    name: "Blanket: target (C)"
+    description: "The planner aims for the floor-to-target band; lower is cheaper and kinder to humidity. Default 4.5."
+  bc_max_c:
+    name: "Blanket: hard maximum (C)"
+    description: "Never heat at or above this storage temperature. Overrides the planner, the backstop, the fail-safe and Start now. Default 6.0."
+  bc_alarm_high_c:
+    name: "Blanket: too-warm alarm (C)"
+    description: "Push and Logbook if the storage temperature stays above this for 30 min. Default 8.0."
+  bc_hot_sensor:
+    name: "Blanket: hot-spot sensor (optional)"
+    description: "Entity id of a sensor taped where the blanket touches the plastic. Empty (default) = none. When set and fresh, the cap and the too-warm alarm also use it."
+  bc_hot_max_c:
+    name: "Blanket: hot-spot maximum (C)"
+    description: "Never heat while the hot-spot sensor reads at or above this. Default 8.0."
+  bc_hot_alarm_c:
+    name: "Blanket: hot-spot alarm (C)"
+    description: "Too-warm alarm if the hot spot stays above this for 30 min. Default 10.0."
+  bc_confirm_s:
+    name: "Blanket: start confirm wait (s)"
+    description: "How long to wait for power after a press before the start counts as lost. Default 150."
+  bc_on_watts:
+    name: "Blanket: on threshold (W)"
+    description: "Power above this confirms the blanket is on. Default 30."
+  bc_start_tries:
+    name: "Blanket: start tries"
+    description: "Full starts (plug cycle plus press) before FAILED. Default 3."
+  bc_min_on_min:
+    name: "Blanket: minimum on-block (min)"
+    description: "Once started the blanket stays on at least this long (the hard cap still wins). Default 60."
+  bc_max_starts_day:
+    name: "Blanket: maximum starts per day"
+    description: "Planned starts (refreshes included) per local day; the frost backstop and fail-safe may exceed it. Default 12."
+  bc_notify_service:
+    name: "Blanket: notify service"
+    description: "Default notify.mobile_app_edmund15max."
+  bc_power_w:
+    name: "Blanket: heating power (W)"
+    description: "Used for planned energy cost. Default 70."
+  bc_start_penalty_kr:
+    name: "Blanket: start penalty (kr)"
+    description: "Planner cost per start (battery wear), which makes blocks long. Default 0.3."
+  bc_model_u:
+    name: "Blanket model: loss coefficient (1/h)"
+    description: "Starting value; refitted online. Default 0.30 (conservative: leaky)."
+  bc_model_h:
+    name: "Blanket model: heating rate (K/h)"
+    description: "Starting value at full draw; refitted online. Default 1.5."
+  bc_model_g:
+    name: "Blanket model: gain (K/h)"
+    description: "Starting value of the heat gain with the blanket off; refitted online. Default 0."
+  bc_forecast_entity:
+    name: "Blanket: forecast entity"
+    description: "Default weather.smhi_home; empty disables the forecast."
+  bc_temp_entity:
+    name: "Blanket: storage temperature sensor"
+    description: "Default sensor.dahlia_storage_temperature."
+  bc_cold_surface_sensor:
+    name: "Blanket: cold-surface proxy sensor"
+    description: "Condensation alarm: fires when this temperature is within 0.5 C of the storage dew point for 1 h. Default sensor.outdoor_temperature_best."
+  bc_humidity_entity:
+    name: "Blanket: storage humidity sensor"
+    description: "Default sensor.dahlia_storage_humidity."
+  bc_outdoor_entity:
+    name: "Blanket: outdoor temperature sensor"
+    description: "Default sensor.outdoor_temperature_best."
+  bc_power_entity:
+    name: "Blanket: plug power sensor (W)"
+    description: "Default sensor.tool_shed_heater_power."
+  bc_plug_entity:
+    name: "Blanket: plug switch"
+    description: "Default switch.tool_shed_heater."
+  bc_bot_entity:
+    name: "Blanket: SwitchBot Bot switch"
+    description: "switch.turn_on presses the button once. Default switch.dahlia_blanket_bot."
+  bc_rh_ref_c:
+    name: "Blanket: humidity reference temperature (C)"
+    description: "Alarms use the RH the same air would show at this temperature. Default 5.0."
+  bc_rh_low:
+    name: "Blanket: too-dry alarm (% RH at reference)"
+    description: "Alarm if RH at reference stays below this for 6 h (mist the tubers). Default 60."
+  bc_rh_high:
+    name: "Blanket: too-wet alarm (% RH at reference)"
+    description: "Alarm if RH at reference stays above this for 6 h (ventilate). Default 95."
